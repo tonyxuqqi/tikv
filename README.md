@@ -1,7 +1,7 @@
 ## TiKV is a distributed KV database powered by Rust.
 
 
-[![Build Status](https://travis-ci.org/pingcap/tikv.svg?branch=master)](https://travis-ci.org/pingcap/tikv)
+[![Build Status](https://travis-ci.org/busyjay/tikv.svg?branch=master)](https://travis-ci.org/busyjay/tikv)
 
 
 TiKV is inspired by the design of Google Spanner and HBase, but much simpler (Doesn't depend on any distributed file system).
