@@ -17,6 +17,7 @@ use std::collections::{HashMap, BTreeMap, HashSet};
 use std::vec::Vec;
 use std::collections::Bound::{Excluded, Unbounded};
 use std::sync::{Mutex, mpsc};
+use rand::{self, Rng};
 
 use kvproto::metapb;
 use kvproto::pdpb;
@@ -227,7 +228,9 @@ impl PdClient for TestPdClient {
     }
 
     fn alloc_id(&mut self) -> Result<u64> {
-        self.base_id += 1;
+        // to distinguish when multiple tests run in parallel
+        let mut rng = rand::thread_rng();
+        self.base_id += rng.gen_range(1, 100);
         Ok(self.base_id)
     }
 

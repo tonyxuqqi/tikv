@@ -121,10 +121,12 @@ impl PeerStorage {
             } else {
                 // This is a new region created from another node.
                 // Initialize to 0 so that we can receive a snapshot.
+                println!("region created from another node");
                 self.last_index = 0;
             }
         } else if initialized && hard_state.get_commit() == 0 {
             // How can we enter this condition? Log first and try to find later.
+            println!("peer initialized but hard state commit is 0");
             warn!("peer initialized but hard state commit is 0");
             hard_state.set_commit(RAFT_INIT_LOG_INDEX);
         }

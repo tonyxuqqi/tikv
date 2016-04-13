@@ -54,7 +54,7 @@ impl Default for StateRole {
 pub const INVALID_ID: u64 = 0;
 
 /// Config contains the parameters to start a raft.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Config {
     /// id is the identity of the local raft. ID cannot be 0.
     pub id: u64,
@@ -201,6 +201,11 @@ impl<T: Storage> Raft<T> {
         c.validate().expect("configuration is invalid");
         let rs = store.initial_state().expect("");
         let raft_log = RaftLog::new(store);
+        println!("state: {:?}, ci {} li {} id {}",
+                 rs,
+                 raft_log.committed,
+                 raft_log.last_index(),
+                 c.id);
         let mut peers: &[u64] = &c.peers;
         if rs.conf_state.get_nodes().len() > 0 {
             if peers.len() > 0 {
