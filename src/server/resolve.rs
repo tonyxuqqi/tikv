@@ -15,10 +15,9 @@ use std::sync::{Arc, RwLock};
 use std::boxed::{Box, FnBox};
 use std::net::SocketAddr;
 use std::fmt::{self, Formatter, Display};
-use std::collections::HashMap;
 
 use super::Result;
-use util::{self, HandyRwLock, TryInsertWith};
+use util::{self, HandyRwLock};
 use util::worker::{Runnable, Worker};
 use pd::PdClient;
 
@@ -45,7 +44,6 @@ impl Display for Task {
 pub struct Runner<T: PdClient> {
     cluster_id: u64,
     pd_client: Arc<RwLock<T>>,
-    store_addrs: HashMap<u64, String>,
 }
 
 impl<T: PdClient> Runner<T> {
@@ -55,19 +53,19 @@ impl<T: PdClient> Runner<T> {
         // If we use docker and use host for store address, the real IP
         // may be changed after service restarts, so here we just cache
         // pd result and use to_socket_addr to get real socket address.
-        let sock = try!(util::to_socket_addr(addr));
+        let sock = try!(util::to_socket_addr(&*addr));
         Ok(sock)
     }
 
-    fn get_address(&mut self, store_id: u64) -> Result<&str> {
-        // TODO: do we need re-update the cache sometimes?
-        // Store address may be changed?
+    fn get_address(&mut self, store_id: u64) -> Result<String> {
         let pd_client = self.pd_client.clone();
         let cluster_id = self.cluster_id;
-        let s = try!(self.store_addrs.entry(store_id).or_try_insert_with(|| {
-            pd_client.rl()
+        let s = try!(pd_client.rl()
                      .get_store(cluster_id, store_id)
                      .and_then(|s| {
+                         if cluster_id == 5 {
+                             println!("get store: {:?}", s);
+                         }
                          let addr = s.get_address().to_owned();
                          // In some tests, we use empty address for store first,
                          // so we should ignore here.
@@ -76,8 +74,7 @@ impl<T: PdClient> Runner<T> {
                              return Err(box_err!("invalid empty address for store {}", store_id));
                          }
                          Ok(addr)
-                     })
-        }));
+                     }));
 
         Ok(s)
     }
@@ -87,6 +84,9 @@ impl<T: PdClient> Runnable<Task> for Runner<T> {
     fn run(&mut self, task: Task) {
         let store_id = task.store_id;
         let resp = self.resolve(store_id);
+        if self.cluster_id == 5 {
+            println!("resolve {} as {:?}", store_id, resp);
+        }
         task.cb.call_box((resp,))
     }
 }
@@ -106,7 +106,6 @@ impl PdStoreAddrResolver {
         let runner = Runner {
             cluster_id: cluster_id,
             pd_client: pd_client,
-            store_addrs: HashMap::new(),
         };
         box_try!(r.worker.start(runner));
         Ok(r)

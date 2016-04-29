@@ -100,10 +100,15 @@ fn test_multi_cluster_restart<T: Simulator>(cluster: &mut Cluster<T>) {
 
     assert_eq!(cluster.get(key), None);
     cluster.must_put(key, value);
-
+    
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
     cluster.shutdown();
+    
+    if cluster.id() == 5 {
+        println!("shutdown finished..")
+    }
+
     cluster.start();
 
     assert_eq!(cluster.get(key), Some(value.to_vec()));

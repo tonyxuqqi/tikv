@@ -477,6 +477,9 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
         let token = match self.connect_store(event_loop, store_id, sock_addr) {
             Ok(token) => token,
             Err(e) => {
+                if self.cluster_id == 5 {
+                    println!("failed to connect store: {:?}", e);
+                }
                 self.report_unreachable(data);
                 error!("connect store {} err {:?}", store_id, e);
                 return;

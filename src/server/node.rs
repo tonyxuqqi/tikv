@@ -106,6 +106,9 @@ impl<T, Trans> Node<T, Trans>
                  .write()
                  .unwrap()
                  .put_store(self.cluster_id, self.store.clone()));
+        if self.cluster_id == 5 {
+            println!("notifying pd for {:?}", self.store);
+        }
         Ok(())
     }
 

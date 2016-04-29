@@ -120,7 +120,7 @@ impl Simulator for ServerCluster {
         let listener = bind(&cfg.addr).unwrap();
         let addr = listener.local_addr().unwrap();
         cfg.addr = format!("{}", addr);
-
+        
         let simulate_trans = Arc::new(RwLock::new(SimulateTransport::new(cfg.cluster_id, strategy, trans.clone())));
         let mut node = Node::new(&cfg, self.pd_client.clone(), simulate_trans.clone());
 
@@ -129,6 +129,10 @@ impl Simulator for ServerCluster {
 
         assert!(node_id == 0 || node_id == node.id());
         let node_id = node.id();
+
+        if cfg.cluster_id == 5 {
+            println!("addr for {} is {}", node_id, cfg.addr);
+        }
 
         self.sim_trans.insert(node_id, simulate_trans);
         let store = create_raft_storage(node, engine).unwrap();
