@@ -67,12 +67,13 @@ impl Filter for FilterDelay {
 }
 
 pub struct SimulateTransport<T: Transport> {
+    cluster_id: u64,
     filters: Vec<RwLock<Box<Filter>>>,
     trans: Arc<RwLock<T>>,
 }
 
 impl<T: Transport> SimulateTransport<T> {
-    pub fn new(strategy: Vec<Strategy>, trans: Arc<RwLock<T>>) -> SimulateTransport<T> {
+    pub fn new(cluster_id: u64, strategy: Vec<Strategy>, trans: Arc<RwLock<T>>) -> SimulateTransport<T> {
         let mut filters: Vec<RwLock<Box<Filter>>> = vec![];
         for s in strategy {
             match s {
@@ -89,6 +90,7 @@ impl<T: Transport> SimulateTransport<T> {
         }
 
         SimulateTransport {
+            cluster_id: cluster_id,
             filters: filters,
             trans: trans,
         }
@@ -101,6 +103,9 @@ impl<T: Transport> SimulateTransport<T> {
 
 impl<T: Transport> Transport for SimulateTransport<T> {
     fn send(&self, msg: RaftMessage) -> Result<()> {
+        if self.cluster_id == 5 {
+            println!("sending message {:?}", msg);
+        }
         let mut discard = false;
         for strategy in &self.filters {
             if strategy.wl().before(&msg) {
@@ -110,7 +115,14 @@ impl<T: Transport> Transport for SimulateTransport<T> {
 
         let mut res = Ok(());
         if !discard {
+            if self.cluster_id == 5 {
+                println!("done");
+            }
             res = self.trans.rl().send(msg);
+        } else {
+        if self.cluster_id == 5 {
+            println!("discard");
+        }
         }
 
         for strategy in self.filters.iter().rev() {

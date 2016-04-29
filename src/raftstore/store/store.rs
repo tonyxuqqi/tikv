@@ -240,11 +240,13 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         let region_id = msg.get_region_id();
         let from = msg.take_from_peer();
         let to = msg.take_to_peer();
-        debug!("handle raft message {:?} for region {}, from {} to {}",
+        if self.cluster_meta.get_id() == 5 {
+            println!("handle raft message {:?} for region {}, from {} to {}",
                msg.get_message().get_msg_type(),
                region_id,
                from.get_id(),
                to.get_id());
+        }
 
         if !msg.has_region_epoch() {
             error!("missing epoch in raft message, ignore it");

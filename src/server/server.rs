@@ -54,6 +54,7 @@ pub fn bind(addr: &str) -> Result<TcpListener> {
 }
 
 pub struct Server<T: RaftStoreRouter + 'static, S: StoreAddrResolver> {
+    cluster_id: u64,
     listener: TcpListener,
     // We use HashMap instead of common use mio slab to avoid token reusing.
     // In our raft server, a client with token 1 sends a raft command, we will
@@ -86,7 +87,7 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
     // address in Node before creating the Server, so we first
     // create the listener outer, get the real listening address for
     // Node and then pass it here.
-    pub fn new(event_loop: &mut EventLoop<Self>,
+    pub fn new(cluster_id: u64, event_loop: &mut EventLoop<Self>,
                listener: TcpListener,
                storage: Storage,
                raft_router: Arc<RwLock<T>>,
@@ -103,6 +104,7 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
         let end_point = EndPointHost::new(engine, sendch.clone());
 
         let svr = Server {
+            cluster_id: cluster_id,
             listener: listener,
             sendch: sendch,
             conns: HashMap::new(),
@@ -294,6 +296,10 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
             token => {
                 if let Err(e) = self.on_conn_readable(event_loop, token) {
                     warn!("handle read conn for token {:?} err {:?}, remove", token, e);
+                    
+            /*if self.cluster_id == 5 {
+                println!("remove token for readable {:?} {:?}", e, token);
+            }*/
                     self.remove_conn(event_loop, token);
                 }
             }
@@ -312,6 +318,10 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
 
         if let Err(e) = res {
             warn!("handle write conn err {:?}, remove", e);
+            
+            /*if self.cluster_id == 5 {
+                println!("remove token for write error {:?} {:?}", e, token);
+            }*/
             self.remove_conn(event_loop, token);
         }
     }
@@ -331,6 +341,10 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
 
         if let Err(e) = res {
             warn!("handle write data err {:?}, remove", e);
+            
+            /*if self.cluster_id == 5 {
+                println!("remove token for write data {:?} {:?}", e, token);
+            }*/
             self.remove_conn(event_loop, token);
         }
     }
@@ -357,6 +371,9 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
         }
 
         let token = try!(self.try_connect(event_loop, sock_addr, Some(store_id)));
+        /*if self.cluster_id == 5 {
+            println!("adding token {:?}", token);
+        }*/
         self.store_tokens.insert(store_id, token);
         Ok(token)
     }
@@ -405,6 +422,9 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
 
         // No connection, try to resolve it.
         if self.store_resolving.contains(&store_id) {
+            /*if self.cluster_id == 5 {
+                println!("droping msg for {}", store_id);
+            }*/
             // If we are resolving the address, drop the message here.
             debug!("store {} address is being resolved, drop msg {}",
                    store_id,
@@ -516,6 +536,9 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Handler for Server<T, S> {
 
     fn ready(&mut self, event_loop: &mut EventLoop<Self>, token: Token, events: EventSet) {
         if events.is_hup() || events.is_error() {
+            /*if self.cluster_id == 5 {
+                println!("remove token for hup {:?} {:?}", events, token);
+            }*/
             self.remove_conn(event_loop, token);
             return;
         }
@@ -670,7 +693,7 @@ mod tests {
 
         let mut event_loop = create_event_loop().unwrap();
         let (tx, rx) = mpsc::channel();
-        let mut server = Server::new(&mut event_loop,
+        let mut server = Server::new(0, &mut event_loop,
                                      listener,
                                      Storage::new(Dsn::Memory).unwrap(),
                                      Arc::new(RwLock::new(TestRaftStoreRouter {

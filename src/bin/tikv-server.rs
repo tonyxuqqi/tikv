@@ -114,7 +114,7 @@ fn get_store_path(matches: &Matches) -> String {
 fn run_local_server(listener: TcpListener, store: Storage) {
     let mut event_loop = create_event_loop().unwrap();
     let router = Arc::new(RwLock::new(MockRaftStoreRouter));
-    let mut svr = Server::new(&mut event_loop,
+    let mut svr = Server::new(0, &mut event_loop,
                               listener,
                               store,
                               router,
@@ -140,7 +140,7 @@ fn run_raft_server(listener: TcpListener, matches: &Matches) {
                                             format!("{}", listener.local_addr().unwrap()),
                                             pd_client);
 
-    let mut svr = Server::new(&mut event_loop, listener, store, raft_router, resolver).unwrap();
+    let mut svr = Server::new(0, &mut event_loop, listener, store, raft_router, resolver).unwrap();
     svr.run(&mut event_loop).unwrap();
 }
 

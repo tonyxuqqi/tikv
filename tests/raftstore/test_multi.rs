@@ -225,7 +225,8 @@ fn test_multi_node_cluster_restart() {
 #[test]
 fn test_multi_server_cluster_restart() {
     let count = 5;
-    let mut cluster = new_server_cluster(0, count);
+    let mut cluster = new_server_cluster(5, count);
+    cluster.should_print = true;
     test_multi_cluster_restart(&mut cluster)
 }
 

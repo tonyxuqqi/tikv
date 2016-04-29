@@ -121,7 +121,7 @@ impl Simulator for ServerCluster {
         let addr = listener.local_addr().unwrap();
         cfg.addr = format!("{}", addr);
 
-        let simulate_trans = Arc::new(RwLock::new(SimulateTransport::new(strategy, trans.clone())));
+        let simulate_trans = Arc::new(RwLock::new(SimulateTransport::new(cfg.cluster_id, strategy, trans.clone())));
         let mut node = Node::new(&cfg, self.pd_client.clone(), simulate_trans.clone());
 
         node.start(engine.clone()).unwrap();
@@ -133,7 +133,7 @@ impl Simulator for ServerCluster {
         self.sim_trans.insert(node_id, simulate_trans);
         let store = create_raft_storage(node, engine).unwrap();
 
-        let mut server = Server::new(&mut event_loop, listener, store, router, resolver).unwrap();
+        let mut server = Server::new(cfg.cluster_id, &mut event_loop, listener, store, router, resolver).unwrap();
 
         let ch = server.get_sendch();
 
@@ -158,6 +158,7 @@ impl Simulator for ServerCluster {
             .remove(addr);
 
         ch.send(Msg::Quit).unwrap();
+        self.sim_trans.remove(&node_id);
         h.join().unwrap();
     }
 

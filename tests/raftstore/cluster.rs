@@ -16,6 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+use std::time::Instant;
 
 use rocksdb::DB;
 use tempdir::TempDir;
@@ -65,6 +66,7 @@ pub struct Cluster<T: Simulator> {
 
     // node id -> db engine.
     pub engines: HashMap<u64, Arc<DB>>,
+    pub should_print: bool,
 
     sim: Arc<RwLock<T>>,
     pub pd_client: Arc<RwLock<TestPdClient>>,
@@ -83,6 +85,7 @@ impl<T: Simulator> Cluster<T> {
             paths: vec![],
             dbs: vec![],
             engines: HashMap::new(),
+            should_print: false,
             sim: sim,
             pd_client: pd_client,
         };
@@ -190,6 +193,11 @@ impl<T: Simulator> Cluster<T> {
         let peer = new_peer(store_id, 0);
         let find_leader = new_status_request(region_id, peer, new_region_leader_cmd());
         let mut resp = self.call_command(find_leader, Duration::from_secs(3)).unwrap();
+        
+        /*if self.should_print {
+            println!("from {} {:?}", store_id, resp);
+        }*/
+        
         let mut region_leader = resp.take_status_response().take_region_leader();
         // NOTE: node id can't be 0.
         if self.sim.rl().get_node_ids().contains(&region_leader.get_leader().get_store_id()) {
@@ -213,7 +221,7 @@ impl<T: Simulator> Cluster<T> {
         let stores = self.pd_client.rl().get_stores(self.id()).unwrap();
         let node_ids: HashSet<u64> = self.sim.rl().get_node_ids();
         let mut count = 0;
-        while (leader.is_none() || count < node_ids.len()) && retry_cnt > 0 {
+        while (leader.is_none() || count < node_ids.len() / 2 + 1) && retry_cnt > 0 {
             count = 0;
             leader = None;
             for store in &stores {
@@ -232,7 +240,7 @@ impl<T: Simulator> Cluster<T> {
         if let Some(l) = leader {
             self.leaders.insert(region_id, l);
         }
-
+        
         self.leaders.get(&region_id).cloned()
     }
 

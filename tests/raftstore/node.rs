@@ -84,7 +84,7 @@ impl Simulator for NodeCluster {
                 -> u64 {
         assert!(node_id == 0 || !self.nodes.contains_key(&node_id));
 
-        let simulate_trans = SimulateTransport::new(strategy, self.trans.clone());
+        let simulate_trans = SimulateTransport::new(cfg.cluster_id, strategy, self.trans.clone());
         let trans = Arc::new(RwLock::new(simulate_trans));
         let mut node = Node::new(&cfg, self.pd_client.clone(), trans.clone());
 
