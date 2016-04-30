@@ -36,6 +36,10 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     // Now region 1 only has peer (1, 1, 1);
     let (key, value) = (b"a1", b"v1");
 
+    if cluster.id() == 5 {
+        println!("1 put");
+    }
+    
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
@@ -45,6 +49,11 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.change_peer(r1, ConfChangeType::AddNode, new_peer(2, 2));
 
     let (key, value) = (b"a2", b"v2");
+    
+    if cluster.id() == 5 {
+        println!("2 put");
+    }
+    
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
@@ -92,6 +101,11 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.change_peer(r1, ConfChangeType::RemoveNode, new_peer(2, 2));
 
     let (key, value) = (b"a3", b"v3");
+    
+    if cluster.id() == 5 {
+        println!("3 put");
+    }
+    
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer 3 must have v1, v2 and v3
@@ -134,6 +148,11 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
 
     // Force update a2 to check whether peer 2 added ok and received the snapshot.
     let (key, value) = (b"a2", b"v2");
+    
+    if cluster.id() == 5 {
+        println!("4 put");
+    }
+    
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
@@ -152,6 +171,11 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.change_peer(r1, ConfChangeType::RemoveNode, new_peer(3, 3));
 
     let (key, value) = (b"a4", b"v4");
+    
+    if cluster.id() == 5 {
+        println!("5 put");
+    }
+    
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer 4 in store 2 must have v1, v2, v3, v4, we check v1 and v4 here.
@@ -257,7 +281,7 @@ fn test_pd_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
 #[test]
 fn test_node_simple_conf_change() {
     let count = 5;
-    let mut cluster = new_node_cluster(0, count);
+    let mut cluster = new_node_cluster(5, count);
     test_simple_conf_change(&mut cluster);
 }
 
