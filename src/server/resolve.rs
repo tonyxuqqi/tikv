@@ -18,9 +18,9 @@ use std::fmt::{self, Formatter, Display};
 use std::collections::HashMap;
 
 use super::Result;
-use util::{self, HandyRwLock, TryInsertWith};
+use util::{self, HandyRwLock};
 use util::worker::{Runnable, Worker};
-use pd::PdClient;
+use pd::{self, PdClient};
 
 pub type Callback = Box<FnBox(Result<SocketAddr>) + Send>;
 
@@ -55,31 +55,38 @@ impl<T: PdClient> Runner<T> {
         // If we use docker and use host for store address, the real IP
         // may be changed after service restarts, so here we just cache
         // pd result and use to_socket_addr to get real socket address.
-        let sock = try!(util::to_socket_addr(addr));
+        let sock = try!(util::to_socket_addr(&*addr));
         Ok(sock)
     }
 
-    fn get_address(&mut self, store_id: u64) -> Result<&str> {
-        // TODO: do we need re-update the cache sometimes?
-        // Store address may be changed?
-        let pd_client = self.pd_client.clone();
+    fn get_address(&mut self, store_id: u64) -> Result<String> {
         let cluster_id = self.cluster_id;
-        let s = try!(self.store_addrs.entry(store_id).or_try_insert_with(|| {
-            pd_client.rl()
-                     .get_store(cluster_id, store_id)
-                     .and_then(|s| {
-                         let addr = s.get_address().to_owned();
-                         // In some tests, we use empty address for store first,
-                         // so we should ignore here.
-                         // TODO: we may remove this check after we refactor the test.
-                         if addr.len() == 0 {
-                             return Err(box_err!("invalid empty address for store {}", store_id));
-                         }
-                         Ok(addr)
-                     })
-        }));
-
-        Ok(s)
+        let res = self.pd_client
+                      .rl()
+                      .get_store(cluster_id, store_id)
+                      .and_then(|s| {
+                          let addr = s.get_address().to_owned();
+                          // In some tests, we use empty address for store first,
+                          // so we should ignore here.
+                          // TODO: we may remove this check after we refactor the test.
+                          if addr.is_empty() {
+                              return Err(box_err!("invalid empty address for store {}", store_id));
+                          }
+                          Ok(addr)
+                      });
+        match res {
+            Err(e @ pd::Error::Io(_)) |
+            Err(e @ pd::Error::Codec(_)) => {
+                warn!("failed to get latest addr of {} from pd, fallback to cache: {:?}",
+                      store_id,
+                      e);
+                self.store_addrs
+                    .get(&store_id)
+                    .cloned()
+                    .ok_or_else(|| box_err!("no valid address found for {}", store_id))
+            }
+            _ => res.map_err(From::from),
+        }
     }
 }
 
