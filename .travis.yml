@@ -18,10 +18,10 @@ matrix:
       rust: nightly
 
 install:
+  - kcov_dir=$HOME/.cache/kcov
+  - rocksdb_dir=$HOME/.cache/rocksdb
+  - pushd /tmp
   - |
-    kcov_dir=$HOME/.cache/kcov
-    rocksdb_dir=$HOME/.cache/rocksdb
-    pushd /tmp &&
     if [[ "${TRAVIS_OS_NAME}" == 'linux' ]]; then
       if [[ ! -f "$rocksdb_dir/librocksdb.so" ]]; then
           curl -L https://github.com/gflags/gflags/archive/v2.1.2.tar.gz -o gflags.tar.gz &&
@@ -41,8 +41,10 @@ install:
           cp librocksdb.so* $rocksdb_dir;
       fi
     elif [[ "${TRAVIS_OS_NAME}" == 'osx' ]]; then
-      brew install gflags snappy rocksdb;
-    fi &&
+      brew install gflags snappy rocksdb homebrew/dupes/zlib;
+    fi
+  - cd /tmp
+  - |
     if [[ ! -f "$kcov_dir/kcov" ]]; then
         curl -L https://github.com/SimonKagstrom/kcov/archive/v31.tar.gz -o kcov.tar.gz &&
         tar xf kcov.tar.gz &&
@@ -52,9 +54,10 @@ install:
         mkdir -p $kcov_dir &&
         cp src/kcov $kcov_dir/kcov;
     fi
-    popd
+  - popd
 
 script:
   - export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$rocksdb_dir"
   - export LIBRARY_PATH="$LD_LIBRARY_PATH"
-  - ENABLE_FEATURES=default make test
+  - ENABLE_FEATURES=default cargo test --no-run
+  - kcov --verify --coveralls-id=$TRAVIS_JOB_ID --exclude-pattern=/.cargo $kcov_dir/kcov target/debug/tests-*
