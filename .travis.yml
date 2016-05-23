@@ -41,7 +41,9 @@ install:
           cp librocksdb.so* $rocksdb_dir;
       fi
     elif [[ "${TRAVIS_OS_NAME}" == 'osx' ]]; then
-      brew install gflags snappy rocksdb homebrew/dupes/zlib;
+      brew update &&
+      brew install homebrew/dupes/zlib &&
+      brew install gflags snappy rocksdb;
     fi
   - cd /tmp
   - |
