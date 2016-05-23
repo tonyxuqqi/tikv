@@ -62,4 +62,4 @@ script:
   - export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$rocksdb_dir"
   - export LIBRARY_PATH="$LD_LIBRARY_PATH"
   - ENABLE_FEATURES=default cargo test --no-run
-  - $kcov_dir/kcov --verify --coveralls-id=$TRAVIS_JOB_ID --exclude-pattern=/.cargo $kcov_dir/kcov target/debug/tests-*
+  - $kcov_dir/kcov --verify --coveralls-id=$TRAVIS_JOB_ID --exclude-pattern=/.cargo target/kcov target/debug/tests-*
