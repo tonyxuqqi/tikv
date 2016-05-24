@@ -40,7 +40,7 @@ test_linux:
 	export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${ROCKSDB_DIR}" && \
 	export LIBRARY_PATH="${LIBRARY_PATH}:${ROCKSDB_DIR}" && \
 	ulimit -n 2000 && \
-	ENABLE_FEATURES=default make test | tee tests.log
+	ENABLE_FEATURES=default make test 2>&1 | tee tests.log
 
 test_osx:
 	ENABLE_FEATURES=default make test
