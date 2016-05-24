@@ -43,7 +43,7 @@ install:
     elif [[ "${TRAVIS_OS_NAME}" == 'osx' ]]; then
       brew update &&
       brew install homebrew/dupes/zlib &&
-      brew install gflags snappy rocksdb;
+      brew install gflags snappy rocksdb python python3 bash;
     fi
   - cd /tmp
   - |
@@ -63,4 +63,4 @@ script:
   - export LIBRARY_PATH="$LD_LIBRARY_PATH"
   - ENABLE_FEATURES=default cargo test --no-run
   - ulimit -n 2000
-  - $kcov_dir/kcov --verify --debug=15 --coveralls-id=$TRAVIS_JOB_ID --exclude-pattern=/.cargo target/kcov target/debug/tests-*
+  - $kcov_dir/kcov --verify --coveralls-id=$TRAVIS_JOB_ID --exclude-pattern=/.cargo target/kcov target/debug/tests-*
