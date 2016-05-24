@@ -1,7 +1,7 @@
 ## TiKV is a distributed KV database powered by Rust.
 
 
-[![Build Status](https://travis-ci.org/pingcap/tikv.svg?branch=master)](https://travis-ci.org/pingcap/tikv)
+[![Build Status](https://travis-ci.org/pingcap/tikv.svg?branch=master)](https://travis-ci.org/pingcap/tikv) [![Coverage Status](https://coveralls.io/repos/github/pingcap/tikv/badge.svg?branch=master)](https://coveralls.io/github/BusyJay/tikv)
 
 
 TiKV is a Distributed Key-Value Database which mainly refers to the design of Google Spanner and HBase, but much simpler (Don't depend on any distributed file system). We've implemented the Raft consensus algorithm in Rust and stored consensus state in RocksDB. It not only guarantees consistency for data but also makes use of placement driver to implement sharding (split && merge) and data migration automatically. The transaction model is similar to Google's Percolator, and with some performance improvements. In fact, we provide snapshot isolation (SI) and serializable snapshot isolation (SSI), and then externally consistent reads and writes in distributed transactions. Some details can see [Tikv-server software stack](#tikv-server-software-stack). And some primary features list as follow.

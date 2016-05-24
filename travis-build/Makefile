@@ -46,7 +46,6 @@ test_osx:
 	ENABLE_FEATURES=default make test
 
 cover_linux:
-	cat tests.log
 	export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${ROCKSDB_DIR}" && \
 	export LIBRARY_PATH="${LIBRARY_PATH}:${ROCKSDB_DIR}" && \
 	grep " Running " tests.log | sed -e 's/Running//g' | xargs -n 1 ${KCOV_DIR}/kcov --verify --coveralls-id=${TRAVIS_JOB_ID} --include-pattern tikv target/kcov
