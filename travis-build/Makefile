@@ -39,7 +39,7 @@ test_linux:
 	export LIBRARY_PATH="${LIBRARY_PATH}:${ROCKSDB_DIR}" && \
 	ENABLE_FEATURES=default cargo test --no-run && \
 	ulimit -n 2000 && \
-	${KCOV_DIR}/kcov --verify --coveralls-id=${TRAVIS_JOB_ID} --exclude-pattern=tmp target/kcov target/debug/tests-*
+	${KCOV_DIR}/kcov --verify --coveralls-id=${TRAVIS_JOB_ID} --include-pattern '.*/tikv/.*\.rs' target/kcov target/debug/tests-*
 
 test_osx:
 	ENABLE_FEATURES=default make test
