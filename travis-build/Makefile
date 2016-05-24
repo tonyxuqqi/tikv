@@ -1,13 +1,14 @@
-/tmp/gflags-2.1.2/libgflags.so:
+${ROCKSDB_DIR}/libgflags.so:
 	cd /tmp && \
 	curl -L https://github.com/gflags/gflags/archive/v2.1.2.tar.gz -o gflags.tar.gz && \
 	tar xf gflags.tar.gz && \
 	cd gflags-2.1.2 && \
 	cmake . && \
-	make
+	make && \
+	mkdir -p ${ROCKSDB_DIR} && \
+	cp libgflags.so* ${ROCKSDB_DIR}
 
-${ROCKSDB_DIR}/librocksdb.so:
-    ${MAKE} /tmp/gflags-2.1.2/libgflags.so && \
+${ROCKSDB_DIR}/librocksdb.so: ${ROCKSDB_DIR}/libgflags.so
 	export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/tmp/gflags-2.1.2/lib" && \
 	export LIBRARY_PATH="${LIBRARY_PATH}:/tmp/gflags-2.1.2/lib" && \
 	export CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH}:/tmp/gflags-2.1.2/include" && \
