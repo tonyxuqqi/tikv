@@ -7,9 +7,9 @@ ${ROCKSDB_DIR}/libgflags.a:
 	make && \
 	mkdir -p ${ROCKSDB_DIR} && \
 	cp lib/* ${ROCKSDB_DIR} && \
-	cp include ${ROCKSDB_DIR}
+	cp -r include ${ROCKSDB_DIR}
 
-${ROCKSDB_DIR}/librocksdb.so: ${ROCKSDB_DIR}/libgflags.so
+${ROCKSDB_DIR}/librocksdb.so: ${ROCKSDB_DIR}/libgflags.a
 	export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${ROCKSDB_DIR}" && \
 	export LIBRARY_PATH="${LIBRARY_PATH}:${ROCKSDB_DIR}" && \
 	export CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH}:${ROCKSDB_DIR}/include" && \
