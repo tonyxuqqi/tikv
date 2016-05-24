@@ -24,3 +24,6 @@ install:
 
 script:
   - make -f travis-build/Makefile test_${TRAVIS_OS_NAME}
+
+after_success:
+  - make -f travis-build/Makefile cover_${TRAVIS_OS_NAME}
