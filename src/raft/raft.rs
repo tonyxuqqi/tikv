@@ -1351,8 +1351,10 @@ impl<T: Storage> Raft<T> {
     }
 
     pub fn reset_randomized_election_timeout(&mut self) {
-        self.randomized_election_timeout = self.election_timeout +
-                                           rand::thread_rng().gen_range(0, self.election_timeout)
+	    let timeout = self.election_timeout +
+                                           rand::thread_rng().gen_range(0, self.election_timeout);
+	    debug!("{} {}[at {}]reset randomized timeout from {} to {}", self.tag, self.id, self.election_elapsed, self.randomized_election_timeout, timeout);
+        self.randomized_election_timeout = timeout;
     }
 
     // check_quorum_active returns true if the quorum is active from
