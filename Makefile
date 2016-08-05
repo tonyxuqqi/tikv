@@ -26,7 +26,8 @@ release:
 
 test:
 	# Default Mac OSX `ulimit -n` is 256, too small. 
-	ulimit -n 2000 && LOG_LEVEL=DEBUG RUST_BACKTRACE=1 cargo test --features ${ENABLE_FEATURES} -- --nocapture 
+	#ulimit -n 2000 && LOG_LEVEL=DEBUG RUST_BACKTRACE=1 cargo test --features ${ENABLE_FEATURES} -- --nocapture 
+	./test.sh
 
 bench:
 	# Default Mac OSX `ulimit -n` is 256, too small. 
