@@ -2,9 +2,7 @@ sudo: false
 language: rust
 cache:
   directories:
-  - $HOME/.cache/rocksdb
-  - $HOME/.cache/kcov
-  - $HOME/.cache/pd
+  - $HOME/.cache/
 
 matrix:
   include:
@@ -22,14 +20,11 @@ matrix:
       rust: nightly
 
 install:
-  - export KCOV_DIR=$HOME/.cache/kcov
-  - export ROCKSDB_DIR=$HOME/.cache/rocksdb
-  - export PD_DIR=$HOME/.cache/pd
+  - export LOCAL_DIR=$HOME/.cache/
   - make -f travis-build/Makefile prepare_${TRAVIS_OS_NAME}
 
 script:
-  - export PD_DIR=$HOME/.cache/pd
-  - export PATH=${PD_DIR}:${PATH}
+  - export PATH=${LOCAL_DIR}/bin:${PATH}
   - make -f travis-build/Makefile test_${TRAVIS_OS_NAME}
 
 after_success:
