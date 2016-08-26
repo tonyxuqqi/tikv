@@ -40,7 +40,7 @@ ${LOCAL_DIR}/bin/pd-server: prepare_go
 	cd pd && \
 	make build && \
 	mkdir -p ${LOCAL_DIR}/bin && \
-	cp bin/pd-server ${LOCAL_DIR}/bin/
+	cp bin/pd-server ${LOCAL_DIR}/bin/pd-server
 
 prepare_go:
 ifeq ($(TRAVIS_OS_NAME),linux)
@@ -82,3 +82,5 @@ cover_linux:
 	grep " Running " tests.out | sed -e 's/Running//g' | xargs -n 1 -i kcov --verify --coveralls-id=${TRAVIS_JOB_ID} --include-pattern tikv/src --exclude-pattern tikv/src/bin --strip-path `pwd`/ target/kcov {} --nocapture
 
 cover_osx:
+
+.PHONY: prepare_brew prepare_go prepare_rust prepare_linux prepare_osx test_linux test_osx cover_linux cover_osx
