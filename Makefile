@@ -54,7 +54,7 @@ test:
 	export DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH}:${LOCAL_DIR}/lib" && \
 	export LOG_LEVEL=DEBUG && \
 	export RUST_BACKTRACE=1 && \
-	cargo test --features "${ENABLE_FEATURES}" ${NO_RUN} -- --nocapture && \
+	cargo test --features "${ENABLE_FEATURES}" ${NO_RUN} --verbose -- --nocapture && \
 	cargo test --features "${ENABLE_FEATURES}" --bench benches ${NO_RUN} -- --nocapture 
 	# TODO: remove above target once https://github.com/rust-lang/cargo/issues/2984 is resolved.
 
