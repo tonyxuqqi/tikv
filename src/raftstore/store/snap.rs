@@ -917,7 +917,9 @@ impl Snapshot for Snap {
         // write meta file
         let mut v = vec![];
         self.meta_file.meta.write_to_vec(&mut v)?;
-        self.meta_file.file.take().unwrap().write_all(&v[..])?;
+        // there should be at lease 3 cfs
+        assert!(!v.is_empty(), "meta can't be empty");
+        self.meta_file.file.take().unwrap().write_all(&v)?;
         fs::rename(&self.meta_file.tmp_path, &self.meta_file.path)?;
         Ok(())
     }
