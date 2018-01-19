@@ -1243,10 +1243,11 @@ impl Peer {
             return false;
         }
 
-        for progress in status.progress.values() {
-            if progress.state == ProgressState::Snapshot {
-                return false;
-            }
+        let pause_count = status.progress.values().filter(|p| p.state == ProgressState::Snapshot).count();
+        let total_count = status.progress.len();
+        if raft::quorum(total_count) + pause_count > total_count {
+            // Quorum can't vote, skip transfer leader.
+            return false;
         }
 
         let last_index = self.get_store().last_index();
