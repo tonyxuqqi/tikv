@@ -42,13 +42,13 @@ fn test_tombstone<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
-    let engine_2 = cluster.get_engine(2);
+    let engine_2 = cluster.get_kv_db(2);
     must_get_equal(&engine_2, b"k1", b"v1");
 
     // add peer (3, 3) to region 1.
     pd_client.must_add_peer(r1, new_peer(3, 3));
 
-    let engine_3 = cluster.get_engine(3);
+    let engine_3 = cluster.get_kv_db(3);
     must_get_equal(&engine_3, b"k1", b"v1");
 
     // Remove peer (2, 2) from region 1.
@@ -60,7 +60,7 @@ fn test_tombstone<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
-    let engine_2 = cluster.get_engine(2);
+    let engine_2 = cluster.get_kv_db(2);
     must_get_none(&engine_2, b"k1");
     must_get_none(&engine_2, b"k3");
     let mut existing_kvs = vec![];
@@ -140,7 +140,7 @@ fn test_fast_destroy<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.run();
     cluster.must_put(b"k1", b"v1");
 
-    let engine_3 = cluster.get_engine(3);
+    let engine_3 = cluster.get_kv_db(3);
     must_get_equal(&engine_3, b"k1", b"v1");
     // remove peer (3, 3)
     pd_client.must_remove_peer(1, new_peer(3, 3));
@@ -197,13 +197,13 @@ fn test_readd_peer<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
-    let engine_2 = cluster.get_engine(2);
+    let engine_2 = cluster.get_kv_db(2);
     must_get_equal(&engine_2, b"k1", b"v1");
 
     // add peer (3, 3) to region 1.
     pd_client.must_add_peer(r1, new_peer(3, 3));
 
-    let engine_3 = cluster.get_engine(3);
+    let engine_3 = cluster.get_kv_db(3);
     must_get_equal(&engine_3, b"k1", b"v1");
 
     cluster.add_send_filter(IsolationFilterFactory::new(2));
@@ -220,7 +220,7 @@ fn test_readd_peer<T: Simulator>(cluster: &mut Cluster<T>) {
 
     cluster.clear_send_filters();
     cluster.must_put(b"k4", b"v4");
-    let engine = cluster.get_engine(2);
+    let engine = cluster.get_kv_db(2);
     must_get_equal(&engine, b"k4", b"v4");
 
     // Stale gc message should be ignored.
@@ -266,7 +266,7 @@ fn test_server_stale_meta() {
     pd_client.must_add_peer(1, new_peer(3, 4));
     cluster.shutdown();
 
-    let engine_3 = cluster.get_engine(3);
+    let engine_3 = cluster.get_kv_db(3);
     let mut state: RegionLocalState = engine_3
         .get_msg_cf(CF_RAFT, &keys::region_state_key(1))
         .unwrap()

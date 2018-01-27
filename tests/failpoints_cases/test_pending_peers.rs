@@ -45,7 +45,7 @@ fn test_pending_peers() {
     // Region worker is not started, snapshot should not be applied yet.
     assert_eq!(pending_peers[&3], new_peer(3, 3));
     // But it will be applied finally.
-    must_get_equal(&cluster.get_engine(3), b"k1", b"v1");
+    must_get_equal(&cluster.get_kv_db(3), b"k1", b"v1");
     sleep(Duration::from_millis(100));
     let pending_peers = pd_client.get_pending_peers();
     assert!(pending_peers.is_empty());

@@ -148,14 +148,14 @@ mod test {
     use util::rocksdb::new_engine;
     use util::worker::Runnable;
     use raftstore::store::engine::Snapshot;
-    use raftstore::store::{keys, Msg};
+    use raftstore::store::KvDb;
     use super::*;
 
     #[test]
     fn test_consistency_check() {
         let path = TempDir::new("tikv-store-test").unwrap();
         let db = new_engine(path.path().to_str().unwrap(), &[CF_DEFAULT, CF_RAFT], None).unwrap();
-        let db = Arc::new(db);
+        let db = KvDb::new(Arc::new(db));
 
         let mut region = Region::new();
         region.mut_peers().push(Peer::new());
@@ -179,7 +179,7 @@ mod test {
         runner.run(Task::ComputeHash {
             index: 10,
             region: region.clone(),
-            snap: Snapshot::new(Arc::clone(&db)),
+            snap: Snapshot::new(db.clone()),
         });
         let mut checksum_bytes = vec![];
         checksum_bytes.write_u32::<BigEndian>(sum).unwrap();

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use rocksdb::{DBIterator, SeekKey, Writable, WriteBatch, DB};
 use kvproto::kvrpcpb::Context;
 use storage::{CfName, Key, Value, CF_DEFAULT};
-use raftstore::store::engine::{IterOption, Peekable, SyncSnapshot as RocksSnapshot};
+use raftstore::store::engine::{IterOption, KvDb, Peekable, SyncSnapshot as RocksSnapshot};
 use util::escape;
 use util::rocksdb;
 use util::worker::{Runnable, Scheduler, Worker};
@@ -42,22 +42,21 @@ impl Display for Task {
     }
 }
 
-struct Runner(Arc<DB>);
+struct Runner(KvDb);
 
 impl Runnable<Task> for Runner {
     fn run(&mut self, t: Task) {
         match t {
             Task::Write(modifies, cb) => cb((CbContext::new(), write_modifies(&self.0, modifies))),
-            Task::Snapshot(cb) => cb((
-                CbContext::new(),
-                Ok(box RocksSnapshot::new(Arc::clone(&self.0))),
-            )),
+            Task::Snapshot(cb) => {
+                cb((CbContext::new(), Ok(box RocksSnapshot::new(self.0.clone()))))
+            }
             Task::SnapshotBatch(size, on_finished) => {
                 let mut results = Vec::with_capacity(size);
                 for _ in 0..size {
                     let res = Some((
                         CbContext::new(),
-                        Ok(box RocksSnapshot::new(Arc::clone(&self.0)) as Box<Snapshot>),
+                        Ok(box RocksSnapshot::new(self.0.clone()) as Box<Snapshot>),
                     ));
                     results.push(res);
                 }
@@ -102,7 +101,7 @@ impl EngineRocksdb {
         };
         let mut worker = Worker::new("engine-rocksdb");
         let db = rocksdb::new_engine(&path, cfs, cfs_opts)?;
-        box_try!(worker.start(Runner(Arc::new(db))));
+        box_try!(worker.start(Runner(KvDb::new(Arc::new(db)))));
         Ok(EngineRocksdb {
             sched: worker.scheduler(),
             core: Arc::new(Mutex::new(EngineRocksdbCore {

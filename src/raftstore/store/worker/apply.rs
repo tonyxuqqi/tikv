@@ -18,7 +18,7 @@ use std::rc::Rc;
 use std::collections::VecDeque;
 use std::mem;
 
-use rocksdb::{Writable, WriteBatch, DB};
+use rocksdb::{Writable, WriteBatch};
 use rocksdb::rocksdb_options::WriteOptions;
 use protobuf::RepeatedField;
 
@@ -37,7 +37,7 @@ use raftstore::{Error, Result};
 use raftstore::coprocessor::CoprocessorHost;
 use raftstore::store::{cmd_resp, keys, util, Store};
 use raftstore::store::msg::Callback;
-use raftstore::store::engine::{Mutable, Peekable, Snapshot};
+use raftstore::store::engine::{KvDb, Mutable, Peekable, Snapshot};
 use raftstore::store::peer_storage::{self, compact_raft_log, write_initial_apply_state,
                                      write_peer_state};
 use raftstore::store::peer::{check_epoch, parse_data_at, Peer};
@@ -299,7 +299,7 @@ pub struct ApplyDelegate {
     id: u64,
     // peer_tag, "[region region_id] peer_id"
     tag: String,
-    engine: Arc<DB>,
+    db: KvDb,
     region: Region,
     // if we remove ourself in ChangePeer remove, we should set this flag, then
     // any following committed logs in same Ready should be applied failed.
@@ -326,14 +326,14 @@ impl ApplyDelegate {
 
     fn from_peer(peer: &Peer) -> ApplyDelegate {
         let reg = Registration::new(peer);
-        ApplyDelegate::from_registration(peer.kv_engine(), reg)
+        ApplyDelegate::from_registration(peer.kv_db(), reg)
     }
 
-    fn from_registration(db: Arc<DB>, reg: Registration) -> ApplyDelegate {
+    fn from_registration(db: KvDb, reg: Registration) -> ApplyDelegate {
         ApplyDelegate {
             id: reg.id,
             tag: format!("[region {}] {}", reg.region.get_id(), reg.id),
-            engine: db,
+            db: db,
             region: reg.region,
             pending_remove: false,
             apply_state: reg.apply_state,
@@ -399,7 +399,7 @@ impl ApplyDelegate {
     }
 
     fn write_apply_state(&self, wb: &WriteBatch) {
-        rocksdb::get_cf_handle(&self.engine, CF_RAFT)
+        rocksdb::get_cf_handle(&self.db, CF_RAFT)
             .map_err(From::from)
             .and_then(|handle| {
                 wb.put_msg_cf(
@@ -434,7 +434,7 @@ impl ApplyDelegate {
                 self.update_metrics(apply_ctx);
                 let wb = WriteBatch::with_capacity(DEFAULT_APPLY_WB_SIZE);
                 // flush to engine
-                self.engine
+                self.db
                     .write(mem::replace(&mut apply_ctx.wb, wb))
                     .unwrap_or_else(|e| {
                         panic!("{} failed to write to engine, error: {:?}", self.tag, e)
@@ -827,7 +827,7 @@ impl ApplyDelegate {
         } else {
             PeerState::Normal
         };
-        if let Err(e) = write_peer_state(&self.engine, &ctx.wb, &region, state) {
+        if let Err(e) = write_peer_state(&self.db, &ctx.wb, &region, state) {
             panic!("{} failed to update region state: {:?}", self.tag, e);
         }
 
@@ -907,9 +907,9 @@ impl ApplyDelegate {
         let region_ver = region.get_region_epoch().get_version() + 1;
         region.mut_region_epoch().set_version(region_ver);
         new_region.mut_region_epoch().set_version(region_ver);
-        write_peer_state(&self.engine, &ctx.wb, &region, PeerState::Normal)
-            .and_then(|_| write_peer_state(&self.engine, &ctx.wb, &new_region, PeerState::Normal))
-            .and_then(|_| write_initial_apply_state(&self.engine, &ctx.wb, new_region.get_id()))
+        write_peer_state(&self.db, &ctx.wb, &region, PeerState::Normal)
+            .and_then(|_| write_peer_state(&self.db, &ctx.wb, &new_region, PeerState::Normal))
+            .and_then(|_| write_initial_apply_state(&self.db, &ctx.wb, new_region.get_id()))
             .unwrap_or_else(|e| {
                 panic!(
                     "{} failed to save split region {:?}: {:?}",
@@ -1072,7 +1072,7 @@ impl ApplyDelegate {
                 self.metrics.lock_cf_written_bytes += value.len() as u64;
             }
             // TODO: check whether cf exists or not.
-            rocksdb::get_cf_handle(&self.engine, cf)
+            rocksdb::get_cf_handle(&self.db, cf)
                 .and_then(|handle| ctx.wb.put_cf(handle, &key, value))
                 .unwrap_or_else(|e| {
                     panic!(
@@ -1109,7 +1109,7 @@ impl ApplyDelegate {
         if !req.get_delete().get_cf().is_empty() {
             let cf = req.get_delete().get_cf();
             // TODO: check whether cf exists or not.
-            rocksdb::get_cf_handle(&self.engine, cf)
+            rocksdb::get_cf_handle(&self.db, cf)
                 .and_then(|handle| ctx.wb.delete_cf(handle, &key))
                 .unwrap_or_else(|e| {
                     panic!("{} failed to delete {}: {:?}", self.tag, escape(&key), e)
@@ -1161,12 +1161,12 @@ impl ApplyDelegate {
         if ALL_CFS.iter().find(|x| **x == cf).is_none() {
             return Err(box_err!("invalid delete range command, cf: {:?}", cf));
         }
-        let handle = rocksdb::get_cf_handle(&self.engine, cf).unwrap();
+        let handle = rocksdb::get_cf_handle(&self.db, cf).unwrap();
 
         let start_key = keys::data_key(s_key);
         // Use delete_file_in_range to drop as many sst files as possible, this is
         // a way to reclaim disk space quickly after drop a table/index.
-        self.engine
+        self.db
             .delete_file_in_range_cf(handle, &start_key, &end_key)
             .unwrap_or_else(|e| {
                 panic!(
@@ -1179,7 +1179,7 @@ impl ApplyDelegate {
             });
 
         // Delete all remaining keys.
-        util::delete_all_in_range_cf(&self.engine, cf, &start_key, &end_key, use_delete_range)
+        util::delete_all_in_range_cf(&self.db, cf, &start_key, &end_key, use_delete_range)
             .unwrap_or_else(|e| {
                 panic!(
                     "{} failed to delete all in range [{}, {}), cf: {}, err: {:?}",
@@ -1263,7 +1263,7 @@ impl ApplyDelegate {
                 // open files in rocksdb.
                 // TODO: figure out another way to do consistency check without snapshot
                 // or short life snapshot.
-                snap: Snapshot::new(Arc::clone(&self.engine)),
+                snap: Snapshot::new(self.db.clone()),
             }),
         ))
     }
@@ -1436,7 +1436,7 @@ pub enum TaskRes {
 
 // TODO: use threadpool to do task concurrently
 pub struct Runner {
-    db: Arc<DB>,
+    db: KvDb,
     host: Arc<CoprocessorHost>,
     delegates: HashMap<u64, ApplyDelegate>,
     notifier: Sender<TaskRes>,
@@ -1458,7 +1458,7 @@ impl Runner {
             delegates.insert(region_id, ApplyDelegate::from_peer(p));
         }
         Runner {
-            db: store.kv_engine(),
+            db: store.kv_db(),
             host: Arc::clone(&store.coprocessor_host),
             delegates: delegates,
             notifier: notifier,
@@ -1579,7 +1579,7 @@ impl Runner {
         let peer_id = s.id;
         let region_id = s.region.get_id();
         let term = s.term;
-        let delegate = ApplyDelegate::from_registration(Arc::clone(&self.db), s);
+        let delegate = ApplyDelegate::from_registration(self.db.clone(), s);
         info!(
             "{} register to apply delegates at term {}",
             delegate.tag, delegate.term
@@ -1633,7 +1633,7 @@ mod tests {
     use std::sync::atomic::*;
 
     use tempdir::TempDir;
-    use rocksdb::{Writable, WriteBatch, DB};
+    use rocksdb::{Writable, WriteBatch};
     use protobuf::Message;
     use kvproto::metapb::RegionEpoch;
     use kvproto::raft_cmdpb::CmdType;
@@ -1645,14 +1645,14 @@ mod tests {
 
     use super::*;
 
-    pub fn create_tmp_engine(path: &str) -> (TempDir, Arc<DB>) {
+    pub fn create_tmp_kv_db(path: &str) -> (TempDir, KvDb) {
         let path = TempDir::new(path).unwrap();
         let db =
             Arc::new(rocksdb::new_engine(path.path().to_str().unwrap(), ALL_CFS, None).unwrap());
-        (path, db)
+        (path, KvDb::new(db))
     }
 
-    fn new_runner(db: Arc<DB>, host: Arc<CoprocessorHost>, tx: Sender<TaskRes>) -> Runner {
+    fn new_runner(db: KvDb, host: Arc<CoprocessorHost>, tx: Sender<TaskRes>) -> Runner {
         Runner {
             db: db,
             host: host,
@@ -1703,9 +1703,9 @@ mod tests {
     #[test]
     fn test_basic_flow() {
         let (tx, rx) = mpsc::channel();
-        let (_tmp, db) = create_tmp_engine("apply-basic");
+        let (_tmp, db) = create_tmp_kv_db("apply-basic");
         let host = Arc::new(CoprocessorHost::default());
-        let mut runner = new_runner(Arc::clone(&db), host, tx);
+        let mut runner = new_runner(db.clone(), host, tx);
 
         let mut reg = Registration::default();
         reg.id = 1;
@@ -1961,11 +1961,11 @@ mod tests {
 
     #[test]
     fn test_handle_raft_committed_entries() {
-        let (_path, db) = create_tmp_engine("test-delegate");
+        let (_path, db) = create_tmp_kv_db("test-delegate");
         let mut reg = Registration::default();
         reg.region.set_end_key(b"k5".to_vec());
         reg.region.mut_region_epoch().set_version(3);
-        let mut delegate = ApplyDelegate::from_registration(Arc::clone(&db), reg);
+        let mut delegate = ApplyDelegate::from_registration(db.clone(), reg);
         let (tx, rx) = mpsc::channel();
 
         let put_entry = EntryBuilder::new(1, 1)

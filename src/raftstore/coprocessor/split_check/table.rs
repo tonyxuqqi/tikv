@@ -229,7 +229,7 @@ mod test {
 
     use storage::ALL_CFS;
     use storage::types::Key;
-    use raftstore::store::{Msg, SplitCheckRunner, SplitCheckTask};
+    use raftstore::store::{KvDb, Msg, SplitCheckRunner, SplitCheckTask};
     use util::rocksdb::new_engine;
     use util::worker::Runnable;
     use util::transport::RetryableSendCh;
@@ -304,7 +304,8 @@ mod test {
     fn test_table_check_observer() {
         let path = TempDir::new("test_table_check_observer").unwrap();
         let engine = Arc::new(new_engine(path.path().to_str().unwrap(), ALL_CFS, None).unwrap());
-        let write_cf = engine.cf_handle(CF_WRITE).unwrap();
+        let kv_db = KvDb::new(engine);
+        let write_cf = kv_db.cf_handle(CF_WRITE).unwrap();
 
         let mut region = Region::new();
         region.set_id(1);
@@ -327,8 +328,7 @@ mod test {
 
         // Try to ignore the ApproximateRegionSize
         let coprocessor = CoprocessorHost::new(cfg, sch);
-        let mut runnable =
-            SplitCheckRunner::new(Arc::clone(&engine), ch.clone(), Arc::new(coprocessor));
+        let mut runnable = SplitCheckRunner::new(kv_db.clone(), ch.clone(), Arc::new(coprocessor));
 
         type Case = (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
         let mut check_cases = |cases: Vec<Case>| {
@@ -373,7 +373,7 @@ mod test {
             let mut key = gen_table_prefix(i);
             key.extend_from_slice(padding);
             let s = keys::data_key(Key::from_raw(&key).encoded());
-            engine.put_cf(write_cf, &s, &s).unwrap();
+            kv_db.put_cf(write_cf, &s, &s).unwrap();
         }
 
         check_cases(vec![
@@ -400,7 +400,7 @@ mod test {
             let mut key = gen_table_prefix(3);
             key.extend_from_slice(format!("{:?}{}", padding, i).as_bytes());
             let s = keys::data_key(Key::from_raw(&key).encoded());
-            engine.put_cf(write_cf, &s, &s).unwrap();
+            kv_db.put_cf(write_cf, &s, &s).unwrap();
         }
 
         check_cases(vec![
@@ -421,10 +421,10 @@ mod test {
             // m is less than t and is the prefix of meta keys.
             let key = format!("m{:?}{}", padding, i);
             let s = keys::data_key(Key::from_raw(key.as_bytes()).encoded());
-            engine.put_cf(write_cf, &s, &s).unwrap();
+            kv_db.put_cf(write_cf, &s, &s).unwrap();
             let key = format!("u{:?}{}", padding, i);
             let s = keys::data_key(Key::from_raw(key.as_bytes()).encoded());
-            engine.put_cf(write_cf, &s, &s).unwrap();
+            kv_db.put_cf(write_cf, &s, &s).unwrap();
         }
 
         check_cases(vec![

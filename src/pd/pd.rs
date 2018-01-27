@@ -22,7 +22,6 @@ use kvproto::eraftpb::ConfChangeType;
 use kvproto::raft_cmdpb::{AdminCmdType, AdminRequest, RaftCmdRequest};
 use kvproto::raft_serverpb::RaftMessage;
 use kvproto::pdpb;
-use rocksdb::DB;
 use fs2;
 
 use util::worker::FutureRunnable as Runnable;
@@ -33,6 +32,7 @@ use pd::{PdClient, RegionStat};
 use raftstore::store::Msg;
 use raftstore::store::util::{get_region_approximate_size, is_epoch_stale};
 use raftstore::store::store::StoreInfo;
+use raftstore::store::engine::KvDb;
 use raftstore::store::Callback;
 use storage::FlowStatistics;
 use util::collections::HashMap;
@@ -162,14 +162,14 @@ pub struct Runner<T: PdClient> {
     store_id: u64,
     pd_client: Arc<T>,
     ch: SendCh<Msg>,
-    db: Arc<DB>,
+    db: KvDb,
     region_peers: HashMap<u64, PeerStat>,
     store_stat: StoreStat,
     is_hb_receiver_scheduled: bool,
 }
 
 impl<T: PdClient> Runner<T> {
-    pub fn new(store_id: u64, pd_client: Arc<T>, ch: SendCh<Msg>, db: Arc<DB>) -> Runner<T> {
+    pub fn new(store_id: u64, pd_client: Arc<T>, ch: SendCh<Msg>, db: KvDb) -> Runner<T> {
         Runner {
             store_id: store_id,
             pd_client: pd_client,
@@ -259,11 +259,11 @@ impl<T: PdClient> Runner<T> {
         mut stats: pdpb::StoreStats,
         store_info: StoreInfo,
     ) {
-        let disk_stats = match fs2::statvfs(store_info.engine.path()) {
+        let disk_stats = match fs2::statvfs(store_info.db.path()) {
             Err(e) => {
                 error!(
                     "get disk stat for rocksdb {} failed: {}",
-                    store_info.engine.path(),
+                    store_info.db.path(),
                     e
                 );
                 return;
@@ -279,8 +279,7 @@ impl<T: PdClient> Runner<T> {
         };
         stats.set_capacity(capacity);
 
-        let used_size =
-            stats.get_used_size() + get_engine_used_size(Arc::clone(&store_info.engine));
+        let used_size = stats.get_used_size() + get_db_used_size(&store_info.db);
         stats.set_used_size(used_size);
 
         let mut available = if capacity > used_size {

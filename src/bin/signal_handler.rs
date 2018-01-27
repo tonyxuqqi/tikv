@@ -14,7 +14,6 @@
 #[cfg(unix)]
 mod imp {
     use std::{ptr, slice};
-    use std::sync::Arc;
     use libc::{self, c_char, c_int, c_void};
 
     use rocksdb::DB;
@@ -78,8 +77,8 @@ mod imp {
                     }
                     info!("{}", String::from_utf8(buffer).unwrap());
 
-                    print_rocksdb_stats(&engines.kv_engine);
-                    print_rocksdb_stats(&engines.raft_engine);
+                    print_rocksdb_stats(&engines.kv_db);
+                    print_rocksdb_stats(&engines.raft_db);
                     print_malloc_stats();
                 }
                 SIGUSR2 => profiling::dump_prof(None),
@@ -89,21 +88,21 @@ mod imp {
         }
     }
 
-    fn print_rocksdb_stats(engine: &Arc<DB>) {
+    fn print_rocksdb_stats(db: &DB) {
         // Log common rocksdb stats.
-        for name in engine.cf_names() {
-            let handler = engine.cf_handle(name).unwrap();
-            if let Some(v) = engine.get_property_value_cf(handler, ROCKSDB_CF_STATS_KEY) {
+        for name in db.cf_names() {
+            let handler = db.cf_handle(name).unwrap();
+            if let Some(v) = db.get_property_value_cf(handler, ROCKSDB_CF_STATS_KEY) {
                 info!("{}", v)
             }
         }
 
-        if let Some(v) = engine.get_property_value(ROCKSDB_DB_STATS_KEY) {
+        if let Some(v) = db.get_property_value(ROCKSDB_DB_STATS_KEY) {
             info!("{}", v)
         }
 
         // Log more stats if enable_statistics is true.
-        if let Some(v) = engine.get_statistics() {
+        if let Some(v) = db.get_statistics() {
             info!("{}", v)
         }
     }

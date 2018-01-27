@@ -40,7 +40,7 @@ fn test_basic_transfer_leader<T: Simulator>(cluster: &mut Cluster<T>) {
 
     // ensure follower has latest entries before transfer leader.
     cluster.must_put(b"k1", b"v1");
-    must_get_equal(&cluster.get_engine(2), b"k1", b"v1");
+    must_get_equal(&cluster.get_kv_db(2), b"k1", b"v1");
 
     // check if transfer leader is fast enough.
     let leader = cluster.leader_of_region(1).unwrap();

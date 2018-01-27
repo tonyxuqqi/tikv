@@ -88,12 +88,9 @@ fn test_multi_leader_crash<T: Simulator>(cluster: &mut Cluster<T>) {
 
     cluster.must_put(key2, value2);
     cluster.must_delete(key1);
-    must_get_none(
-        &cluster.engines[&last_leader.get_store_id()].kv_engine,
-        key2,
-    );
+    must_get_none(&cluster.engines[&last_leader.get_store_id()].kv_db, key2);
     must_get_equal(
-        &cluster.engines[&last_leader.get_store_id()].kv_engine,
+        &cluster.engines[&last_leader.get_store_id()].kv_db,
         key1,
         value1,
     );
@@ -102,14 +99,11 @@ fn test_multi_leader_crash<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.run_node(last_leader.get_store_id());
 
     must_get_equal(
-        &cluster.engines[&last_leader.get_store_id()].kv_engine,
+        &cluster.engines[&last_leader.get_store_id()].kv_db,
         key2,
         value2,
     );
-    must_get_none(
-        &cluster.engines[&last_leader.get_store_id()].kv_engine,
-        key1,
-    );
+    must_get_none(&cluster.engines[&last_leader.get_store_id()].kv_db, key1);
 }
 
 fn test_multi_cluster_restart<T: Simulator>(cluster: &mut Cluster<T>) {
@@ -173,7 +167,7 @@ fn test_multi_random_restart<T: Simulator>(
         cluster.run_node(id);
 
         // verify whether data is actually being replicated and waiting for node online.
-        must_get_equal(&cluster.get_engine(id), &key, &value);
+        must_get_equal(&cluster.get_kv_db(id), &key, &value);
 
         cluster.must_delete(&key);
         assert_eq!(cluster.get(&key), None);
@@ -336,11 +330,11 @@ fn test_leader_change_with_uncommitted_log<T: Simulator>(cluster: &mut Cluster<T
 
     // peer 1 and peer 2 must have k2, but peer 3 must not.
     for i in 1..3 {
-        let engine = cluster.get_engine(i);
+        let engine = cluster.get_kv_db(i);
         must_get_equal(&engine, b"k1", b"v1");
     }
 
-    let engine3 = cluster.get_engine(3);
+    let engine3 = cluster.get_kv_db(3);
     must_get_none(&engine3, b"k1");
 
     // now only peer 1 and peer 2 can step to leader.
@@ -378,11 +372,11 @@ fn test_leader_change_with_uncommitted_log<T: Simulator>(cluster: &mut Cluster<T
     cluster.must_put(b"k2", b"v2");
 
     // peer 1 must have committed, but peer 2 has not.
-    must_get_equal(&cluster.get_engine(1), b"k2", b"v2");
+    must_get_equal(&cluster.get_kv_db(1), b"k2", b"v2");
 
     cluster.must_transfer_leader(1, util::new_peer(2, 2));
 
-    must_get_none(&cluster.get_engine(2), b"k2");
+    must_get_none(&cluster.get_kv_db(2), b"k2");
 
     let region = cluster.get_region(b"");
     let reqs = vec![new_put_cmd(b"k3", b"v3")];
@@ -399,8 +393,8 @@ fn test_leader_change_with_uncommitted_log<T: Simulator>(cluster: &mut Cluster<T
     assert!(!resp.get_header().has_error(), "{:?}", resp);
 
     for i in 1..4 {
-        must_get_equal(&cluster.get_engine(i), b"k2", b"v2");
-        must_get_equal(&cluster.get_engine(i), b"k3", b"v3");
+        must_get_equal(&cluster.get_kv_db(i), b"k2", b"v2");
+        must_get_equal(&cluster.get_kv_db(i), b"k3", b"v3");
     }
 }
 
@@ -438,11 +432,11 @@ fn test_node_leader_change_with_log_overlap() {
 
     // peer 1 and peer 2 must have k1, but peer 3 must not.
     for i in 1..3 {
-        let engine = cluster.get_engine(i);
+        let engine = cluster.get_kv_db(i);
         must_get_equal(&engine, b"k1", b"v1");
     }
 
-    let engine3 = cluster.get_engine(3);
+    let engine3 = cluster.get_kv_db(3);
     must_get_none(&engine3, b"k1");
 
     // now only peer 1 and peer 2 can step to leader.
@@ -486,12 +480,12 @@ fn test_node_leader_change_with_log_overlap() {
             .direction(Direction::Send),
     ));
     // make sure k2 has not been committed.
-    must_get_none(&cluster.get_engine(1), b"k2");
+    must_get_none(&cluster.get_kv_db(1), b"k2");
 
     // Here just use `must_transfer_leader` to wait for peer (2, 2) becomes leader.
     cluster.must_transfer_leader(1, new_peer(2, 2));
 
-    must_get_none(&cluster.get_engine(2), b"k2");
+    must_get_none(&cluster.get_kv_db(2), b"k2");
 
     cluster.clear_send_filters();
 
@@ -524,7 +518,7 @@ fn test_read_leader_with_unapplied_log<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(k0, v0);
 
     for i in 1..4 {
-        must_get_equal(&cluster.get_engine(i), k0, v0);
+        must_get_equal(&cluster.get_kv_db(i), k0, v0);
     }
 
     // hack: first MsgAppend will append log, second MsgAppend will set commit index,
@@ -556,13 +550,13 @@ fn test_read_leader_with_unapplied_log<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(k, v);
 
     // peer 1 must have committed, but peer 2 has not.
-    must_get_equal(&cluster.get_engine(1), k, v);
+    must_get_equal(&cluster.get_kv_db(1), k, v);
 
     cluster.must_transfer_leader(1, util::new_peer(2, 2));
 
     // leader's term not equal applied index's term, if we read local, we may get old value
     // in this situation we need use raft read
-    must_get_none(&cluster.get_engine(2), k);
+    must_get_none(&cluster.get_kv_db(2), k);
 
     // internal read will use raft read no matter read_quorum is false or true, cause applied
     // index's term not equal leader's term, and will failed with timeout
@@ -694,11 +688,11 @@ fn test_node_dropped_proposal() {
 
     // peer 1 and peer 2 must have k1, but peer 3 must not.
     for i in 1..3 {
-        let engine = cluster.get_engine(i);
+        let engine = cluster.get_kv_db(i);
         must_get_equal(&engine, b"k1", b"v1");
     }
 
-    let engine3 = cluster.get_engine(3);
+    let engine3 = cluster.get_kv_db(3);
     must_get_none(&engine3, b"k1");
 
     let put_msg = vec![new_put_cmd(b"k2", b"v2")];

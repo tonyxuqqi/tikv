@@ -21,7 +21,6 @@ pub use self::metrics_flusher::MetricsFlusher;
 
 use std::fs::{self, File};
 use std::path::Path;
-use std::sync::Arc;
 use std::str::FromStr;
 
 use storage::{ALL_CFS, CF_DEFAULT, CF_LOCK};
@@ -199,19 +198,17 @@ pub fn db_exist(path: &str) -> bool {
     fs::read_dir(&path).unwrap().next().is_some()
 }
 
-pub fn get_engine_used_size(engine: Arc<DB>) -> u64 {
+pub fn get_db_used_size(db: &DB) -> u64 {
     let mut used_size: u64 = 0;
     for cf in ALL_CFS {
-        let handle = rocksdb::get_cf_handle(&engine, cf).unwrap();
-        let cf_used_size = engine
-            .get_property_int_cf(handle, ROCKSDB_TOTAL_SST_FILES_SIZE)
+        let handle = rocksdb::get_cf_handle(db, cf).unwrap();
+        let cf_used_size = db.get_property_int_cf(handle, ROCKSDB_TOTAL_SST_FILES_SIZE)
             .expect("rocksdb is too old, missing total-sst-files-size property");
 
         used_size += cf_used_size;
 
         // For memtable
-        if let Some(mem_table) = engine.get_property_int_cf(handle, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES)
-        {
+        if let Some(mem_table) = db.get_property_int_cf(handle, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES) {
             used_size += mem_table;
         }
     }

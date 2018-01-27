@@ -17,14 +17,14 @@ use std::sync::mpsc::SyncSender;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use rocksdb::{Writable, WriteBatch, DB};
+use rocksdb::{Writable, WriteBatch};
 use kvproto::raft_serverpb::{PeerState, RaftApplyState, RegionLocalState};
 use kvproto::eraftpb::Snapshot as RaftSnapshot;
 
 use util::threadpool::{DefaultContext, ThreadPool, ThreadPoolBuilder};
 use util::worker::Runnable;
 use util::{escape, rocksdb};
-use raftstore::store::engine::{Mutable, Snapshot};
+use raftstore::store::engine::{KvDb, Mutable, RaftDb, Snapshot};
 use raftstore::store::peer_storage::{JOB_STATUS_CANCELLED, JOB_STATUS_CANCELLING,
                                      JOB_STATUS_FAILED, JOB_STATUS_FINISHED, JOB_STATUS_PENDING,
                                      JOB_STATUS_RUNNING};
@@ -90,8 +90,8 @@ impl Display for Task {
 
 #[derive(Clone)]
 struct SnapContext {
-    kv_db: Arc<DB>,
-    raft_db: Arc<DB>,
+    kv_db: KvDb,
+    raft_db: RaftDb,
     batch_size: usize,
     mgr: SnapManager,
     use_delete_range: bool,
@@ -100,8 +100,8 @@ struct SnapContext {
 impl SnapContext {
     fn generate_snap(&self, region_id: u64, notifier: SyncSender<RaftSnapshot>) -> Result<()> {
         // do we need to check leader here?
-        let raft_db = Arc::clone(&self.raft_db);
-        let raw_snap = Snapshot::new(Arc::clone(&self.kv_db));
+        let raft_db = self.raft_db.clone();
+        let raw_snap = Snapshot::new(self.kv_db.clone());
 
         let snap = box_try!(store::do_snapshot(
             self.mgr.clone(),
@@ -194,7 +194,7 @@ impl SnapContext {
         check_abort(&abort)?;
         let timer = Instant::now();
         let options = ApplyOptions {
-            db: Arc::clone(&self.kv_db),
+            db: self.kv_db.clone(),
             region: region.clone(),
             abort: Arc::clone(&abort),
             write_batch_size: self.batch_size,
@@ -277,8 +277,8 @@ pub struct Runner {
 
 impl Runner {
     pub fn new(
-        kv_db: Arc<DB>,
-        raft_db: Arc<DB>,
+        kv_db: KvDb,
+        raft_db: RaftDb,
         mgr: SnapManager,
         batch_size: usize,
         use_delete_range: bool,

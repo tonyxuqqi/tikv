@@ -22,11 +22,10 @@ use protobuf;
 use byteorder::{BigEndian, ByteOrder};
 use util::rocksdb;
 
-use raftstore::Result;
-use raftstore::Error;
+use raftstore::{Error, Result};
 
 pub struct Snapshot {
-    db: Arc<DB>,
+    db: KvDb,
     snap: UnsafeSnap,
 }
 
@@ -47,7 +46,7 @@ impl Deref for SyncSnapshot {
 }
 
 impl SyncSnapshot {
-    pub fn new(db: Arc<DB>) -> SyncSnapshot {
+    pub fn new(db: KvDb) -> SyncSnapshot {
         SyncSnapshot(Arc::new(Snapshot::new(db)))
     }
 
@@ -57,7 +56,7 @@ impl SyncSnapshot {
 }
 
 impl Snapshot {
-    pub fn new(db: Arc<DB>) -> Snapshot {
+    pub fn new(db: KvDb) -> Snapshot {
         unsafe {
             Snapshot {
                 snap: db.unsafe_snap(),
@@ -78,25 +77,25 @@ impl Snapshot {
         rocksdb::get_cf_handle(&self.db, cf).map_err(Error::from)
     }
 
-    pub fn get_db(&self) -> Arc<DB> {
-        Arc::clone(&self.db)
+    pub fn get_db(&self) -> KvDb {
+        self.db.clone()
     }
 
-    pub fn db_iterator(&self, iter_opt: IterOption) -> DBIterator<Arc<DB>> {
+    pub fn db_iterator(&self, iter_opt: IterOption) -> DBIterator<KvDb> {
         let mut opt = iter_opt.build_read_opts();
         unsafe {
             opt.set_snapshot(&self.snap);
         }
-        DBIterator::new(Arc::clone(&self.db), opt)
+        DBIterator::new(self.db.clone(), opt)
     }
 
-    pub fn db_iterator_cf(&self, cf: &str, iter_opt: IterOption) -> Result<DBIterator<Arc<DB>>> {
+    pub fn db_iterator_cf(&self, cf: &str, iter_opt: IterOption) -> Result<DBIterator<KvDb>> {
         let handle = rocksdb::get_cf_handle(&self.db, cf)?;
         let mut opt = iter_opt.build_read_opts();
         unsafe {
             opt.set_snapshot(&self.snap);
         }
-        Ok(DBIterator::new_cf(Arc::clone(&self.db), handle, opt))
+        Ok(DBIterator::new_cf(self.db.clone(), handle, opt))
     }
 }
 
@@ -431,6 +430,44 @@ pub trait Mutable: Writable {
 impl Mutable for DB {}
 impl Mutable for WriteBatch {}
 
+#[derive(Clone, Debug)]
+pub struct KvDb {
+    db: Arc<DB>,
+}
+
+impl KvDb {
+    pub fn new(db: Arc<DB>) -> KvDb {
+        KvDb { db }
+    }
+}
+
+impl Deref for KvDb {
+    type Target = DB;
+
+    fn deref(&self) -> &DB {
+        &self.db
+    }
+}
+
+#[derive(Clone)]
+pub struct RaftDb {
+    db: Arc<DB>,
+}
+
+impl RaftDb {
+    pub fn new(db: Arc<DB>) -> RaftDb {
+        RaftDb { db }
+    }
+}
+
+impl Deref for RaftDb {
+    type Target = DB;
+
+    fn deref(&self) -> &DB {
+        &self.db
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -443,22 +480,22 @@ mod tests {
     fn test_base() {
         let path = TempDir::new("var").unwrap();
         let cf = "cf";
-        let engine =
-            Arc::new(rocksdb::new_engine(path.path().to_str().unwrap(), &[cf], None).unwrap());
+        let db = Arc::new(rocksdb::new_engine(path.path().to_str().unwrap(), &[cf], None).unwrap());
+        let kv_db = KvDb::new(db);
 
         let mut r = Region::new();
         r.set_id(10);
 
         let key = b"key";
-        let handle = rocksdb::get_cf_handle(&engine, cf).unwrap();
-        engine.put_msg(key, &r).unwrap();
-        engine.put_msg_cf(handle, key, &r).unwrap();
+        let handle = rocksdb::get_cf_handle(&kv_db, cf).unwrap();
+        kv_db.put_msg(key, &r).unwrap();
+        kv_db.put_msg_cf(handle, key, &r).unwrap();
 
-        let snap = Snapshot::new(Arc::clone(&engine));
+        let snap = Snapshot::new(kv_db.clone());
 
-        let mut r1: Region = engine.get_msg(key).unwrap().unwrap();
+        let mut r1: Region = kv_db.get_msg(key).unwrap().unwrap();
         assert_eq!(r, r1);
-        let r1_cf: Region = engine.get_msg_cf(cf, key).unwrap().unwrap();
+        let r1_cf: Region = kv_db.get_msg_cf(cf, key).unwrap().unwrap();
         assert_eq!(r, r1_cf);
 
         let mut r2: Region = snap.get_msg(key).unwrap().unwrap();
@@ -467,24 +504,24 @@ mod tests {
         assert_eq!(r, r2_cf);
 
         r.set_id(11);
-        engine.put_msg(key, &r).unwrap();
-        r1 = engine.get_msg(key).unwrap().unwrap();
+        kv_db.put_msg(key, &r).unwrap();
+        r1 = kv_db.get_msg(key).unwrap().unwrap();
         r2 = snap.get_msg(key).unwrap().unwrap();
         assert_ne!(r1, r2);
 
-        let b: Option<Region> = engine.get_msg(b"missing_key").unwrap();
+        let b: Option<Region> = kv_db.get_msg(b"missing_key").unwrap();
         assert!(b.is_none());
 
-        engine.put_i64(key, -1).unwrap();
-        assert_eq!(engine.get_i64(key).unwrap(), Some(-1));
-        assert!(engine.get_i64(b"missing_key").unwrap().is_none());
+        kv_db.put_i64(key, -1).unwrap();
+        assert_eq!(kv_db.get_i64(key).unwrap(), Some(-1));
+        assert!(kv_db.get_i64(b"missing_key").unwrap().is_none());
 
-        let snap = Snapshot::new(Arc::clone(&engine));
+        let snap = Snapshot::new(kv_db.clone());
         assert_eq!(snap.get_i64(key).unwrap(), Some(-1));
         assert!(snap.get_i64(b"missing_key").unwrap().is_none());
 
-        engine.put_u64(key, 1).unwrap();
-        assert_eq!(engine.get_u64(key).unwrap(), Some(1));
+        kv_db.put_u64(key, 1).unwrap();
+        assert_eq!(kv_db.get_u64(key).unwrap(), Some(1));
         assert_eq!(snap.get_i64(key).unwrap(), Some(-1));
     }
 
@@ -565,7 +602,7 @@ mod tests {
 
         assert_eq!(data.len(), 1);
 
-        let snap = Snapshot::new(Arc::clone(&engine));
+        let snap = Snapshot::new(KvDb::new(Arc::clone(&engine)));
 
         engine.put(b"a3", b"v3").unwrap();
         assert!(engine.seek(b"a3").unwrap().is_some());

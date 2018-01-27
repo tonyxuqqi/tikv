@@ -19,7 +19,7 @@ use std::{cmp, mem, slice};
 use std::time::{Duration, Instant};
 
 use time::Timespec;
-use rocksdb::{WriteBatch, DB};
+use rocksdb::WriteBatch;
 use rocksdb::rocksdb_options::WriteOptions;
 use protobuf::{self, Message, MessageStatic};
 use kvproto::metapb;
@@ -49,7 +49,7 @@ use super::peer_storage::{write_peer_state, ApplySnapResult, InvokeContext, Peer
 use super::util::{self, Lease, LeaseState};
 use super::cmd_resp;
 use super::transport::Transport;
-use super::engine::Snapshot;
+use super::engine::{KvDb, RaftDb, Snapshot};
 use super::metrics::*;
 use super::local_metrics::{RaftMessageMetrics, RaftMetrics, RaftProposeMetrics, RaftReadyMetrics};
 
@@ -187,8 +187,8 @@ pub struct PeerStat {
 }
 
 pub struct Peer {
-    kv_engine: Arc<DB>,
-    raft_engine: Arc<DB>,
+    kv_db: KvDb,
+    raft_db: RaftDb,
     cfg: Rc<Config>,
     peer_cache: RefCell<FlatMap<u64, metapb::Peer>>,
     pub peer: metapb::Peer,
@@ -286,8 +286,8 @@ impl Peer {
         let tag = format!("[region {}] {}", region.get_id(), peer_id);
 
         let ps = PeerStorage::new(
-            store.kv_engine(),
-            store.raft_engine(),
+            store.kv_db(),
+            store.raft_db(),
             region,
             sched,
             tag.clone(),
@@ -313,8 +313,8 @@ impl Peer {
         let raft_group = RawNode::new(&raft_cfg, ps, &[])?;
 
         let mut peer = Peer {
-            kv_engine: store.kv_engine(),
-            raft_engine: store.raft_engine(),
+            kv_db: store.kv_db(),
+            raft_db: store.raft_db(),
             peer: util::new_peer(store_id, peer_id),
             region_id: region.get_id(),
             raft_group: raft_group,
@@ -404,12 +404,12 @@ impl Peer {
         let kv_wb = WriteBatch::new();
         let raft_wb = WriteBatch::new();
         self.mut_store().clear_meta(&kv_wb, &raft_wb)?;
-        write_peer_state(&self.kv_engine, &kv_wb, &region, PeerState::Tombstone)?;
+        write_peer_state(&self.kv_db, &kv_wb, &region, PeerState::Tombstone)?;
         // write kv rocksdb first in case of restart happen between two write
         let mut write_opts = WriteOptions::new();
         write_opts.set_sync(self.cfg.sync_log);
-        self.kv_engine.write_opt(kv_wb, &write_opts)?;
-        self.raft_engine.write_opt(raft_wb, &write_opts)?;
+        self.kv_db.write_opt(kv_wb, &write_opts)?;
+        self.raft_db.write_opt(raft_wb, &write_opts)?;
 
         if self.get_store().is_initialized() {
             // If we meet panic when deleting data and raft log, the dirty data
@@ -438,12 +438,12 @@ impl Peer {
         self.get_store().is_initialized()
     }
 
-    pub fn kv_engine(&self) -> Arc<DB> {
-        Arc::clone(&self.kv_engine)
+    pub fn kv_db(&self) -> KvDb {
+        self.kv_db.clone()
     }
 
-    pub fn raft_engine(&self) -> Arc<DB> {
-        Arc::clone(&self.raft_engine)
+    pub fn raft_db(&self) -> RaftDb {
+        self.raft_db.clone()
     }
 
     pub fn region(&self) -> &metapb::Region {
@@ -1626,7 +1626,7 @@ impl Peer {
     fn exec_read(&mut self, req: &RaftCmdRequest) -> Result<ReadResponse> {
         check_epoch(self.region(), req)?;
         let mut need_snapshot = false;
-        let snapshot = Snapshot::new(Arc::clone(&self.kv_engine));
+        let snapshot = Snapshot::new(self.kv_db.clone());
         let requests = req.get_requests();
         let mut responses = Vec::with_capacity(requests.len());
 

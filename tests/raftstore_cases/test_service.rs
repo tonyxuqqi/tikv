@@ -529,7 +529,7 @@ fn test_debug_get() {
     let (k, v) = (b"key", b"value");
 
     // Put some data.
-    let engine = cluster.get_engine(store_id);
+    let engine = cluster.get_kv_db(store_id);
     let key = keys::data_key(k);
     engine.put(&key, v).unwrap();
     assert_eq!(engine.get(&key).unwrap().unwrap(), v);
@@ -556,7 +556,7 @@ fn test_debug_raft_log() {
     let (cluster, debug_client, store_id) = must_new_cluster_and_debug_client();
 
     // Put some data.
-    let engine = cluster.get_raft_engine(store_id);
+    let engine = cluster.get_raft_db(store_id);
     let (region_id, log_index) = (200, 200);
     let key = keys::raft_log_key(region_id, log_index);
     let mut entry = eraftpb::Entry::new();
@@ -592,8 +592,8 @@ fn test_debug_raft_log() {
 fn test_debug_region_info() {
     let (cluster, debug_client, store_id) = must_new_cluster_and_debug_client();
 
-    let raft_engine = cluster.get_raft_engine(store_id);
-    let kv_engine = cluster.get_engine(store_id);
+    let raft_engine = cluster.get_raft_db(store_id);
+    let kv_engine = cluster.get_kv_db(store_id);
     let raft_cf = kv_engine.cf_handle(CF_RAFT).unwrap();
 
     let region_id = 100;
@@ -657,7 +657,7 @@ fn test_debug_region_info() {
 #[test]
 fn test_debug_region_size() {
     let (cluster, debug_client, store_id) = must_new_cluster_and_debug_client();
-    let engine = cluster.get_engine(store_id);
+    let engine = cluster.get_kv_db(store_id);
 
     // Put some data.
     let region_id = 100;
@@ -735,7 +735,7 @@ fn test_debug_fail_point() {
 #[test]
 fn test_debug_scan_mvcc() {
     let (cluster, debug_client, store_id) = must_new_cluster_and_debug_client();
-    let engine = cluster.get_engine(store_id);
+    let engine = cluster.get_kv_db(store_id);
 
     // Put some data.
     let keys = [

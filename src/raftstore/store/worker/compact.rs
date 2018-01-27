@@ -16,10 +16,10 @@ use util::rocksdb;
 use util::escape;
 use util::rocksdb::compact_range;
 
-use rocksdb::DB;
-use std::sync::Arc;
 use std::fmt::{self, Display, Formatter};
 use std::error;
+
+use raftstore::store::engine::KvDb;
 use super::metrics::COMPACT_RANGE_CF;
 
 pub struct Task {
@@ -53,12 +53,12 @@ quick_error! {
 }
 
 pub struct Runner {
-    engine: Arc<DB>,
+    db: KvDb,
 }
 
 impl Runner {
-    pub fn new(engine: Arc<DB>) -> Runner {
-        Runner { engine: engine }
+    pub fn new(db: KvDb) -> Runner {
+        Runner { db }
     }
 
     pub fn compact_range_cf(
@@ -67,13 +67,13 @@ impl Runner {
         start_key: Option<Vec<u8>>,
         end_key: Option<Vec<u8>>,
     ) -> Result<(), Error> {
-        let handle = box_try!(rocksdb::get_cf_handle(&self.engine, &cf_name));
+        let handle = box_try!(rocksdb::get_cf_handle(&self.db, &cf_name));
         let compact_range_timer = COMPACT_RANGE_CF
             .with_label_values(&[&cf_name])
             .start_coarse_timer();
         let start = start_key.as_ref().map(Vec::as_slice);
         let end = end_key.as_ref().map(Vec::as_slice);
-        compact_range(&self.engine, handle, start, end, false);
+        compact_range(&self.db, handle, start, end, false);
         compact_range_timer.observe_duration();
         Ok(())
     }
@@ -94,6 +94,7 @@ impl Runnable<Task> for Runner {
 mod test {
     use std::time::Duration;
     use std::thread::sleep;
+    use std::sync::*;
     use util::rocksdb::new_engine;
     use tempdir::TempDir;
     use rocksdb::{Writable, WriteBatch};
@@ -108,7 +109,7 @@ mod test {
         let db = new_engine(path.path().to_str().unwrap(), &[CF_DEFAULT], None).unwrap();
         let db = Arc::new(db);
 
-        let mut runner = Runner::new(Arc::clone(&db));
+        let mut runner = Runner::new(KvDb::new(Arc::clone(&db)));
 
         let handle = rocksdb::get_cf_handle(&db, CF_DEFAULT).unwrap();
 

@@ -45,7 +45,7 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
-    let engine_2 = cluster.get_engine(2);
+    let engine_2 = cluster.get_kv_db(2);
     must_get_none(&engine_2, b"k1");
     // add peer (2,2) to region 1.
     pd_client.must_add_peer(r1, new_peer(2, 2));
@@ -64,7 +64,7 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     assert!(epoch.get_conf_ver() > 1);
 
     // peer 5 must not exist
-    let engine_5 = cluster.get_engine(5);
+    let engine_5 = cluster.get_kv_db(5);
     must_get_none(&engine_5, b"k1");
 
     // add peer (3, 3) to region 1.
@@ -76,7 +76,7 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer 3 must have v1, v2 and v3
-    let engine_3 = cluster.get_engine(3);
+    let engine_3 = cluster.get_kv_db(3);
     must_get_equal(&engine_3, b"k1", b"v1");
     must_get_equal(&engine_3, b"k2", b"v2");
     must_get_equal(&engine_3, b"k3", b"v3");
@@ -96,7 +96,7 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
-    let engine_2 = cluster.get_engine(2);
+    let engine_2 = cluster.get_kv_db(2);
 
     must_get_equal(&engine_2, b"k1", b"v1");
     must_get_equal(&engine_2, b"k2", b"v2");
@@ -136,7 +136,7 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer 4 in store 2 must have v1, v2, v3, v4, we check v1 and v4 here.
-    let engine_2 = cluster.get_engine(2);
+    let engine_2 = cluster.get_kv_db(2);
 
     must_get_equal(&engine_2, b"k1", b"v1");
     must_get_equal(&engine_2, b"k4", b"v4");
@@ -183,7 +183,7 @@ fn test_pd_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
     let peer2 = new_conf_change_peer(&stores[1], &pd_client);
-    let engine_2 = cluster.get_engine(peer2.get_store_id());
+    let engine_2 = cluster.get_kv_db(peer2.get_store_id());
     assert!(
         engine_2
             .get_value(&keys::data_key(b"k1"))
@@ -212,7 +212,7 @@ fn test_pd_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer 3 must have v1, v2 and v3
-    let engine_3 = cluster.get_engine(peer3.get_store_id());
+    let engine_3 = cluster.get_kv_db(peer3.get_store_id());
     must_get_equal(&engine_3, b"k1", b"v1");
     must_get_equal(&engine_3, b"k2", b"v2");
     must_get_equal(&engine_3, b"k3", b"v3");
@@ -230,7 +230,7 @@ fn test_pd_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer4 must have v1, v2, v3, v4, we check v1 and v4 here.
-    let engine_2 = cluster.get_engine(peer4.get_store_id());
+    let engine_2 = cluster.get_kv_db(peer4.get_store_id());
 
     must_get_equal(&engine_2, b"k1", b"v1");
     must_get_equal(&engine_2, b"k4", b"v4");
@@ -321,7 +321,7 @@ fn test_auto_adjust_replica<T: Simulator>(cluster: &mut Cluster<T>) {
         .unwrap();
 
     let peer = new_conf_change_peer(&stores[i], &pd_client);
-    let engine = cluster.get_engine(peer.get_store_id());
+    let engine = cluster.get_kv_db(peer.get_store_id());
     must_get_none(&engine, b"k1");
 
     pd_client.must_add_peer(region_id, peer.clone());
@@ -384,8 +384,8 @@ fn test_after_remove_itself<T: Simulator>(cluster: &mut Cluster<T>) {
 
     cluster.must_put(b"k1", b"v1");
 
-    let engine1 = cluster.get_engine(1);
-    let engine3 = cluster.get_engine(3);
+    let engine1 = cluster.get_kv_db(1);
+    let engine3 = cluster.get_kv_db(3);
     must_get_equal(&engine1, b"k1", b"v1");
     must_get_equal(&engine3, b"k1", b"v1");
 
@@ -471,7 +471,7 @@ fn test_split_brain<T: Simulator>(cluster: &mut Cluster<T>) {
     pd_client.must_remove_peer(r1, new_peer(3, 3));
 
     cluster.must_put(b"k2", b"v2");
-    must_get_equal(&cluster.get_engine(6), b"k2", b"v2");
+    must_get_equal(&cluster.get_kv_db(6), b"k2", b"v2");
     let region_detail = cluster.region_detail(r1, 1);
     let region_peers = region_detail.get_region().get_peers();
     assert_eq!(region_peers.len(), 3);

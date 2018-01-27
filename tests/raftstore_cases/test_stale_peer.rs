@@ -53,7 +53,7 @@ fn test_stale_peer_out_of_region<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
-    let engine_2 = cluster.get_engine(2);
+    let engine_2 = cluster.get_kv_db(2);
     must_get_equal(&engine_2, key, value);
 
     // Isolate peer 2 from other part of the cluster.
@@ -134,7 +134,7 @@ fn test_stale_peer_without_data<T: Simulator>(cluster: &mut Cluster<T>, right_de
     cluster.must_split(&region, b"k2");
     pd_client.must_add_peer(r1, new_peer(3, 3));
 
-    let engine3 = cluster.get_engine(3);
+    let engine3 = cluster.get_kv_db(3);
     if right_derive {
         must_get_none(&engine3, b"k1");
         must_get_equal(&engine3, b"k3", b"v3");

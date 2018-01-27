@@ -38,13 +38,13 @@ fn test_compact_after_delete<T: Simulator>(cluster: &mut Cluster<T>) {
 
     for engines in cluster.engines.values() {
         let approximate_size = engines
-            .kv_engine
+            .kv_db
             .get_approximate_sizes(&[Range::new(b"", b"k9")])[0];
         assert_eq!(approximate_size, 0);
 
-        let cf_handle = get_cf_handle(&engines.kv_engine, CF_LOCK).unwrap();
+        let cf_handle = get_cf_handle(&engines.kv_db, CF_LOCK).unwrap();
         let approximate_size = engines
-            .kv_engine
+            .kv_db
             .get_approximate_sizes_cf(cf_handle, &[Range::new(b"", b"k9")])[0];
         assert_eq!(approximate_size, 0);
     }

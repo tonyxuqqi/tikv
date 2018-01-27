@@ -44,9 +44,9 @@ pub use tikv::raftstore::store::util::find_peer;
 
 pub const MAX_LEADER_LEASE: u64 = 250; // 250ms
 
-pub fn must_get(engine: &Arc<DB>, cf: &str, key: &[u8], value: Option<&[u8]>) {
+pub fn must_get(db: &DB, cf: &str, key: &[u8], value: Option<&[u8]>) {
     for _ in 1..300 {
-        let res = engine.get_value_cf(cf, &keys::data_key(key)).unwrap();
+        let res = db.get_value_cf(cf, &keys::data_key(key)).unwrap();
         if value.is_some() && res.is_some() {
             assert_eq!(value.unwrap(), &*res.unwrap());
             return;
@@ -57,7 +57,7 @@ pub fn must_get(engine: &Arc<DB>, cf: &str, key: &[u8], value: Option<&[u8]>) {
         thread::sleep(Duration::from_millis(20));
     }
     debug!("last try to get {}", escape(key));
-    let res = engine.get_value_cf(cf, &keys::data_key(key)).unwrap();
+    let res = db.get_value_cf(cf, &keys::data_key(key)).unwrap();
     if value.is_none() && res.is_none()
         || value.is_some() && res.is_some() && value.unwrap() == &*res.unwrap()
     {
@@ -70,20 +70,20 @@ pub fn must_get(engine: &Arc<DB>, cf: &str, key: &[u8], value: Option<&[u8]>) {
     )
 }
 
-pub fn must_get_equal(engine: &Arc<DB>, key: &[u8], value: &[u8]) {
-    must_get(engine, "default", key, Some(value));
+pub fn must_get_equal(db: &DB, key: &[u8], value: &[u8]) {
+    must_get(db, "default", key, Some(value));
 }
 
-pub fn must_get_none(engine: &Arc<DB>, key: &[u8]) {
-    must_get(engine, "default", key, None);
+pub fn must_get_none(db: &DB, key: &[u8]) {
+    must_get(db, "default", key, None);
 }
 
-pub fn must_get_cf_equal(engine: &Arc<DB>, cf: &str, key: &[u8], value: &[u8]) {
-    must_get(engine, cf, key, Some(value));
+pub fn must_get_cf_equal(db: &DB, cf: &str, key: &[u8], value: &[u8]) {
+    must_get(db, cf, key, Some(value));
 }
 
-pub fn must_get_cf_none(engine: &Arc<DB>, cf: &str, key: &[u8]) {
-    must_get(engine, cf, key, None);
+pub fn must_get_cf_none(db: &DB, cf: &str, key: &[u8]) {
+    must_get(db, cf, key, None);
 }
 
 pub fn new_store_cfg() -> Config {

@@ -24,7 +24,7 @@ use std::time;
 use std::thread;
 
 use protobuf::Message;
-use rocksdb::{CFHandle, Writable, WriteBatch, DB};
+use rocksdb::{CFHandle, Writable, WriteBatch};
 use kvproto::eraftpb::Snapshot as RaftSnapshot;
 use kvproto::metapb::Region;
 use kvproto::raft_serverpb::RaftSnapshotData;
@@ -32,6 +32,7 @@ use kvproto::raft_serverpb::RaftSnapshotData;
 use raftstore::Result as RaftStoreResult;
 use raftstore::errors::Error as RaftStoreError;
 use raftstore::store::Msg;
+use raftstore::store::engine::KvDb;
 use raftstore::store::util::check_key_in_region;
 use storage::{CfName, CF_DEFAULT, CF_LOCK, CF_WRITE};
 use util::transport::SendCh;
@@ -152,7 +153,7 @@ impl SnapshotStatistics {
 }
 
 pub struct ApplyOptions {
-    pub db: Arc<DB>,
+    pub db: KvDb,
     pub region: Region,
     pub abort: Arc<AtomicUsize>,
     pub write_batch_size: usize,
@@ -578,7 +579,7 @@ impl Snap {
         )
     }
 
-    fn validate(&self, db: Arc<DB>) -> RaftStoreResult<()> {
+    fn validate(&self, db: KvDb) -> RaftStoreResult<()> {
         for cf_file in &self.cf_files {
             if cf_file.size == 0 {
                 // Skip empty file. The checksum of this cf file should be 0 and
@@ -934,7 +935,7 @@ impl Snapshot for Snap {
     }
 
     fn apply(&mut self, options: ApplyOptions) -> Result<()> {
-        box_try!(self.validate(Arc::clone(&options.db)));
+        box_try!(self.validate(options.db.clone()));
 
         for cf_file in &mut self.cf_files {
             if cf_file.size == 0 {
@@ -1386,7 +1387,7 @@ mod test {
     use storage::{ALL_CFS, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE};
     use util::{rocksdb, HandyRwLock};
     use raftstore::Result;
-    use raftstore::store::keys;
+    use raftstore::store::*;
     use raftstore::store::engine::{Iterable, Mutable, Peekable, Snapshot as DbSnapshot};
     use raftstore::store::peer_storage::JOB_STATUS_RUNNING;
 
@@ -1406,13 +1407,13 @@ mod test {
         }
     }
 
-    pub fn get_test_empty_db(path: &TempDir) -> Result<Arc<DB>> {
+    pub fn get_test_empty_db(path: &TempDir) -> Result<KvDb> {
         let p = path.path().to_str().unwrap();
         let db = rocksdb::new_engine(p, ALL_CFS, None)?;
-        Ok(Arc::new(db))
+        Ok(KvDb::new(Arc::new(db)))
     }
 
-    pub fn get_test_db(path: &TempDir) -> Result<Arc<DB>> {
+    pub fn get_test_db(path: &TempDir) -> Result<KvDb> {
         let p = path.path().to_str().unwrap();
         let db = rocksdb::new_engine(p, ALL_CFS, None)?;
         let key = keys::data_key(TEST_KEY);
@@ -1424,7 +1425,7 @@ mod test {
             p.set_id((i + 1) as u64);
             db.put_msg_cf(handle, &key[..], &p)?;
         }
-        Ok(Arc::new(db))
+        Ok(KvDb::new(Arc::new(db)))
     }
 
     pub fn get_kv_count(snap: &DbSnapshot) -> usize {
@@ -1458,7 +1459,7 @@ mod test {
         region
     }
 
-    pub fn assert_eq_db(expected_db: Arc<DB>, db: &DB) {
+    pub fn assert_eq_db(expected_db: &DB, db: &DB) {
         let key = keys::data_key(TEST_KEY);
         for cf in SNAPSHOT_CFS {
             let p1: Option<Peer> = expected_db.get_msg_cf(cf, &key[..]).unwrap();
@@ -1539,12 +1540,12 @@ mod test {
         test_snap_file(get_test_db);
     }
 
-    fn test_snap_file(get_db: fn(p: &TempDir) -> Result<Arc<DB>>) {
+    fn test_snap_file(get_db: fn(p: &TempDir) -> Result<KvDb>) {
         let region_id = 1;
         let region = get_test_region(region_id, 1, 1);
         let src_db_dir = TempDir::new("test-snap-file-db-src").unwrap();
-        let db = get_db(&src_db_dir).unwrap();
-        let snapshot = DbSnapshot::new(Arc::clone(&db));
+        let kv_db = get_db(&src_db_dir).unwrap();
+        let snapshot = DbSnapshot::new(kv_db.clone());
 
         let src_dir = TempDir::new("test-snap-file-src").unwrap();
         let key = SnapKey::new(region_id, 1, 1);
@@ -1632,8 +1633,9 @@ mod test {
         // Change arbitrarily the cf order of ALL_CFS at destination db.
         let dst_cfs = [CF_WRITE, CF_DEFAULT, CF_LOCK, CF_RAFT];
         let dst_db = Arc::new(rocksdb::new_engine(dst_db_path, &dst_cfs, None).unwrap());
+        let dst_kv_db = KvDb::new(dst_db);
         let options = ApplyOptions {
-            db: Arc::clone(&dst_db),
+            db: dst_kv_db.clone(),
             region: region.clone(),
             abort: Arc::new(AtomicUsize::new(JOB_STATUS_RUNNING)),
             write_batch_size: TEST_WRITE_BATCH_SIZE,
@@ -1648,7 +1650,7 @@ mod test {
         assert_eq!(*size_track.rl(), 0);
 
         // Verify the data is correct after applying snapshot.
-        assert_eq_db(db, dst_db.as_ref());
+        assert_eq_db(&kv_db, &dst_kv_db);
     }
 
     #[test]
@@ -1661,12 +1663,12 @@ mod test {
         test_snap_validation(get_test_db);
     }
 
-    fn test_snap_validation(get_db: fn(p: &TempDir) -> Result<Arc<DB>>) {
+    fn test_snap_validation(get_db: fn(p: &TempDir) -> Result<KvDb>) {
         let region_id = 1;
         let region = get_test_region(region_id, 1, 1);
         let db_dir = TempDir::new("test-snap-validation-db").unwrap();
         let db = get_db(&db_dir).unwrap();
-        let snapshot = DbSnapshot::new(Arc::clone(&db));
+        let snapshot = DbSnapshot::new(db.clone());
 
         let dir = TempDir::new("test-snap-validation").unwrap();
         let key = SnapKey::new(region_id, 1, 1);
@@ -1923,7 +1925,7 @@ mod test {
         let dst_db_dir = TempDir::new("test-snap-corruption-dst-db").unwrap();
         let dst_db = get_test_empty_db(&dst_db_dir).unwrap();
         let options = ApplyOptions {
-            db: Arc::clone(&dst_db),
+            db: dst_db.clone(),
             region: region.clone(),
             abort: Arc::new(AtomicUsize::new(JOB_STATUS_RUNNING)),
             write_batch_size: TEST_WRITE_BATCH_SIZE,

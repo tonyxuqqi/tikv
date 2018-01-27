@@ -267,7 +267,7 @@ fn test_auto_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
     let store_id = leader.get_store_id();
     let mut size = 0;
     cluster.engines[&store_id]
-        .kv_engine
+        .kv_db
         .scan(&data_key(b""), &data_key(middle_key), false, &mut |k, v| {
             size += k.len() as u64;
             size += v.len() as u64;
@@ -323,7 +323,7 @@ fn test_delay_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
 
     // check all nodes apply the logs.
     for i in 0..3 {
-        let engine = cluster.get_engine(i + 1);
+        let engine = cluster.get_kv_db(i + 1);
         util::must_get_equal(&engine, k1, b"v1");
         util::must_get_equal(&engine, k3, b"v3");
     }
@@ -351,7 +351,7 @@ fn test_delay_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
 
     assert_eq!(cluster.get(k4).unwrap(), b"v4".to_vec());
 
-    let engine = cluster.get_engine(index);
+    let engine = cluster.get_kv_db(index);
     util::must_get_equal(&engine, k4, b"v4");
 }
 
@@ -391,11 +391,11 @@ fn test_split_overlap_snapshot<T: Simulator>(cluster: &mut Cluster<T>) {
 
     // node 1 and node 2 must have k2, but node 3 must not.
     for i in 1..3 {
-        let engine = cluster.get_engine(i);
+        let engine = cluster.get_kv_db(i);
         util::must_get_equal(&engine, b"k2", b"v2");
     }
 
-    let engine3 = cluster.get_engine(3);
+    let engine3 = cluster.get_kv_db(3);
     util::must_get_none(&engine3, b"k2");
 
     thread::sleep(Duration::from_secs(1));
@@ -455,11 +455,11 @@ fn test_apply_new_version_snapshot<T: Simulator>(cluster: &mut Cluster<T>) {
 
     // node 1 and node 2 must have k2, but node 3 must not.
     for i in 1..3 {
-        let engine = cluster.get_engine(i);
+        let engine = cluster.get_kv_db(i);
         util::must_get_equal(&engine, b"k2", b"v2");
     }
 
-    let engine3 = cluster.get_engine(3);
+    let engine3 = cluster.get_kv_db(3);
     util::must_get_none(&engine3, b"k2");
 
     // transfer leader to ease the preasure of store 1.
@@ -509,7 +509,7 @@ fn test_split_with_stale_peer<T: Simulator>(cluster: &mut Cluster<T>) {
 
     cluster.must_put(b"k0", b"v0");
     // check node 3 has k0.
-    let engine3 = cluster.get_engine(3);
+    let engine3 = cluster.get_kv_db(3);
     util::must_get_equal(&engine3, b"k0", b"v0");
 
     // guarantee node 1 is leader.

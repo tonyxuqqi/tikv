@@ -13,10 +13,10 @@
 
 use std::sync::Arc;
 use std::cmp;
-use rocksdb::{DBIterator, DBVector, SeekKey, TablePropertiesCollection, DB};
+use rocksdb::{DBIterator, DBVector, SeekKey, TablePropertiesCollection};
 use kvproto::metapb::Region;
 
-use raftstore::store::engine::{IterOption, Peekable, Snapshot, SyncSnapshot};
+use raftstore::store::engine::{IterOption, KvDb, Peekable, Snapshot, SyncSnapshot};
 use raftstore::store::{keys, util, PeerStorage};
 use raftstore::Result;
 
@@ -34,7 +34,7 @@ impl RegionSnapshot {
         RegionSnapshot::from_snapshot(ps.raw_snapshot().into_sync(), ps.get_region().clone())
     }
 
-    pub fn from_raw(db: Arc<DB>, region: Region) -> RegionSnapshot {
+    pub fn from_raw(db: KvDb, region: Region) -> RegionSnapshot {
         RegionSnapshot::from_snapshot(Snapshot::new(db).into_sync(), region)
     }
 
@@ -152,7 +152,7 @@ impl Peekable for RegionSnapshot {
 /// iterate in the region. It behaves as if underlying
 /// db only contains one region.
 pub struct RegionIterator {
-    iter: DBIterator<Arc<DB>>,
+    iter: DBIterator<KvDb>,
     valid: bool,
     region: Arc<Region>,
     start_key: Vec<u8>,
@@ -322,7 +322,7 @@ mod tests {
     use std::path::Path;
 
     use tempdir::TempDir;
-    use rocksdb::{Writable, DB};
+    use rocksdb::Writable;
     use kvproto::metapb::{Peer, Region};
 
     use raftstore::Result;
@@ -336,21 +336,20 @@ mod tests {
 
     type DataSet = Vec<(Vec<u8>, Vec<u8>)>;
 
-    fn new_temp_engine(path: &TempDir) -> (Arc<DB>, Arc<DB>) {
+    fn new_temp_engine(path: &TempDir) -> (KvDb, RaftDb) {
         let raft_path = path.path().join(Path::new("raft"));
-        (
-            Arc::new(rocksdb::new_engine(path.path().to_str().unwrap(), ALL_CFS, None).unwrap()),
-            Arc::new(
-                rocksdb::new_engine(raft_path.to_str().unwrap(), &[CF_DEFAULT], None).unwrap(),
-            ),
-        )
+        let kv_db_path = path.path().to_str().unwrap();
+        let kv_db = rocksdb::new_engine(kv_db_path, ALL_CFS, None).unwrap();
+        let raft_db_path = raft_path.to_str().unwrap();
+        let raft_db = rocksdb::new_engine(raft_db_path, &[CF_DEFAULT], None).unwrap();
+        (KvDb::new(Arc::new(kv_db)), RaftDb::new(Arc::new(raft_db)))
     }
 
-    fn new_peer_storage(engine: Arc<DB>, raft_engine: Arc<DB>, r: &Region) -> PeerStorage {
+    fn new_peer_storage(kv_db: KvDb, raft_db: RaftDb, r: &Region) -> PeerStorage {
         let metrics = Rc::new(RefCell::new(CacheQueryStats::default()));
         PeerStorage::new(
-            engine,
-            raft_engine,
+            kv_db,
+            raft_db,
             r,
             worker::dummy_scheduler(),
             "".to_owned(),
@@ -358,7 +357,7 @@ mod tests {
         ).unwrap()
     }
 
-    fn load_default_dataset(engine: Arc<DB>, raft_engine: Arc<DB>) -> (PeerStorage, DataSet) {
+    fn load_default_dataset(kv_db: KvDb, raft_db: RaftDb) -> (PeerStorage, DataSet) {
         let mut r = Region::new();
         r.mut_peers().push(Peer::new());
         r.set_id(10);
@@ -373,28 +372,28 @@ mod tests {
         ];
 
         for &(ref k, ref v) in &base_data {
-            engine.put(&data_key(k), v).expect("");
+            kv_db.put(&data_key(k), v).expect("");
         }
-        let store = new_peer_storage(Arc::clone(&engine), Arc::clone(&raft_engine), &r);
+        let store = new_peer_storage(kv_db, raft_db, &r);
         (store, base_data)
     }
 
     #[test]
     fn test_peekable() {
         let path = TempDir::new("test-raftstore").unwrap();
-        let (engine, raft_engine) = new_temp_engine(&path);
+        let (kv_db, raft_db) = new_temp_engine(&path);
         let mut r = Region::new();
         r.set_id(10);
         r.set_start_key(b"key0".to_vec());
         r.set_end_key(b"key4".to_vec());
-        let store = new_peer_storage(Arc::clone(&engine), Arc::clone(&raft_engine), &r);
+        let store = new_peer_storage(kv_db.clone(), raft_db.clone(), &r);
 
         let (key1, value1) = (b"key1", 2u64);
-        engine.put_u64(&data_key(key1), value1).expect("");
+        kv_db.put_u64(&data_key(key1), value1).expect("");
         let (key2, value2) = (b"key2", 2i64);
-        engine.put_i64(&data_key(key2), value2).expect("");
+        kv_db.put_i64(&data_key(key2), value2).expect("");
         let key3 = b"key3";
-        engine.put_msg(&data_key(key3), &r).expect("");
+        kv_db.put_msg(&data_key(key3), &r).expect("");
 
         let snap = RegionSnapshot::new(&store);
         let v1 = snap.get_u64(key1).expect("");
@@ -415,9 +414,8 @@ mod tests {
     #[test]
     fn test_iterate() {
         let path = TempDir::new("test-raftstore").unwrap();
-        let (engine, raft_engine) = new_temp_engine(&path);
-        let (store, base_data) =
-            load_default_dataset(Arc::clone(&engine), Arc::clone(&raft_engine));
+        let (kv_db, raft_db) = new_temp_engine(&path);
+        let (store, base_data) = load_default_dataset(kv_db.clone(), raft_db.clone());
 
         let snap = RegionSnapshot::new(&store);
         let mut data = vec![];
@@ -488,7 +486,7 @@ mod tests {
         // test last region
         let mut region = Region::new();
         region.mut_peers().push(Peer::new());
-        let store = new_peer_storage(Arc::clone(&engine), Arc::clone(&raft_engine), &region);
+        let store = new_peer_storage(kv_db.clone(), raft_db.clone(), &region);
         let snap = RegionSnapshot::new(&store);
         data.clear();
         snap.scan(b"", &[0xFF, 0xFF], false, &mut |key, value| {
@@ -513,7 +511,7 @@ mod tests {
         assert_eq!(res, base_data);
 
         // test iterator with upper bound
-        let store = new_peer_storage(Arc::clone(&engine), Arc::clone(&raft_engine), &region);
+        let store = new_peer_storage(kv_db.clone(), raft_db.clone(), &region);
         let snap = RegionSnapshot::new(&store);
         let mut iter = snap.iter(IterOption::new(None, Some(b"a5".to_vec()), true));
         assert!(iter.seek_to_first());
@@ -530,9 +528,8 @@ mod tests {
     #[test]
     fn test_reverse_iterate() {
         let path = TempDir::new("test-raftstore").unwrap();
-        let (engine, raft_engine) = new_temp_engine(&path);
-        let (store, test_data) =
-            load_default_dataset(Arc::clone(&engine), Arc::clone(&raft_engine));
+        let (kv_db, raft_db) = new_temp_engine(&path);
+        let (store, test_data) = load_default_dataset(kv_db.clone(), raft_db.clone());
 
         let snap = RegionSnapshot::new(&store);
         let mut statistics = CFStatistics::default();
@@ -581,7 +578,7 @@ mod tests {
         // test last region
         let mut region = Region::new();
         region.mut_peers().push(Peer::new());
-        let store = new_peer_storage(Arc::clone(&engine), Arc::clone(&raft_engine), &region);
+        let store = new_peer_storage(kv_db.clone(), raft_db.clone(), &region);
         let snap = RegionSnapshot::new(&store);
         let mut iter = Cursor::new(Box::new(snap.iter(IterOption::default())), ScanMode::Mixed);
         assert!(
@@ -621,9 +618,8 @@ mod tests {
     #[test]
     fn test_reverse_iterate_with_lower_bound() {
         let path = TempDir::new("test-raftstore").unwrap();
-        let (engine, raft_engine) = new_temp_engine(&path);
-        let (store, test_data) =
-            load_default_dataset(Arc::clone(&engine), Arc::clone(&raft_engine));
+        let (kv_db, raft_db) = new_temp_engine(&path);
+        let (store, test_data) = load_default_dataset(kv_db.clone(), raft_db.clone());
 
         let snap = RegionSnapshot::new(&store);
         let mut iter_opt = IterOption::default();

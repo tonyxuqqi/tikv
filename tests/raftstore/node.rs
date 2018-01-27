@@ -198,7 +198,8 @@ impl Simulator for NodeCluster {
             coprocessor_host,
         ).unwrap();
         assert!(
-            Arc::clone(&engines.kv_engine)
+            engines
+                .kv_db
                 .get_msg::<metapb::Region>(keys::PREPARE_BOOTSTRAP_KEY)
                 .unwrap()
                 .is_none()

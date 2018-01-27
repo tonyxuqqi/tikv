@@ -22,7 +22,7 @@ use kvproto::metapb::Region;
 
 use raftstore::coprocessor::CoprocessorHost;
 use raftstore::store::{keys, Callback, Msg};
-use raftstore::store::engine::{IterOption, Iterable};
+use raftstore::store::engine::{IterOption, Iterable, KvDb};
 use raftstore::Result;
 use util::escape;
 use util::transport::{RetryableSendCh, Sender};
@@ -140,27 +140,26 @@ impl Display for Task {
 }
 
 pub struct Runner<C> {
-    engine: Arc<DB>,
+    db: KvDb,
     ch: RetryableSendCh<Msg, C>,
     coprocessor: Arc<CoprocessorHost>,
 }
 
 impl<C: Sender<Msg>> Runner<C> {
     pub fn new(
-        engine: Arc<DB>,
+        db: KvDb,
         ch: RetryableSendCh<Msg, C>,
         coprocessor: Arc<CoprocessorHost>,
     ) -> Runner<C> {
         Runner {
-            engine: engine,
-            ch: ch,
-            coprocessor: coprocessor,
+            db,
+            ch,
+            coprocessor,
         }
     }
 
     fn check_split(&mut self, region: &Region) {
-        let mut split_ctx = self.coprocessor
-            .new_split_check_status(region, &self.engine);
+        let mut split_ctx = self.coprocessor.new_split_check_status(region, &self.db);
         if split_ctx.skip() {
             return;
         }
@@ -180,8 +179,8 @@ impl<C: Sender<Msg>> Runner<C> {
         let coprocessor = &mut self.coprocessor;
 
         let timer = CHECK_SPILT_HISTOGRAM.start_coarse_timer();
-        let res = MergedIterator::new(self.engine.as_ref(), LARGE_CFS, &start_key, &end_key, false)
-            .map(|mut iter| {
+        let res =
+            MergedIterator::new(&self.db, LARGE_CFS, &start_key, &end_key, false).map(|mut iter| {
                 while let Some(e) = iter.next() {
                     if let Some(key) = coprocessor.on_split_check(
                         region,

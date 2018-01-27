@@ -164,8 +164,8 @@ impl<T: Simulator> Cluster<T> {
 
     pub fn compact_data(&self) {
         for engine in self.engines.values() {
-            let handle = rocksdb::get_cf_handle(&engine.kv_engine, "default").unwrap();
-            rocksdb::compact_range(&engine.kv_engine, handle, None, None, false);
+            let handle = rocksdb::get_cf_handle(&engine.kv_db, "default").unwrap();
+            rocksdb::compact_range(&engine.kv_db, handle, None, None, false);
         }
     }
 
@@ -201,12 +201,12 @@ impl<T: Simulator> Cluster<T> {
         debug!("node {} stopped", node_id);
     }
 
-    pub fn get_engine(&self, node_id: u64) -> Arc<DB> {
-        Arc::clone(&self.engines[&node_id].kv_engine)
+    pub fn get_kv_db(&self, node_id: u64) -> KvDb {
+        self.engines[&node_id].kv_db.clone()
     }
 
-    pub fn get_raft_engine(&self, node_id: u64) -> Arc<DB> {
-        Arc::clone(&self.engines[&node_id].raft_engine)
+    pub fn get_raft_db(&self, node_id: u64) -> RaftDb {
+        self.engines[&node_id].raft_db.clone()
     }
 
     pub fn send_raft_msg(&mut self, msg: RaftMessage) -> Result<()> {
@@ -456,7 +456,7 @@ impl<T: Simulator> Cluster<T> {
         let half = self.engines.len() / 2;
         let mut qualified_cnt = 0;
         for (id, engines) in &self.engines {
-            if !condition(&engines.kv_engine) {
+            if !condition(&engines.kv_db) {
                 debug!("store {} is not qualified yet.", id);
                 continue;
             }
@@ -675,8 +675,8 @@ impl<T: Simulator> Cluster<T> {
 
     pub fn must_flush(&mut self, sync: bool) {
         for engines in &self.dbs {
-            engines.kv_engine.flush(sync).unwrap();
-            engines.raft_engine.flush(sync).unwrap();
+            engines.kv_db.flush(sync).unwrap();
+            engines.raft_db.flush(sync).unwrap();
         }
     }
 

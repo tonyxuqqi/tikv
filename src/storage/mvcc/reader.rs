@@ -558,20 +558,19 @@ mod tests {
     use storage::engine::Modify;
     use storage::mvcc::{MvccReader, MvccTxn};
     use tempdir::TempDir;
-    use raftstore::store::RegionSnapshot;
-    use raftstore::store::keys;
+    use raftstore::store::*;
     use util::rocksdb::{self as rocksdb_util, CFOptions};
     use util::properties::{MvccProperties, MvccPropertiesCollectorFactory};
 
     struct RegionEngine {
-        db: Arc<DB>,
+        db: KvDb,
         region: Region,
     }
 
     impl RegionEngine {
-        pub fn new(db: Arc<DB>, region: Region) -> RegionEngine {
+        pub fn new(db: KvDb, region: Region) -> RegionEngine {
             RegionEngine {
-                db: Arc::clone(&db),
+                db: db,
                 region: region,
             }
         }
@@ -595,7 +594,7 @@ mod tests {
         }
 
         fn prewrite(&mut self, m: Mutation, pk: &[u8], start_ts: u64) {
-            let snap = RegionSnapshot::from_raw(Arc::clone(&self.db), self.region.clone());
+            let snap = RegionSnapshot::from_raw(self.db.clone(), self.region.clone());
             let mut txn = MvccTxn::new(Box::new(snap), start_ts, None, IsolationLevel::SI, true);
             txn.prewrite(m, pk, &Options::default()).unwrap();
 
@@ -604,7 +603,7 @@ mod tests {
 
         fn commit(&mut self, pk: &[u8], start_ts: u64, commit_ts: u64) {
             let k = make_key(pk);
-            let snap = RegionSnapshot::from_raw(Arc::clone(&self.db), self.region.clone());
+            let snap = RegionSnapshot::from_raw(self.db.clone(), self.region.clone());
             let mut txn = MvccTxn::new(Box::new(snap), start_ts, None, IsolationLevel::SI, true);
             txn.commit(&k, commit_ts).unwrap();
             self.write(txn.into_modifies());
@@ -612,7 +611,7 @@ mod tests {
 
         fn gc(&mut self, pk: &[u8], safe_point: u64) {
             let k = make_key(pk);
-            let snap = RegionSnapshot::from_raw(Arc::clone(&self.db), self.region.clone());
+            let snap = RegionSnapshot::from_raw(self.db.clone(), self.region.clone());
             let mut txn = MvccTxn::new(Box::new(snap), safe_point, None, IsolationLevel::SI, true);
             txn.gc(&k, safe_point).unwrap();
             self.write(txn.into_modifies());
@@ -688,12 +687,12 @@ mod tests {
     }
 
     fn check_need_gc(
-        db: Arc<DB>,
+        db: KvDb,
         region: Region,
         safe_point: u64,
         need_gc: bool,
     ) -> Option<MvccProperties> {
-        let snap = RegionSnapshot::from_raw(Arc::clone(&db), region.clone());
+        let snap = RegionSnapshot::from_raw(db, region.clone());
         let reader = MvccReader::new(Box::new(snap), None, false, None, None, IsolationLevel::SI);
         assert_eq!(reader.need_gc(safe_point, 1.0), need_gc);
         reader.get_mvcc_properties(safe_point)
@@ -709,23 +708,23 @@ mod tests {
     }
 
     fn test_without_properties(path: &str, region: &Region) {
-        let db = open_db(path, false);
-        let mut engine = RegionEngine::new(Arc::clone(&db), region.clone());
+        let kv_db = KvDb::new(open_db(path, false));
+        let mut engine = RegionEngine::new(kv_db.clone(), region.clone());
 
         // Put 2 keys.
         engine.put(&[1], 1, 1);
         engine.put(&[4], 2, 2);
-        assert!(check_need_gc(Arc::clone(&db), region.clone(), 10, true).is_none());
+        assert!(check_need_gc(kv_db.clone(), region.clone(), 10, true).is_none());
         engine.flush();
         // After this flush, we have a SST file without properties.
         // Without properties, we always need GC.
-        assert!(check_need_gc(Arc::clone(&db), region.clone(), 10, true).is_none());
+        assert!(check_need_gc(kv_db.clone(), region.clone(), 10, true).is_none());
     }
 
     #[allow(cyclomatic_complexity)]
     fn test_with_properties(path: &str, region: &Region) {
-        let db = open_db(path, true);
-        let mut engine = RegionEngine::new(Arc::clone(&db), region.clone());
+        let kv_db = KvDb::new(open_db(path, true));
+        let mut engine = RegionEngine::new(kv_db.clone(), region.clone());
 
         // Put 2 keys.
         engine.put(&[2], 3, 3);
@@ -734,12 +733,12 @@ mod tests {
         // After this flush, we have a SST file w/ properties, plus the SST
         // file w/o properties from previous flush. We always need GC as
         // long as we can't get properties from any SST files.
-        assert!(check_need_gc(Arc::clone(&db), region.clone(), 10, true).is_none());
+        assert!(check_need_gc(kv_db.clone(), region.clone(), 10, true).is_none());
         engine.compact();
         // After this compact, the two SST files are compacted into a new
         // SST file with properties. Now all SST files have properties and
         // all keys have only one version, so we don't need gc.
-        let props = check_need_gc(Arc::clone(&db), region.clone(), 10, false).unwrap();
+        let props = check_need_gc(kv_db.clone(), region.clone(), 10, false).unwrap();
         assert_eq!(props.min_ts, 1);
         assert_eq!(props.max_ts, 4);
         assert_eq!(props.num_rows, 4);
@@ -755,7 +754,7 @@ mod tests {
         engine.flush();
         // After this flush, keys 5,6 in the new SST file have more than one
         // versions, so we need gc.
-        let props = check_need_gc(Arc::clone(&db), region.clone(), 10, true).unwrap();
+        let props = check_need_gc(kv_db.clone(), region.clone(), 10, true).unwrap();
         assert_eq!(props.min_ts, 1);
         assert_eq!(props.max_ts, 8);
         assert_eq!(props.num_rows, 6);
@@ -763,7 +762,7 @@ mod tests {
         assert_eq!(props.num_versions, 8);
         assert_eq!(props.max_row_versions, 2);
         // But if the `safe_point` is older than all versions, we don't need gc too.
-        let props = check_need_gc(Arc::clone(&db), region.clone(), 0, false).unwrap();
+        let props = check_need_gc(kv_db.clone(), region.clone(), 0, false).unwrap();
         assert_eq!(props.min_ts, u64::MAX);
         assert_eq!(props.max_ts, 0);
         assert_eq!(props.num_rows, 0);
@@ -777,7 +776,7 @@ mod tests {
         engine.compact();
         // After this compact, all versions of keys 5,6 are deleted,
         // no keys have more than one versions, so we don't need gc.
-        let props = check_need_gc(Arc::clone(&db), region.clone(), 10, false).unwrap();
+        let props = check_need_gc(kv_db.clone(), region.clone(), 10, false).unwrap();
         assert_eq!(props.min_ts, 1);
         assert_eq!(props.max_ts, 4);
         assert_eq!(props.num_rows, 4);
@@ -788,7 +787,7 @@ mod tests {
         // A single lock version need gc.
         engine.lock(&[7], 9, 9);
         engine.flush();
-        let props = check_need_gc(Arc::clone(&db), region.clone(), 10, true).unwrap();
+        let props = check_need_gc(kv_db.clone(), region.clone(), 10, true).unwrap();
         assert_eq!(props.min_ts, 1);
         assert_eq!(props.max_ts, 9);
         assert_eq!(props.num_rows, 5);

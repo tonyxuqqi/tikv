@@ -118,13 +118,12 @@ mod tests {
     use std::sync::mpsc;
 
     use tempdir::TempDir;
-    use rocksdb::Writable;
     use kvproto::metapb::Peer;
-    use rocksdb::{ColumnFamilyOptions, DBOptions};
+    use rocksdb::{ColumnFamilyOptions, DBOptions, Writable};
     use kvproto::metapb::Region;
 
     use storage::ALL_CFS;
-    use raftstore::store::{keys, Msg, SplitCheckRunner, SplitCheckTask};
+    use raftstore::store::{keys, KvDb, Msg, SplitCheckRunner, SplitCheckTask};
     use util::rocksdb::{new_engine_opt, CFOptions};
     use util::worker::Runnable;
     use util::transport::RetryableSendCh;
@@ -146,6 +145,7 @@ mod tests {
             .map(|cf| CFOptions::new(cf, cf_opts.clone()))
             .collect();
         let engine = Arc::new(new_engine_opt(path_str, db_opts, cfs_opts).unwrap());
+        let kv_db = KvDb::new(engine);
 
         let mut region = Region::new();
         region.set_id(1);
@@ -162,7 +162,7 @@ mod tests {
         cfg.region_split_size = ReadableSize(60);
 
         let mut runnable = SplitCheckRunner::new(
-            Arc::clone(&engine),
+            kv_db.clone(),
             ch.clone(),
             Arc::new(CoprocessorHost::new(cfg, ch.clone())),
         );
@@ -170,7 +170,7 @@ mod tests {
         // so split key will be z0006
         for i in 0..7 {
             let s = keys::data_key(format!("{:04}", i).as_bytes());
-            engine.put(&s, &s).unwrap();
+            kv_db.put(&s, &s).unwrap();
         }
 
         runnable.run(SplitCheckTask::new(&region));
@@ -184,12 +184,12 @@ mod tests {
 
         for i in 7..11 {
             let s = keys::data_key(format!("{:04}", i).as_bytes());
-            engine.put(&s, &s).unwrap();
+            kv_db.put(&s, &s).unwrap();
         }
 
         // Approximate size of memtable is inaccurate for small data,
         // we flush it to SST so we can use the size properties instead.
-        engine.flush(true).unwrap();
+        kv_db.flush(true).unwrap();
 
         runnable.run(SplitCheckTask::new(&region));
         match rx.try_recv() {
@@ -216,13 +216,13 @@ mod tests {
         for i in 0..6 {
             let s = keys::data_key(format!("{:04}", i).as_bytes());
             for cf in ALL_CFS {
-                let handle = engine.cf_handle(cf).unwrap();
-                engine.put_cf(handle, &s, &s).unwrap();
+                let handle = kv_db.cf_handle(cf).unwrap();
+                kv_db.put_cf(handle, &s, &s).unwrap();
             }
         }
         for cf in ALL_CFS {
-            let handle = engine.cf_handle(cf).unwrap();
-            engine.flush_cf(handle, true).unwrap();
+            let handle = kv_db.cf_handle(cf).unwrap();
+            kv_db.flush_cf(handle, true).unwrap();
         }
 
         runnable.run(SplitCheckTask::new(&region));

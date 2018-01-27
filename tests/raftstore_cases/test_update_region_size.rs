@@ -19,7 +19,7 @@ use std::{thread, time};
 
 fn flush<T: Simulator>(cluster: &mut Cluster<T>) {
     for engines in cluster.engines.values() {
-        engines.kv_engine.flush(true).unwrap();
+        engines.kv_db.flush(true).unwrap();
     }
 }
 
