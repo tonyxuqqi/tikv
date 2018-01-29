@@ -16,6 +16,9 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::fmt::{self, Debug, Formatter};
 
+use kvproto::eraftpb::Entry;
+use kvproto::raft_serverpb::{PeerState, RaftApplyState, RaftLocalState, RaftSnapshotData,
+                             RegionLocalState};
 use rocksdb::{CFHandle, DBIterator, DBVector, ReadOptions, Writable, WriteBatch, DB};
 use rocksdb::rocksdb_options::UnsafeSnap;
 use protobuf;
@@ -23,6 +26,8 @@ use byteorder::{BigEndian, ByteOrder};
 use util::rocksdb;
 
 use raftstore::{Error, Result};
+use raftstore::store::keys;
+use storage::CF_RAFT;
 
 pub struct Snapshot {
     db: KvDb,
@@ -439,6 +444,14 @@ impl KvDb {
     pub fn new(db: Arc<DB>) -> KvDb {
         KvDb { db }
     }
+
+    pub fn snapshot_raft_state(&self, region_id: u64) -> Result<Option<RaftLocalState>> {
+        self.get_msg_cf(CF_RAFT, &keys::snapshot_raft_state_key(region_id))
+    }
+
+    pub fn raft_apply_state(&self, region_id: u64) -> Result<Option<RaftApplyState>> {
+        self.get_msg_cf(CF_RAFT, &keys::apply_state_key(region_id))
+    }
 }
 
 impl Deref for KvDb {
@@ -457,6 +470,19 @@ pub struct RaftDb {
 impl RaftDb {
     pub fn new(db: Arc<DB>) -> RaftDb {
         RaftDb { db }
+    }
+
+    pub fn raft_state(&self, region_id: u64) -> Result<Option<RaftLocalState>> {
+        self.get_msg(&keys::raft_state_key(region_id))
+    }
+
+    pub fn entry(&self, region_id: u64, index: u64) -> Result<Option<Entry>> {
+        self.get_msg(&keys::raft_log_key(region_id, index))
+    }
+
+    pub fn scan_entries(&self, region_id: u64, start_index: u64, end_index: u64, f: F) -> Result<()> 
+    where F: FnMut((Entry, usize)) -> Result<bool> {
+        
     }
 }
 
