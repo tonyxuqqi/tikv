@@ -2180,16 +2180,20 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             //                  ^                                       ^
             //                  |-----------------threshold------------ |
             //              first_index                         replicated_index
-            let replicated_idx = peer.raft_group
-                .raft
-                .prs()
-                .iter()
-                .map(|(_, p)| p.matched)
-                .min()
-                .unwrap();
+            // `healthy_replicated_index` is the smallest `replicated_index` of healthy nodes.
+            let truncated_idx = peer.get_store().truncated_index();
+            let last_idx = peer.get_store().last_index();
+            let (mut replicated_idx, mut healthy_replicated_idx) = (last_idx, last_idx);
+            for (_, p) in peer.raft_group.raft.prs().iter() {
+                if replicated_idx > p.matched {
+                    replicated_idx = p.matched;
+                }
+                if healthy_replicated_idx > p.matched && p.matched >= truncated_idx {
+                    healthy_replicated_idx = p.matched;
+                }
+            }
             // When an election happened or a new peer is added, replicated_idx can be 0.
             if replicated_idx > 0 {
-                let last_idx = peer.raft_group.raft.raft_log.last_index();
                 assert!(
                     last_idx >= replicated_idx,
                     "expect last index {} >= replicated index {}",
@@ -2199,6 +2203,10 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                 REGION_MAX_LOG_LAG.observe((last_idx - replicated_idx) as f64);
             }
             let applied_idx = peer.get_store().applied_index();
+            if applied_idx == healthy_replicated_idx {
+                // Clear all applied cache.
+                peer.mut_store().compact_to(applied_idx + 1);
+            }
             let first_idx = peer.get_store().first_index();
             let mut compact_idx;
             if applied_idx > first_idx

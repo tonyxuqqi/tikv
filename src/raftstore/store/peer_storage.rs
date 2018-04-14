@@ -222,7 +222,7 @@ impl EntryCache {
         }
         let cache_last_idx = self.cache.back().unwrap().get_index();
         self.cache
-            .drain(..(cmp::min(cache_last_idx, idx) - cache_first_idx) as usize);
+            .drain(..(cmp::min(cache_last_idx + 1, idx) - cache_first_idx) as usize);
         if self.cache.len() < SHRINK_CACHE_CAPACITY && self.cache.capacity() > SHRINK_CACHE_CAPACITY
         {
             // So the peer storage doesn't have much writes since the proposal of compaction,
