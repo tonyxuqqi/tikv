@@ -160,9 +160,8 @@ pub enum ExecResult {
         first_index: u64,
     },
     SplitRegion {
-        left: Region,
-        right: Region,
-        right_derive: bool,
+        regions: Vec<Region>,
+        latest: Region,
     },
     PrepareMerge {
         region: Region,
@@ -769,16 +768,8 @@ impl ApplyDelegate {
                 | ExecResult::CompactLog { .. }
                 | ExecResult::DeleteRange { .. }
                 | ExecResult::IngestSST { .. } => {}
-                ExecResult::SplitRegion {
-                    ref left,
-                    ref right,
-                    right_derive,
-                } => {
-                    if right_derive {
-                        self.region = right.clone();
-                    } else {
-                        self.region = left.clone();
-                    }
+                ExecResult::SplitRegion { ref latest, .. } => {
+                    self.region = latest.clone();
                     self.metrics.size_diff_hint = 0;
                     self.metrics.delete_keys_hint = 0;
                 }
@@ -910,6 +901,7 @@ impl ApplyDelegate {
         let (mut response, exec_result) = match cmd_type {
             AdminCmdType::ChangePeer => self.exec_change_peer(ctx, request),
             AdminCmdType::Split => self.exec_split(ctx, request),
+            AdminCmdType::BatchSplit => self.exec_batch_split(ctx, request),
             AdminCmdType::CompactLog => self.exec_compact_log(ctx, request),
             AdminCmdType::TransferLeader => Err(box_err!("transfer leader won't exec")),
             AdminCmdType::ComputeHash => self.exec_compute_hash(ctx, request),
@@ -1093,116 +1085,120 @@ impl ApplyDelegate {
         ctx: &mut ApplyContext,
         req: &AdminRequest,
     ) -> Result<(AdminResponse, Option<ExecResult>)> {
+        info!(
+            "{} split is deprecated, redirect to use batch split.",
+            self.tag
+        );
+        let split = req.get_split().to_owned();
+        let mut admin_req = AdminRequest::new();
+        admin_req
+            .mut_splits()
+            .set_right_derive(split.get_right_derive());
+        admin_req.mut_splits().mut_requests().push(split);
+        // This method is executed only when there are unapplied entries after being restarted.
+        // So there will be no callback, it's OK to return a response that does not matched
+        // with its request.
+        self.exec_batch_split(ctx, &admin_req)
+    }
+
+    fn exec_batch_split(
+        &mut self,
+        ctx: &mut ApplyContext,
+        req: &AdminRequest,
+    ) -> Result<(AdminResponse, Option<ExecResult>)> {
         PEER_ADMIN_CMD_COUNTER_VEC
-            .with_label_values(&["split", "all"])
+            .with_label_values(&["batch-split", "all"])
             .inc();
 
-        let split_req = req.get_split();
-        let right_derive = split_req.get_right_derive();
-        if split_req.get_split_key().is_empty() {
-            return Err(box_err!("missing split key"));
+        let split_reqs = req.get_splits();
+        let right_derive = split_reqs.get_right_derive();
+        if split_reqs.get_requests().is_empty() {
+            return Err(box_err!("missing split requests"));
+        }
+        let mut latest = self.region.clone();
+        let mut regions = Vec::with_capacity(split_reqs.get_requests().len() + 1);
+        let mut keys: VecDeque<Vec<u8>> = VecDeque::with_capacity(regions.capacity());
+        for req in split_reqs.get_requests() {
+            let split_key = req.get_split_key();
+            if split_key.is_empty() {
+                return Err(box_err!("missing split key"));
+            }
+            if split_key
+                <= keys.back()
+                    .map_or_else(|| latest.get_start_key(), Vec::as_slice)
+            {
+                return Err(box_err!("invalid split request: {:?}", split_reqs));
+            }
+            if req.get_new_peer_ids().len() != latest.get_peers().len() {
+                return Err(box_err!(
+                    "invalid new peer id count, need {}, but got {}",
+                    latest.get_peers().len(),
+                    req.get_new_peer_ids().len()
+                ));
+            }
+            keys.push_back(split_key.to_vec());
         }
 
-        let split_key = split_req.get_split_key();
-        let mut region = self.region.clone();
-        if split_key <= region.get_start_key() {
-            return Err(box_err!("invalid split request: {:?}", split_req));
-        }
+        util::check_key_in_region(keys.back().unwrap(), &self.region)?;
 
-        util::check_key_in_region(split_key, &region)?;
-
-        info!(
-            "{} split at key: {}, region: {:?}",
-            self.tag,
-            escape(split_key),
-            region
-        );
-
-        // TODO: check new region id validation.
-        let new_region_id = split_req.get_new_region_id();
-
-        // After split, the left region key range is [start_key, split_key),
-        // the right region is [split_key, end).
-        let mut new_region = region.clone();
-        new_region.set_id(new_region_id);
+        info!("{} split region {:?} with {:?}", self.tag, latest, keys);
+        // Maybe version should be increased by split_reqs.len()?
+        let new_version = latest.get_region_epoch().get_version() + 1;
+        latest.mut_region_epoch().set_version(new_version);
         if right_derive {
-            region.set_start_key(split_key.to_vec());
-            new_region.set_end_key(split_key.to_vec());
+            keys.push_front(latest.get_start_key().to_vec());
         } else {
-            region.set_end_key(split_key.to_vec());
-            new_region.set_start_key(split_key.to_vec());
+            keys.push_back(latest.get_end_key().to_vec());
+            latest.set_end_key(keys.front().unwrap().to_vec());
+            regions.push(latest.clone());
         }
-
-        // Update new region peer ids.
-        let new_peer_ids = split_req.get_new_peer_ids();
-        if new_peer_ids.len() != new_region.get_peers().len() {
-            return Err(box_err!(
-                "invalid new peer id count, need {}, but got {}",
-                new_region.get_peers().len(),
-                new_peer_ids.len()
-            ));
-        }
-
-        for (peer, &peer_id) in new_region.mut_peers().iter_mut().zip(new_peer_ids) {
-            peer.set_id(peer_id);
-        }
-
-        // update region version
-        let region_ver = region.get_region_epoch().get_version() + 1;
-        region.mut_region_epoch().set_version(region_ver);
-        new_region.mut_region_epoch().set_version(region_ver);
-        write_peer_state(&self.engine, ctx.wb_mut(), &region, PeerState::Normal, None)
-            .and_then(|_| {
-                write_peer_state(
-                    &self.engine,
-                    ctx.wb_mut(),
-                    &new_region,
-                    PeerState::Normal,
-                    None,
-                )
-            })
-            .and_then(|_| {
+        for req in split_reqs.get_requests() {
+            let mut new_region = Region::new();
+            new_region.set_id(req.get_new_region_id());
+            new_region.set_region_epoch(latest.get_region_epoch().to_owned());
+            new_region.set_start_key(keys.pop_front().unwrap());
+            new_region.set_end_key(keys.front().unwrap().to_vec());
+            new_region.set_peers(RepeatedField::from_slice(latest.get_peers()));
+            for (peer, peer_id) in new_region
+                .mut_peers()
+                .iter_mut()
+                .zip(req.get_new_peer_ids())
+            {
+                peer.set_id(*peer_id);
+            }
+            write_peer_state(
+                &self.engine,
+                ctx.wb_mut(),
+                &new_region,
+                PeerState::Normal,
+                None,
+            ).and_then(|_| {
                 write_initial_apply_state(&self.engine, ctx.wb_mut(), new_region.get_id())
             })
-            .unwrap_or_else(|e| {
-                panic!(
-                    "{} failed to save split region {:?}: {:?}",
-                    self.tag, new_region, e
-                )
-            });
-
-        let mut resp = AdminResponse::new();
-        if right_derive {
-            resp.mut_split().set_left(new_region.clone());
-            resp.mut_split().set_right(region.clone());
-        } else {
-            resp.mut_split().set_left(region.clone());
-            resp.mut_split().set_right(new_region.clone());
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{} fails to save split region {:?}: {:?}",
+                        self.tag, new_region, e
+                    )
+                });
+            regions.push(new_region);
         }
-
+        if right_derive {
+            latest.set_start_key(keys.pop_front().unwrap());
+            regions.push(latest.clone());
+        }
+        write_peer_state(&self.engine, ctx.wb_mut(), &latest, PeerState::Normal, None)
+            .unwrap_or_else(|e| {
+                panic!("{} fails to update region {:?}: {:?}", self.tag, latest, e)
+            });
+        let mut resp = AdminResponse::new();
+        resp.mut_splits()
+            .set_regions(RepeatedField::from_slice(&regions));
         PEER_ADMIN_CMD_COUNTER_VEC
-            .with_label_values(&["split", "success"])
+            .with_label_values(&["batch-split", "success"])
             .inc();
 
-        if right_derive {
-            Ok((
-                resp,
-                Some(ExecResult::SplitRegion {
-                    left: new_region,
-                    right: region,
-                    right_derive: true,
-                }),
-            ))
-        } else {
-            Ok((
-                resp,
-                Some(ExecResult::SplitRegion {
-                    left: region,
-                    right: new_region,
-                    right_derive: false,
-                }),
-            ))
-        }
+        Ok((resp, Some(ExecResult::SplitRegion { regions, latest })))
     }
 
     fn exec_prepare_merge(

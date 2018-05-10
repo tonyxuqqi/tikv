@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use raftstore::store::{util, Msg};
+use raftstore::store::{keys, util, Msg};
 use rocksdb::DB;
 use util::transport::{RetryableSendCh, Sender};
 
@@ -46,11 +46,13 @@ impl SplitChecker for Checker {
         self.current_size >= self.max_size
     }
 
-    fn split_key(&mut self) -> Option<Vec<u8>> {
+    fn split_keys(&mut self) -> Vec<Vec<u8>> {
         if self.current_size >= self.max_size {
-            self.split_key.take()
+            let data_key = self.split_key.take().unwrap();
+            let key = keys::origin_key(&data_key).to_vec();
+            vec![key]
         } else {
-            None
+            vec![]
         }
     }
 }
@@ -223,12 +225,12 @@ mod tests {
             Ok(Msg::SplitRegion {
                 region_id,
                 region_epoch,
-                split_key,
+                split_keys,
                 ..
             }) => {
                 assert_eq!(region_id, region.get_id());
                 assert_eq!(&region_epoch, region.get_region_epoch());
-                assert_eq!(split_key, b"0006");
+                assert_eq!(split_keys, vec![b"0006".to_vec()]);
             }
             others => panic!("expect split check result, but got {:?}", others),
         }
@@ -257,12 +259,12 @@ mod tests {
             Ok(Msg::SplitRegion {
                 region_id,
                 region_epoch,
-                split_key,
+                split_keys,
                 ..
             }) => {
                 assert_eq!(region_id, region.get_id());
                 assert_eq!(&region_epoch, region.get_region_epoch());
-                assert_eq!(split_key, b"0003");
+                assert_eq!(split_keys, vec![b"0003".to_vec()]);
             }
             others => panic!("expect split check result, but got {:?}", others),
         }

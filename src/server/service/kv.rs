@@ -1186,7 +1186,7 @@ impl<T: RaftStoreRouter + 'static> tikvpb_grpc::Tikv for Service<T> {
         let req = StoreMessage::SplitRegion {
             region_id: req.get_context().get_region_id(),
             region_epoch: req.take_context().take_region_epoch(),
-            split_key: Key::from_raw(req.get_split_key()).encoded().clone(),
+            split_keys: vec![Key::from_raw(req.get_split_key()).encoded().clone()],
             callback: Callback::Write(cb),
         };
 
@@ -1203,9 +1203,17 @@ impl<T: RaftStoreRouter + 'static> tikvpb_grpc::Tikv for Service<T> {
                     resp.set_region_error(v.response.mut_header().take_error());
                 } else {
                     let admin_resp = v.response.mut_admin_response();
-                    let split_resp = admin_resp.mut_split();
-                    resp.set_left(split_resp.take_left());
-                    resp.set_right(split_resp.take_right());
+                    if admin_resp.get_splits().get_regions().len() != 2 {
+                        error!("{} invalid split response: {:?}", LABEL, admin_resp);
+                        resp.mut_region_error().set_message(format!(
+                            "Internal Error: invalid response: {:?}",
+                            admin_resp
+                        ));
+                    } else {
+                        let regions = admin_resp.mut_splits().mut_regions();
+                        resp.set_right(regions.pop().unwrap());
+                        resp.set_left(regions.pop().unwrap());
+                    }
                 }
                 resp
             })

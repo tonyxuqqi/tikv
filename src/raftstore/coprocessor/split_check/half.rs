@@ -13,6 +13,7 @@
 
 use rocksdb::DB;
 
+use raftstore::store::keys;
 use util::config::ReadableSize;
 
 use super::super::{Coprocessor, ObserverContext, SplitCheckObserver, SplitChecker};
@@ -47,12 +48,14 @@ impl SplitChecker for Checker {
         false
     }
 
-    fn split_key(&mut self) -> Option<Vec<u8>> {
+    fn split_keys(&mut self) -> Vec<Vec<u8>> {
         let mid = self.buckets.len() / 2;
         if mid == 0 {
-            None
+            vec![]
         } else {
-            Some(self.buckets.swap_remove(mid))
+            let data_key = self.buckets.swap_remove(mid);
+            let key = keys::origin_key(&data_key).to_vec();
+            vec![key]
         }
     }
 }
@@ -147,12 +150,12 @@ mod tests {
                 Ok(Msg::SplitRegion {
                     region_id,
                     region_epoch,
-                    split_key,
+                    split_keys,
                     ..
                 }) => {
                     assert_eq!(region_id, region.get_id());
                     assert_eq!(&region_epoch, region.get_region_epoch());
-                    assert_eq!(split_key, b"0006");
+                    assert_eq!(split_keys, vec![b"0006".to_vec()]);
                     break;
                 }
                 Ok(Msg::ApproximateRegionSize { region_id, .. }) => {

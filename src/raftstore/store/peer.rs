@@ -1030,7 +1030,7 @@ impl Peer {
 
     pub fn maybe_campaign(
         &mut self,
-        last_peer: &Peer,
+        is_parent_leader: bool,
         pending_raft_groups: &mut HashSet<u64>,
     ) -> bool {
         if self.region().get_peers().len() <= 1 {
@@ -1038,7 +1038,7 @@ impl Peer {
             return false;
         }
 
-        if !last_peer.is_leader() {
+        if !is_parent_leader {
             return false;
         }
 
@@ -1651,7 +1651,7 @@ pub fn check_epoch(
             | AdminCmdType::InvalidAdmin
             | AdminCmdType::ComputeHash
             | AdminCmdType::VerifyHash => {}
-            AdminCmdType::Split => check_ver = true,
+            AdminCmdType::Split | AdminCmdType::BatchSplit => check_ver = true,
             AdminCmdType::ChangePeer => check_conf_ver = true,
             AdminCmdType::PrepareMerge
             | AdminCmdType::CommitMerge
@@ -1872,6 +1872,7 @@ fn get_sync_log_from_request(msg: &RaftCmdRequest) -> bool {
         return match req.get_cmd_type() {
             AdminCmdType::ChangePeer
             | AdminCmdType::Split
+            | AdminCmdType::BatchSplit
             | AdminCmdType::PrepareMerge
             | AdminCmdType::CommitMerge
             | AdminCmdType::RollbackMerge => true,

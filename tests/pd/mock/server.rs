@@ -266,17 +266,35 @@ impl<C: PdMocker + Send + Sync + 'static> Pd for PdMock<C> {
         hijack_unary(self, ctx, sink, |c| c.get_region_by_id(&req))
     }
 
-    fn ask_split(&self, ctx: RpcContext, req: AskSplitRequest, sink: UnarySink<AskSplitResponse>) {
-        hijack_unary(self, ctx, sink, |c| c.ask_split(&req))
+    fn ask_split(&self, _: RpcContext, _: AskSplitRequest, _: UnarySink<AskSplitResponse>) {
+        unimplemented!()
     }
 
     fn report_split(
         &self,
-        ctx: RpcContext,
-        req: ReportSplitRequest,
-        sink: UnarySink<ReportSplitResponse>,
+        _: RpcContext,
+        _: ReportSplitRequest,
+        _: UnarySink<ReportSplitResponse>,
     ) {
-        hijack_unary(self, ctx, sink, |c| c.report_split(&req))
+        unimplemented!()
+    }
+
+    fn ask_batch_split(
+        &self,
+        ctx: RpcContext,
+        req: AskBatchSplitRequest,
+        sink: UnarySink<AskBatchSplitResponse>,
+    ) {
+        hijack_unary(self, ctx, sink, |c| c.ask_batch_split(&req))
+    }
+
+    fn report_batch_split(
+        &self,
+        ctx: RpcContext,
+        req: ReportBatchSplitRequest,
+        sink: UnarySink<ReportBatchSplitResponse>,
+    ) {
+        hijack_unary(self, ctx, sink, |c| c.report_batch_split(&req))
     }
 
     fn get_cluster_config(

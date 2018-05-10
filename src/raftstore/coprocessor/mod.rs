@@ -100,7 +100,7 @@ pub trait SplitChecker {
     }
 
     /// Get the desired split keys.
-    fn split_key(&mut self) -> Option<Vec<u8>>;
+    fn split_keys(&mut self) -> Vec<Vec<u8>>;
 }
 
 pub trait SplitCheckObserver: Coprocessor {

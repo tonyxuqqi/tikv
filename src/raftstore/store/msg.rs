@@ -148,7 +148,7 @@ pub enum Msg {
         region_epoch: RegionEpoch,
         // It's an encoded key.
         // TODO: support meta key.
-        split_key: Vec<u8>,
+        split_keys: Vec<Vec<u8>>,
         callback: Callback,
     },
 
@@ -204,9 +204,9 @@ impl fmt::Debug for Msg {
             ),
             Msg::SplitRegion {
                 ref region_id,
-                ref split_key,
+                ref split_keys,
                 ..
-            } => write!(fmt, "Split region {} at key {:?}", region_id, split_key),
+            } => write!(fmt, "Split region {} at key {:?}", region_id, split_keys),
             Msg::ApproximateRegionSize {
                 region_id,
                 region_size,

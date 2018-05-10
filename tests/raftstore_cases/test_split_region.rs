@@ -153,9 +153,9 @@ fn test_server_split_region_twice() {
     let c = Box::new(move |write_resp: WriteResponse| {
         let mut resp = write_resp.response;
         let admin_resp = resp.mut_admin_response();
-        let split_resp = admin_resp.mut_split();
-        let left = split_resp.take_left();
-        let right = split_resp.take_right();
+        let split_resp = admin_resp.mut_splits();
+        let mut regions = split_resp.take_regions();
+        let (right, left) = (regions.pop().unwrap(), regions.pop().unwrap());
         assert_eq!(left.get_end_key(), key.as_slice());
         assert_eq!(region2.get_start_key(), left.get_start_key());
         assert_eq!(left.get_end_key(), right.get_start_key());
