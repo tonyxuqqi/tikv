@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 use futures::sync::mpsc::{self, UnboundedSender};
 use futures::sync::oneshot::{self, Sender};
 use futures::{stream, Future, Sink, Stream};
-use grpc::{ChannelBuilder, Environment, WriteFlags};
+use grpc::{ChannelBuilder, Environment, WriteFlags, CompressionAlgorithms};
 use kvproto::raft_serverpb::RaftMessage;
 use kvproto::tikvpb_grpc::TikvClient;
 
@@ -55,12 +55,18 @@ impl Conn {
 
         let alive = Arc::new(AtomicBool::new(true));
         let alive1 = Arc::clone(&alive);
+        let algo = match cfg.grpc_compression_type {
+            0 => CompressionAlgorithms::None,
+            1 => CompressionAlgorithms::Deflate,
+            _ => CompressionAlgorithms::Gzip,
+        };
         let cb = ChannelBuilder::new(env)
             .stream_initial_window_size(cfg.grpc_stream_initial_window_size.0 as usize)
             .max_receive_message_len(MAX_GRPC_RECV_MSG_LEN)
             .max_send_message_len(MAX_GRPC_SEND_MSG_LEN)
             .keepalive_time(cfg.grpc_keepalive_time.0)
             .keepalive_timeout(cfg.grpc_keepalive_timeout.0)
+            .default_compression_algorithm(algo)
             // hack: so it's different args, grpc will always create a new connection.
             .raw_cfg_int(
                 CString::new("random id").unwrap(),

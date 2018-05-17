@@ -32,15 +32,11 @@ use util::worker::Runnable;
 
 use super::metrics::*;
 use super::transport::RaftStoreRouter;
-use super::{Error, Result};
+use super::{Config, Error, Result};
 
 pub type Callback = Box<FnBox(Result<()>) + Send>;
 
 const DEFAULT_POOL_SIZE: usize = 4;
-// How many snapshots can be sent concurrently.
-const MAX_SENDER_CONCURRENT: usize = 16;
-// How many snapshots can be recv concurrently.
-const MAX_RECEIVER_CONCURRENT: usize = 16;
 
 pub enum Task {
     Recv {
@@ -296,7 +292,9 @@ pub struct Runner<R: RaftStoreRouter + 'static> {
     pool: CpuPool,
     raft_router: R,
     security_mgr: Arc<SecurityManager>,
+    sending_limit: usize,
     sending_count: Arc<AtomicUsize>,
+    recving_limit: usize,
     recving_count: Arc<AtomicUsize>,
 }
 
@@ -306,6 +304,7 @@ impl<R: RaftStoreRouter + 'static> Runner<R> {
         snap_mgr: SnapManager,
         r: R,
         security_mgr: Arc<SecurityManager>,
+        config: &Config,
     ) -> Runner<R> {
         Runner {
             env,
@@ -316,7 +315,9 @@ impl<R: RaftStoreRouter + 'static> Runner<R> {
                 .create(),
             raft_router: r,
             security_mgr,
+            sending_limit: config.concurrent_send_snap_limit,
             sending_count: Arc::new(AtomicUsize::new(0)),
+            recving_limit: config.concurrent_recv_snap_limit,
             recving_count: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -326,7 +327,7 @@ impl<R: RaftStoreRouter + 'static> Runnable<Task> for Runner<R> {
     fn run(&mut self, task: Task) {
         match task {
             Task::Recv { stream, sink } => {
-                if self.recving_count.load(Ordering::SeqCst) >= MAX_RECEIVER_CONCURRENT {
+                if self.recving_count.load(Ordering::SeqCst) >= self.recving_limit {
                     warn!("too many recving snapshot tasks, ignore");
                     let status = RpcStatus::new(RpcStatusCode::ResourceExhausted, None);
                     self.pool.spawn(sink.fail(status)).forget();
@@ -348,7 +349,7 @@ impl<R: RaftStoreRouter + 'static> Runnable<Task> for Runner<R> {
                 self.pool.spawn(f).forget();
             }
             Task::Send { addr, msg, cb } => {
-                if self.sending_count.load(Ordering::SeqCst) >= MAX_SENDER_CONCURRENT {
+                if self.sending_count.load(Ordering::SeqCst) >= self.sending_limit {
                     warn!(
                         "too many sending snapshot tasks, drop Send Snap[to: {}, snap: {:?}]",
                         addr, msg
