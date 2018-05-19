@@ -212,11 +212,9 @@ impl Config {
             self.raft_least_election_timeout_ticks = self.raft_election_timeout_ticks;
         }
 
-        if self.raft_election_timeout_ticks > self.raft_least_election_timeout_ticks
-            || self.raft_least_election_timeout_ticks > self.raft_election_timeout_ticks * 2
-        {
+        if self.raft_election_timeout_ticks > self.raft_least_election_timeout_ticks {
             return Err(box_err!(
-                "least election timeout tick must be in [election_timeout, election_timeout * 2)"
+                "least election timeout tick must not be less than election_timeout"
             ));
         }
 

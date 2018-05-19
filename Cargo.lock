@@ -859,7 +859,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "raft"
 version = "0.2.0"
-source = "git+https://github.com/pingcap/raft-rs.git?branch=add-least-timeout#b1fab32cf5737af026f91efda6f58c5c088267cd"
+source = "git+https://github.com/pingcap/raft-rs.git?branch=add-least-timeout#2a133553060ed0410aebb5cd23545586a17056ba"
 dependencies = [
  "fxhash 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "log 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
