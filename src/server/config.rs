@@ -145,8 +145,14 @@ impl Config {
         }
 
         let non_zero_entries = vec![
-            ("concurrent-send-snap-limit", self.concurrent_send_snap_limit),
-            ("concurrent-recv-snap-limit", self.concurrent_recv_snap_limit),
+            (
+                "concurrent-send-snap-limit",
+                self.concurrent_send_snap_limit,
+            ),
+            (
+                "concurrent-recv-snap-limit",
+                self.concurrent_recv_snap_limit,
+            ),
             ("end-point-max-tasks", self.end_point_max_tasks),
         ];
         for (label, value) in non_zero_entries {
@@ -216,7 +222,7 @@ mod tests {
         assert!(cfg.advertise_addr.is_empty());
         cfg.validate().unwrap();
         assert_eq!(cfg.addr, cfg.advertise_addr);
-        
+
         let mut invalid_cfg = cfg.clone();
         invalid_cfg.concurrent_send_snap_limit = 0;
         assert!(invalid_cfg.validate().is_err());

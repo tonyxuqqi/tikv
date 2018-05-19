@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use futures::{future, Async, Future, Poll, Stream};
 use futures_cpupool::{Builder as CpuPoolBuilder, CpuPool};
-use grpc::{ChannelBuilder, ClientStreamingSink, Environment, RequestStream, RpcStatus,
-           RpcStatusCode, WriteFlags};
+use grpc::{ChannelBuilder, ClientStreamingSink, CompressionAlgorithms, Environment, RequestStream,
+           RpcStatus, RpcStatusCode, WriteFlags};
 use kvproto::raft_serverpb::RaftMessage;
 use kvproto::raft_serverpb::{Done, SnapshotChunk};
 use kvproto::tikvpb_grpc::TikvClient;
@@ -113,6 +113,7 @@ fn send_snap(
     env: Arc<Environment>,
     mgr: SnapManager,
     security_mgr: Arc<SecurityManager>,
+    cfg: &Config,
     addr: &str,
     msg: RaftMessage,
 ) -> Result<impl Future<Item = SendStat, Error = Error>> {
@@ -149,9 +150,16 @@ fn send_snap(
         }
     };
 
+    let algo = match cfg.grpc_compression_type {
+        0 => CompressionAlgorithms::None,
+        1 => CompressionAlgorithms::Deflate,
+        _ => CompressionAlgorithms::Gzip,
+    };
+
     let cb = ChannelBuilder::new(env)
-        .keepalive_time(Duration::from_secs(60))
-        .keepalive_timeout(Duration::from_secs(3));
+        .keepalive_time(cfg.grpc_keepalive_time.0)
+        .keepalive_timeout(cfg.grpc_keepalive_timeout.0)
+        .default_compression_algorithm(algo);
 
     let channel = security_mgr.connect(cb, addr);
     let client = TikvClient::new(channel);
@@ -292,9 +300,8 @@ pub struct Runner<R: RaftStoreRouter + 'static> {
     pool: CpuPool,
     raft_router: R,
     security_mgr: Arc<SecurityManager>,
-    sending_limit: usize,
+    cfg: Arc<Config>,
     sending_count: Arc<AtomicUsize>,
-    recving_limit: usize,
     recving_count: Arc<AtomicUsize>,
 }
 
@@ -304,7 +311,7 @@ impl<R: RaftStoreRouter + 'static> Runner<R> {
         snap_mgr: SnapManager,
         r: R,
         security_mgr: Arc<SecurityManager>,
-        config: &Config,
+        config: Arc<Config>,
     ) -> Runner<R> {
         Runner {
             env,
@@ -315,9 +322,8 @@ impl<R: RaftStoreRouter + 'static> Runner<R> {
                 .create(),
             raft_router: r,
             security_mgr,
-            sending_limit: config.concurrent_send_snap_limit,
+            cfg: config,
             sending_count: Arc::new(AtomicUsize::new(0)),
-            recving_limit: config.concurrent_recv_snap_limit,
             recving_count: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -327,7 +333,8 @@ impl<R: RaftStoreRouter + 'static> Runnable<Task> for Runner<R> {
     fn run(&mut self, task: Task) {
         match task {
             Task::Recv { stream, sink } => {
-                if self.recving_count.load(Ordering::SeqCst) >= self.recving_limit {
+                if self.recving_count.load(Ordering::SeqCst) >= self.cfg.concurrent_recv_snap_limit
+                {
                     warn!("too many recving snapshot tasks, ignore");
                     let status = RpcStatus::new(RpcStatusCode::ResourceExhausted, None);
                     self.pool.spawn(sink.fail(status)).forget();
@@ -349,7 +356,8 @@ impl<R: RaftStoreRouter + 'static> Runnable<Task> for Runner<R> {
                 self.pool.spawn(f).forget();
             }
             Task::Send { addr, msg, cb } => {
-                if self.sending_count.load(Ordering::SeqCst) >= self.sending_limit {
+                if self.sending_count.load(Ordering::SeqCst) >= self.cfg.concurrent_send_snap_limit
+                {
                     warn!(
                         "too many sending snapshot tasks, drop Send Snap[to: {}, snap: {:?}]",
                         addr, msg
@@ -365,7 +373,7 @@ impl<R: RaftStoreRouter + 'static> Runnable<Task> for Runner<R> {
                 let sending_count = Arc::clone(&self.sending_count);
                 sending_count.fetch_add(1, Ordering::SeqCst);
 
-                let f = future::result(send_snap(env, mgr, security_mgr, &addr, msg))
+                let f = future::result(send_snap(env, mgr, security_mgr, &self.cfg, &addr, msg))
                     .flatten()
                     .then(move |res| {
                         match res {
