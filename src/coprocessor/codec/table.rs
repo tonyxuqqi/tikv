@@ -398,9 +398,15 @@ pub fn cut_idx_key(key: Vec<u8>, col_ids: &[i64]) -> Result<(RowColsDict, Option
     Ok((RowColsDict::new(meta_map, key), handle))
 }
 
+#[inline]
+pub fn is_row_key(key: &[u8]) -> bool {
+    key.len() >= RECORD_ROW_KEY_LEN && key.starts_with(TABLE_PREFIX)
+        && key[TABLE_PREFIX_KEY_LEN..].starts_with(RECORD_PREFIX_SEP)
+}
+
 #[cfg(test)]
 mod test {
-    use std::i64;
+    use std::{str, i64};
 
     use tipb::schema::ColumnInfo;
 
@@ -644,6 +650,24 @@ mod test {
             let k = encode_index_seek_key(tid, 1, &k);
             assert_eq!(tid, decode_table_id(&k).unwrap());
             assert!(decode_table_id(b"xxx").is_err());
+        }
+    }
+
+    #[test]
+    fn test_is_row_key() {
+        let cases = vec![
+            (b"t0_r0" as &'static [u8], false),
+            (b"t00000000_r00000000", true),
+            (b"t00000000_i00000000", false),
+            (b"m23", false),
+            (b"", false),
+            (b"m00000000_i00000000", false),
+            (b"t00000000_r00000000xyz", true),
+        ];
+
+        for (key, expected) in cases {
+            let res = is_row_key(key);
+            assert_eq!(res, expected, "{}", str::from_utf8(key).unwrap());
         }
     }
 }

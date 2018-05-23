@@ -1085,6 +1085,9 @@ impl ApplyDelegate {
         ctx: &mut ApplyContext,
         req: &AdminRequest,
     ) -> Result<(AdminResponse, Option<ExecResult>)> {
+        PEER_ADMIN_CMD_COUNTER_VEC
+            .with_label_values(&["split", "all"])
+            .inc();
         info!(
             "{} split is deprecated, redirect to use batch split.",
             self.tag
@@ -1154,9 +1157,13 @@ impl ApplyDelegate {
         // Maybe version should be increased by split_reqs.len()?
         let new_version = latest.get_region_epoch().get_version() + 1;
         latest.mut_region_epoch().set_version(new_version);
+        // Note that the split requests only contain ids for new regions, so we need
+        // to handle new regions and old region seperately.
         if right_derive {
+            // So the range of new regions is [old_start_key, split_key1, ..., last_split_key].
             keys.push_front(latest.get_start_key().to_vec());
         } else {
+            // So the range of new regions is [split_key1, ..., last_split_key, old_end_key].
             keys.push_back(latest.get_end_key().to_vec());
             latest.set_end_key(keys.front().unwrap().to_vec());
             regions.push(latest.clone());

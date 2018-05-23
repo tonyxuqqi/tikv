@@ -129,7 +129,7 @@ impl Display for Task {
                 ..
             } => write!(
                 f,
-                "ask split region {} with key {:?}",
+                "ask split region {} with keys {:?}",
                 region.get_id(),
                 split_keys
             ),

@@ -1556,20 +1556,26 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                 error!("{} failed to notify pd: {}", self.tag, e);
             }
         }
+        let last_key = enc_end_key(regions.last().unwrap());
+        self.region_ranges
+            .remove(&last_key)
+            .expect("original region should exists");
         let last_region_id = regions.last().unwrap().get_id();
-        let region_cnt = regions.len();
-        for (i, new_region) in regions.into_iter().enumerate() {
+        for new_region in regions {
             let new_region_id = new_region.get_id();
+            if new_region_id != region_id {
+                // Insert new regions and validation
+                info!("insert new region {:?}", new_region);
+            }
+            let missing = self.region_ranges
+                .insert(enc_end_key(&new_region), new_region_id)
+                .is_none();
+            assert!(
+                missing,
+                "[region {}] should not exists",
+                new_region.get_id()
+            );
             if new_region_id == region_id {
-                let missing = self.region_ranges
-                    .insert(enc_end_key(&new_region), new_region_id)
-                    .is_none();
-                assert!(
-                    missing || i + 1 == region_cnt,
-                    "only last region should cover ranges: {} + 1 != {}",
-                    i,
-                    region_cnt
-                );
                 continue;
             }
             if let Some(peer) = self.region_peers.get(&new_region_id) {
@@ -1582,12 +1588,12 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             }
 
             let mut new_peer = match Peer::create(self, &new_region) {
+                Ok(new_peer) => new_peer,
                 Err(e) => {
                     // peer information is already written into db, can't recover.
                     // there is probably a bug.
                     panic!("create new split region {:?} err {:?}", new_region, e);
                 }
-                Ok(new_peer) => new_peer,
             };
             for peer in new_region.get_peers() {
                 // Add this peer to cache.
@@ -1598,18 +1604,6 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             // this will be used by balance write flow.
             new_peer.peer_stat = peer_stat.clone();
             let campaigned = new_peer.maybe_campaign(is_leader, &mut self.pending_raft_groups);
-
-            // Insert new regions and validation
-            info!("insert new region {:?}", new_region);
-            let missing = self.region_ranges
-                .insert(enc_end_key(&new_region), new_region_id)
-                .is_none();
-            assert!(
-                missing || i + 1 == region_cnt,
-                "only last region should cover ranges: {} + 1 != {}",
-                i,
-                region_cnt
-            );
 
             if is_leader {
                 new_peer.heartbeat_pd(&self.pd_worker);

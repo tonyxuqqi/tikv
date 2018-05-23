@@ -13,11 +13,10 @@
 
 use super::{AdminObserver, Coprocessor, ObserverContext, Result as CopResult};
 use coprocessor::codec::table;
-use util::codec::bytes::{encode_bytes, BytesDecoder};
-use util::escape;
-
 use kvproto::raft_cmdpb::{AdminCmdType, AdminRequest, SplitRequest};
+use raftstore::store::util;
 use std::result::Result as StdResult;
+use util::codec::bytes::{encode_bytes, BytesDecoder};
 
 /// `SplitObserver` adjusts the split key so that it won't separate
 /// the data of a row into two region. It adjusts the key according
@@ -38,29 +37,16 @@ impl SplitObserver {
                 Err(_) => continue,
             };
 
-            // format of a key is TABLE_PREFIX + table_id + RECORD_PREFIX_SEP + handle + column_id
-            // + version or TABLE_PREFIX + table_id + INDEX_PREFIX_SEP + index_id + values + version
-            // or meta_key + version
-            // The length of TABLE_PREFIX + table_id is TABLE_PREFIX_KEY_LEN.
-            if key.starts_with(table::TABLE_PREFIX) && key.len() > table::TABLE_PREFIX_KEY_LEN
-                && key[table::TABLE_PREFIX_KEY_LEN..].starts_with(table::RECORD_PREFIX_SEP)
-            {
-                // row key, truncate to handle
-                key.truncate(table::PREFIX_LEN + table::ID_LEN);
+            if table::is_row_key(&key) {
+                // row key, truncate to row key itself.
+                key.truncate(table::RECORD_ROW_KEY_LEN);
             }
-
-            let region_start_key = ctx.region().get_start_key();
 
             let key = encode_bytes(&key);
-            if *key <= *region_start_key {
-                return Err(format!(
-                    "no need to split: {} <= {}",
-                    escape(&key),
-                    escape(region_start_key)
-                ));
+            match util::check_key_in_region_exclusive(&key, ctx.region()) {
+                Ok(()) => split.set_split_key(key),
+                Err(e) => return Err(format!("{:?}", e)),
             }
-
-            split.set_split_key(key);
         }
         Ok(())
     }

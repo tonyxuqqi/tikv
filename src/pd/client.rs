@@ -374,7 +374,7 @@ impl PdClient for RpcClient {
                 .unwrap();
             Box::new(handler.map_err(Error::Grpc).and_then(move |resp| {
                 PD_REQUEST_HISTOGRAM_VEC
-                    .with_label_values(&["ask_split"])
+                    .with_label_values(&["ask_batch_split"])
                     .observe(duration_to_sec(timer.elapsed()));
                 check_resp_header(resp.get_header())?;
                 Ok(resp)
