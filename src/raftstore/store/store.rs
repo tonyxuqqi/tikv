@@ -1536,13 +1536,13 @@ impl<T: Transport, C: PdClient> Store<T, C> {
     fn on_ready_split_region(
         &mut self,
         region_id: u64,
-        latest: metapb::Region,
+        derived: metapb::Region,
         regions: Vec<metapb::Region>,
     ) {
         let (peer_stat, is_leader) = match self.region_peers.get_mut(&region_id) {
             None => panic!("[region {}] region is missing", region_id),
             Some(peer) => {
-                peer.mut_store().region = latest.clone();
+                peer.mut_store().region = derived.clone();
                 peer.post_split();
                 if peer.is_leader() {
                     peer.heartbeat_pd(&self.pd_worker);
@@ -1563,10 +1563,6 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         let last_region_id = regions.last().unwrap().get_id();
         for new_region in regions {
             let new_region_id = new_region.get_id();
-            if new_region_id != region_id {
-                // Insert new regions and validation
-                info!("insert new region {:?}", new_region);
-            }
             let missing = self.region_ranges
                 .insert(enc_end_key(&new_region), new_region_id)
                 .is_none();
@@ -1578,6 +1574,8 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             if new_region_id == region_id {
                 continue;
             }
+            // Insert new regions and validation
+            info!("insert new region {:?}", new_region);
             if let Some(peer) = self.region_peers.get(&new_region_id) {
                 // If the store received a raft msg with the new region raft group
                 // before splitting, it will creates a uninitialized peer.
@@ -1930,8 +1928,8 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                 ExecResult::CompactLog { first_index, state } => if !merged {
                     self.on_ready_compact_log(region_id, first_index, state)
                 },
-                ExecResult::SplitRegion { latest, regions } => {
-                    self.on_ready_split_region(region_id, latest, regions)
+                ExecResult::SplitRegion { derived, regions } => {
+                    self.on_ready_split_region(region_id, derived, regions)
                 }
                 ExecResult::PrepareMerge { region, state } => {
                     self.on_ready_prepare_merge(region, state, merged);

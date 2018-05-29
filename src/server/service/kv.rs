@@ -1212,9 +1212,10 @@ impl<T: RaftStoreRouter + 'static> tikvpb_grpc::Tikv for Service<T> {
                             admin_resp
                         ));
                     } else {
-                        let regions = admin_resp.mut_splits().mut_regions();
-                        resp.set_right(regions.pop().unwrap());
-                        resp.set_left(regions.pop().unwrap());
+                        let mut regions = admin_resp.mut_splits().take_regions().into_vec();
+                        let mut d = regions.drain(..);
+                        resp.set_left(d.next().unwrap());
+                        resp.set_right(d.next().unwrap());
                     }
                 }
                 resp

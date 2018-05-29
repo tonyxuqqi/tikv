@@ -161,7 +161,7 @@ pub enum ExecResult {
     },
     SplitRegion {
         regions: Vec<Region>,
-        latest: Region,
+        derived: Region,
     },
     PrepareMerge {
         region: Region,
@@ -768,8 +768,8 @@ impl ApplyDelegate {
                 | ExecResult::CompactLog { .. }
                 | ExecResult::DeleteRange { .. }
                 | ExecResult::IngestSST { .. } => {}
-                ExecResult::SplitRegion { ref latest, .. } => {
-                    self.region = latest.clone();
+                ExecResult::SplitRegion { ref derived, .. } => {
+                    self.region = derived.clone();
                     self.metrics.size_diff_hint = 0;
                     self.metrics.delete_keys_hint = 0;
                 }
@@ -1127,7 +1127,7 @@ impl ApplyDelegate {
         if split_reqs.get_requests().is_empty() {
             return Err(box_err!("missing split requests"));
         }
-        let mut latest = self.region.clone();
+        let mut derived = self.region.clone();
         let mut regions = Vec::with_capacity(split_reqs.get_requests().len() + 1);
         let mut keys: VecDeque<Vec<u8>> = VecDeque::with_capacity(regions.capacity());
         for req in split_reqs.get_requests() {
@@ -1137,14 +1137,14 @@ impl ApplyDelegate {
             }
             if split_key
                 <= keys.back()
-                    .map_or_else(|| latest.get_start_key(), Vec::as_slice)
+                    .map_or_else(|| derived.get_start_key(), Vec::as_slice)
             {
                 return Err(box_err!("invalid split request: {:?}", split_reqs));
             }
-            if req.get_new_peer_ids().len() != latest.get_peers().len() {
+            if req.get_new_peer_ids().len() != derived.get_peers().len() {
                 return Err(box_err!(
                     "invalid new peer id count, need {}, but got {}",
-                    latest.get_peers().len(),
+                    derived.get_peers().len(),
                     req.get_new_peer_ids().len()
                 ));
             }
@@ -1153,28 +1153,28 @@ impl ApplyDelegate {
 
         util::check_key_in_region(keys.back().unwrap(), &self.region)?;
 
-        info!("{} split region {:?} with {:?}", self.tag, latest, keys);
+        info!("{} split region {:?} with {:?}", self.tag, derived, keys);
         // Maybe version should be increased by split_reqs.len()?
-        let new_version = latest.get_region_epoch().get_version() + 1;
-        latest.mut_region_epoch().set_version(new_version);
+        let new_version = derived.get_region_epoch().get_version() + 1;
+        derived.mut_region_epoch().set_version(new_version);
         // Note that the split requests only contain ids for new regions, so we need
         // to handle new regions and old region seperately.
         if right_derive {
             // So the range of new regions is [old_start_key, split_key1, ..., last_split_key].
-            keys.push_front(latest.get_start_key().to_vec());
+            keys.push_front(derived.get_start_key().to_vec());
         } else {
             // So the range of new regions is [split_key1, ..., last_split_key, old_end_key].
-            keys.push_back(latest.get_end_key().to_vec());
-            latest.set_end_key(keys.front().unwrap().to_vec());
-            regions.push(latest.clone());
+            keys.push_back(derived.get_end_key().to_vec());
+            derived.set_end_key(keys.front().unwrap().to_vec());
+            regions.push(derived.clone());
         }
         for req in split_reqs.get_requests() {
             let mut new_region = Region::new();
             new_region.set_id(req.get_new_region_id());
-            new_region.set_region_epoch(latest.get_region_epoch().to_owned());
+            new_region.set_region_epoch(derived.get_region_epoch().to_owned());
             new_region.set_start_key(keys.pop_front().unwrap());
             new_region.set_end_key(keys.front().unwrap().to_vec());
-            new_region.set_peers(RepeatedField::from_slice(latest.get_peers()));
+            new_region.set_peers(RepeatedField::from_slice(derived.get_peers()));
             for (peer, peer_id) in new_region
                 .mut_peers()
                 .iter_mut()
@@ -1200,13 +1200,16 @@ impl ApplyDelegate {
             regions.push(new_region);
         }
         if right_derive {
-            latest.set_start_key(keys.pop_front().unwrap());
-            regions.push(latest.clone());
+            derived.set_start_key(keys.pop_front().unwrap());
+            regions.push(derived.clone());
         }
-        write_peer_state(&self.engine, ctx.wb_mut(), &latest, PeerState::Normal, None)
-            .unwrap_or_else(|e| {
-                panic!("{} fails to update region {:?}: {:?}", self.tag, latest, e)
-            });
+        write_peer_state(
+            &self.engine,
+            ctx.wb_mut(),
+            &derived,
+            PeerState::Normal,
+            None,
+        ).unwrap_or_else(|e| panic!("{} fails to update region {:?}: {:?}", self.tag, derived, e));
         let mut resp = AdminResponse::new();
         resp.mut_splits()
             .set_regions(RepeatedField::from_slice(&regions));
@@ -1214,7 +1217,7 @@ impl ApplyDelegate {
             .with_label_values(&["batch-split", "success"])
             .inc();
 
-        Ok((resp, Some(ExecResult::SplitRegion { regions, latest })))
+        Ok((resp, Some(ExecResult::SplitRegion { regions, derived })))
     }
 
     fn exec_prepare_merge(
