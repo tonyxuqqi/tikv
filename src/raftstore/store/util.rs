@@ -72,7 +72,7 @@ pub fn new_learner_peer(store_id: u64, peer_id: u64) -> metapb::Peer {
 pub fn check_key_in_region_exclusive(key: &[u8], region: &metapb::Region) -> Result<()> {
     let end_key = region.get_end_key();
     let start_key = region.get_start_key();
-    if key > start_key && (end_key.is_empty() || key < end_key) {
+    if start_key < key && (key < end_key || end_key.is_empty()) {
         Ok(())
     } else {
         Err(Error::KeyNotInRegion(key.to_vec(), region.clone()))

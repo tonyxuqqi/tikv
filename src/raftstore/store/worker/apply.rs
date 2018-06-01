@@ -1085,9 +1085,6 @@ impl ApplyDelegate {
         ctx: &mut ApplyContext,
         req: &AdminRequest,
     ) -> Result<(AdminResponse, Option<ExecResult>)> {
-        PEER_ADMIN_CMD_COUNTER_VEC
-            .with_label_values(&["split", "all"])
-            .inc();
         info!(
             "{} split is deprecated, redirect to use batch split.",
             self.tag
@@ -1170,6 +1167,7 @@ impl ApplyDelegate {
         }
         for req in split_reqs.get_requests() {
             let mut new_region = Region::new();
+            // TODO: check new region id validation.
             new_region.set_id(req.get_new_region_id());
             new_region.set_region_epoch(derived.get_region_epoch().to_owned());
             new_region.set_start_key(keys.pop_front().unwrap());

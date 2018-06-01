@@ -1575,13 +1575,20 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                 continue;
             }
             // Insert new regions and validation
-            info!("insert new region {:?}", new_region);
+            info!(
+                "[region {}] insert new region {:?}",
+                new_region.get_id(),
+                new_region
+            );
             if let Some(peer) = self.region_peers.get(&new_region_id) {
                 // If the store received a raft msg with the new region raft group
                 // before splitting, it will creates a uninitialized peer.
                 // We can remove this uninitialized peer directly.
                 if peer.get_store().is_initialized() {
-                    panic!("duplicated region {} for split region", new_region_id);
+                    panic!(
+                        "[region {}] duplicated region for split region",
+                        new_region_id
+                    );
                 }
             }
 
@@ -1604,6 +1611,8 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             let campaigned = new_peer.maybe_campaign(is_leader, &mut self.pending_raft_groups);
 
             if is_leader {
+                // The new peer is likely to become leader, send a heartbeat immediately to reduce
+                // client query miss.
                 new_peer.heartbeat_pd(&self.pd_worker);
             }
 
