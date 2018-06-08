@@ -13,10 +13,11 @@
 
 use super::{AdminObserver, Coprocessor, ObserverContext, Result as CopResult};
 use coprocessor::codec::table;
+use util::codec::bytes::{self, encode_bytes};
+
 use kvproto::raft_cmdpb::{AdminCmdType, AdminRequest, SplitRequest};
 use raftstore::store::util;
 use std::result::Result as StdResult;
-use util::codec::bytes::{encode_bytes, BytesDecoder};
 
 /// `SplitObserver` adjusts the split key so that it won't separate
 /// the data of a row into two region. It adjusts the key according
@@ -32,7 +33,7 @@ impl SplitObserver {
                 return Err("split key is expected!".to_owned());
             }
 
-            let mut key = match split.get_split_key().decode_bytes(false) {
+            let mut key = match bytes::decode_bytes(&mut split.get_split_key(), false) {
                 Ok(x) => x,
                 Err(_) => continue,
             };
