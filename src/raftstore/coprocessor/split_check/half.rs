@@ -158,7 +158,7 @@ mod tests {
                     assert_eq!(split_keys, vec![b"0006".to_vec()]);
                     break;
                 }
-                Ok(Msg::ApproximateRegionSize { region_id, .. }) => {
+                Ok(Msg::RegionApproximateStat { region_id, .. }) => {
                     assert_eq!(region_id, region.get_id());
                     continue;
                 }
