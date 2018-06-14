@@ -1100,9 +1100,10 @@ impl<T: RaftStoreRouter + 'static> tikvpb_grpc::Tikv for Service<T> {
     ) {
         let timer = GRPC_MSG_HISTOGRAM_VEC.split_region.start_coarse_timer();
 
+        let region_id = req.get_context().get_region_id();
         let (cb, future) = paired_future_callback();
         let req = StoreMessage::SplitRegion {
-            region_id: req.get_context().get_region_id(),
+            region_id,
             region_epoch: req.take_context().take_region_epoch(),
             split_keys: vec![Key::from_raw(req.get_split_key()).encoded().clone()],
             callback: Callback::Write(cb),
@@ -1115,14 +1116,17 @@ impl<T: RaftStoreRouter + 'static> tikvpb_grpc::Tikv for Service<T> {
 
         let future = future
             .map_err(Error::from)
-            .map(|mut v| {
+            .map(move |mut v| {
                 let mut resp = SplitRegionResponse::new();
                 if v.response.get_header().has_error() {
                     resp.set_region_error(v.response.mut_header().take_error());
                 } else {
                     let admin_resp = v.response.mut_admin_response();
                     if admin_resp.get_splits().get_regions().len() != 2 {
-                        error!("{} invalid split response: {:?}", LABEL, admin_resp);
+                        error!(
+                            "[region {}] invalid split response: {:?}",
+                            region_id, admin_resp
+                        );
                         resp.mut_region_error().set_message(format!(
                             "Internal Error: invalid response: {:?}",
                             admin_resp
