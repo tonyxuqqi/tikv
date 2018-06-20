@@ -14,8 +14,11 @@
 use super::{AdminObserver, Coprocessor, ObserverContext, Result as CopResult};
 use coprocessor::codec::table;
 use util::codec::bytes::{self, encode_bytes};
+use util::escape;
 
+use kvproto::metapb::Region;
 use kvproto::raft_cmdpb::{AdminCmdType, AdminRequest, SplitRequest};
+use protobuf::RepeatedField;
 use raftstore::store::util;
 use std::result::Result as StdResult;
 
@@ -27,34 +30,66 @@ pub struct SplitObserver;
 type Result<T> = StdResult<T, String>;
 
 impl SplitObserver {
-    fn on_split(&self, ctx: &mut ObserverContext, splits: &mut [SplitRequest]) -> Result<()> {
-        for split in splits {
-            if split.get_split_key().is_empty() {
-                return Err("split key is expected!".to_owned());
-            }
-
-            let mut key = match bytes::decode_bytes(&mut split.get_split_key(), false) {
-                Ok(x) => x,
-                Err(_) => continue,
-            };
-
-            // format of a key is TABLE_PREFIX + table_id + RECORD_PREFIX_SEP + handle + column_id
-            // + version or TABLE_PREFIX + table_id + INDEX_PREFIX_SEP + index_id + values + version
-            // or meta_key + version
-            // The length of TABLE_PREFIX + table_id is TABLE_PREFIX_KEY_LEN.
-            if key.starts_with(table::TABLE_PREFIX) && key.len() > table::TABLE_PREFIX_KEY_LEN
-                && key[table::TABLE_PREFIX_KEY_LEN..].starts_with(table::RECORD_PREFIX_SEP)
-            {
-                // row key, truncate to handle
-                key.truncate(table::PREFIX_LEN + table::ID_LEN);
-            }
-
-            let key = encode_bytes(&key);
-            match util::check_key_in_region_exclusive(&key, ctx.region()) {
-                Ok(()) => split.set_split_key(key),
-                Err(e) => return Err(format!("{:?}", e)),
-            }
+    fn adjust_key(&self, region: &Region, key: Vec<u8>) -> Result<Vec<u8>> {
+        if key.is_empty() {
+            return Err("key is empty".to_owned());
         }
+
+        let mut key = match bytes::decode_bytes(&mut key.as_slice(), false) {
+            Ok(x) => x,
+            // It's a raw key, skip it.
+            Err(_) => return Ok(key),
+        };
+
+        // format of a key is TABLE_PREFIX + table_id + RECORD_PREFIX_SEP + handle + column_id
+        // + version or TABLE_PREFIX + table_id + INDEX_PREFIX_SEP + index_id + values + version
+        // or meta_key + version
+        // The length of TABLE_PREFIX + table_id is TABLE_PREFIX_KEY_LEN.
+        if key.starts_with(table::TABLE_PREFIX) && key.len() > table::TABLE_PREFIX_KEY_LEN
+            && key[table::TABLE_PREFIX_KEY_LEN..].starts_with(table::RECORD_PREFIX_SEP)
+        {
+            // row key, truncate to handle
+            key.truncate(table::PREFIX_LEN + table::ID_LEN);
+        }
+
+        let key = encode_bytes(&key);
+        match util::check_key_in_region_exclusive(&key, region) {
+            Ok(()) => Ok(key),
+            Err(_) => Err(format!(
+                "key \"{}\" should be in (\"{}\", \"{}\")",
+                escape(&key),
+                escape(region.get_start_key()),
+                escape(region.get_end_key()),
+            )),
+        }
+    }
+
+    fn on_split(&self, ctx: &mut ObserverContext, splits: &mut Vec<SplitRequest>) -> Result<()> {
+        let (mut i, mut j) = (0, 0);
+        let region_id = ctx.region().get_id();
+        while i < splits.len() {
+            let k = i;
+            i += 1;
+            {
+                let split = &mut splits[k];
+                let key = split.take_split_key();
+                match self.adjust_key(ctx.region(), key) {
+                    Ok(key) => split.set_split_key(key),
+                    Err(e) => {
+                        warn!("[region {}] invalid key at {}, skip: {:?}", region_id, k, e);
+                        continue;
+                    }
+                }
+            }
+            if k != j {
+                splits.swap(k, j);
+            }
+            j += 1;
+        }
+        if j == 0 {
+            return Err("no valid key found for split.".to_owned());
+        }
+        splits.truncate(j);
         Ok(())
     }
 }
@@ -83,10 +118,17 @@ impl AdminObserver for SplitObserver {
                     .to_owned()
             ));
         }
-        if let Err(e) = self.on_split(ctx, req.mut_splits().mut_requests()) {
-            error!("failed to handle split req: {:?}", e);
+        let mut requests = req.mut_splits().take_requests().into_vec();
+        if let Err(e) = self.on_split(ctx, &mut requests) {
+            error!(
+                "[region {}] failed to handle split req: {:?}",
+                ctx.region().get_id(),
+                e
+            );
             return Err(box_err!(e));
         }
+        req.mut_splits()
+            .set_requests(RepeatedField::from_vec(requests));
         Ok(())
     }
 }
@@ -181,15 +223,18 @@ mod test {
         // Only batch split is supported.
         assert!(observer.pre_propose_admin(&mut ctx, &mut req).is_err());
 
-        req = new_batch_split_request(vec![vec![]]);
-        // Split key should not be empty.
+        // Empty key should be skipped.
+        let mut split_keys = vec![vec![]];
+        // Start key should be skipped.
+        split_keys.push(start_key);
+
+        req = new_batch_split_request(split_keys.clone());
+        // Although invalid keys should be skipped, but if all keys are
+        // invalid, errors should be reported.
         assert!(observer.pre_propose_admin(&mut ctx, &mut req).is_err());
 
-        req = new_batch_split_request(vec![start_key]);
-        // Split key should not be the same as start_key.
-        assert!(observer.pre_propose_admin(&mut ctx, &mut req).is_err());
-
-        let mut split_keys = vec![b"xyz".to_vec()];
+        // Raw key should be preserved.
+        split_keys.push(b"xyz".to_vec());
         let mut expected_keys = vec![b"xyz".to_vec()];
 
         let mut key = encode_bytes(b"xyz:1");
