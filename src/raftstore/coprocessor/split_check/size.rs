@@ -13,6 +13,7 @@
 
 use raftstore::store::{keys, util, Msg};
 use rocksdb::DB;
+use std::mem;
 use util::transport::{RetryableSendCh, Sender};
 
 use super::super::metrics::*;
@@ -22,8 +23,9 @@ use super::Host;
 pub struct Checker {
     max_size: u64,
     split_size: u64,
+    scanned_size: u64,
     current_size: u64,
-    split_key: Option<Vec<u8>>,
+    keys: Vec<Vec<u8>>,
 }
 
 impl Checker {
@@ -31,26 +33,28 @@ impl Checker {
         Checker {
             max_size,
             split_size,
+            scanned_size: 0,
             current_size: 0,
-            split_key: None,
+            keys: vec![],
         }
     }
 }
 
 impl SplitChecker for Checker {
     fn on_kv(&mut self, _: &mut ObserverContext, key: &[u8], value_size: u64) -> bool {
-        self.current_size += key.len() as u64 + value_size;
-        if self.current_size > self.split_size && self.split_key.is_none() {
-            self.split_key = Some(key.to_vec());
+        let kv_size = key.len() as u64 + value_size;
+        self.current_size += kv_size;
+        if self.current_size > self.split_size {
+            self.keys.push(keys::origin_key(key).to_vec());
+            self.scanned_size += self.current_size - kv_size;
+            self.current_size = kv_size;
         }
-        self.current_size >= self.max_size
+        false
     }
 
     fn split_keys(&mut self) -> Vec<Vec<u8>> {
-        if self.current_size >= self.max_size {
-            let data_key = self.split_key.take().unwrap();
-            let key = keys::origin_key(&data_key).to_vec();
-            vec![key]
+        if self.current_size + self.scanned_size > self.max_size {
+            mem::replace(&mut self.keys, vec![])
         } else {
             vec![]
         }
@@ -269,7 +273,7 @@ mod tests {
             }) => {
                 assert_eq!(region_id, region.get_id());
                 assert_eq!(&region_epoch, region.get_region_epoch());
-                assert_eq!(split_keys, vec![b"0003".to_vec()]);
+                assert_eq!(split_keys, vec![b"0003".to_vec(), b"0006".to_vec()]);
             }
             others => panic!("expect split check result, but got {:?}", others),
         }

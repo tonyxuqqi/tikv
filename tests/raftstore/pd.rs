@@ -863,6 +863,10 @@ impl TestPdClient {
         self.cluster.rl().split_count
     }
 
+    pub fn get_all_regions(&self) -> Vec<metapb::Region> {
+        self.cluster.rl().regions.values().cloned().collect()
+    }
+
     pub fn get_down_peers(&self) -> HashMap<u64, pdpb::PeerStats> {
         self.cluster.rl().down_peers.clone()
     }

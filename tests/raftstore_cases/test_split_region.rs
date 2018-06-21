@@ -221,7 +221,11 @@ fn put_cf_till_size<T: Simulator>(
     key
 }
 
-fn test_auto_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
+#[test]
+fn test_server_auto_split_region() {
+    let count = 3;
+    let mut cluster = new_server_cluster(0, count);
+
     cluster.cfg.raft_store.split_region_check_tick_interval = ReadableDuration::millis(100);
     cluster.cfg.coprocessor.region_max_size = ReadableSize(REGION_MAX_SIZE);
     cluster.cfg.coprocessor.region_split_size = ReadableSize(REGION_SPLIT_SIZE);
@@ -234,8 +238,9 @@ fn test_auto_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
     let pd_client = Arc::clone(&cluster.pd_client);
 
     let region = pd_client.get_region(b"").unwrap();
+    let epoch = region.get_region_epoch().clone();
 
-    let last_key = put_till_size(cluster, REGION_SPLIT_SIZE, &mut range);
+    let last_key = put_till_size(&mut cluster, REGION_SPLIT_SIZE, &mut range);
 
     // it should be finished in millis if split.
     thread::sleep(Duration::from_secs(1));
@@ -245,7 +250,7 @@ fn test_auto_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
     assert_eq!(region, target);
 
     let max_key = put_cf_till_size(
-        cluster,
+        &mut cluster,
         CF_WRITE,
         REGION_MAX_SIZE - REGION_SPLIT_SIZE + check_size_diff,
         &mut range,
@@ -280,10 +285,12 @@ fn test_auto_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
     // be small.
     assert!(size > REGION_SPLIT_SIZE - 1000);
 
-    let epoch = left.get_region_epoch().clone();
+    let new_epoch = left.get_region_epoch().clone();
+    assert_eq!(epoch.get_conf_ver(), new_epoch.get_conf_ver());
+    assert_eq!(epoch.get_version() + 1, new_epoch.get_version());
     let get = util::new_request(
         left.get_id(),
-        epoch,
+        new_epoch,
         vec![util::new_get_cmd(&max_key)],
         false,
     );
@@ -292,20 +299,6 @@ fn test_auto_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
         .unwrap();
     assert!(resp.get_header().has_error());
     assert!(resp.get_header().get_error().has_key_not_in_region());
-}
-
-#[test]
-fn test_node_auto_split_region() {
-    let count = 5;
-    let mut cluster = new_node_cluster(0, count);
-    test_auto_split_region(&mut cluster);
-}
-
-#[test]
-fn test_server_auto_split_region() {
-    let count = 5;
-    let mut cluster = new_server_cluster(0, count);
-    test_auto_split_region(&mut cluster);
 }
 
 fn test_delay_split_region<T: Simulator>(cluster: &mut Cluster<T>) {
@@ -572,7 +565,11 @@ fn test_server_split_with_stale_peer() {
     test_split_with_stale_peer(&mut cluster);
 }
 
-fn test_split_region_diff_check<T: Simulator>(cluster: &mut Cluster<T>) {
+#[test]
+fn test_server_split_region_diff_check() {
+    let count = 1;
+    let mut cluster = new_server_cluster(0, count);
+
     let region_max_size = 2000;
     let region_split_size = 1000;
     cluster.cfg.raft_store.split_region_check_tick_interval = ReadableDuration::millis(100);
@@ -590,7 +587,7 @@ fn test_split_region_diff_check<T: Simulator>(cluster: &mut Cluster<T>) {
     // The default size index distance is too large for small data,
     // we flush multiple times to generate more size index handles.
     for _ in 0..10 {
-        put_till_size(cluster, region_max_size, &mut range);
+        put_till_size(&mut cluster, region_max_size, &mut range);
     }
 
     // Peer will split when size of region meet region_max_size,
@@ -604,7 +601,7 @@ fn test_split_region_diff_check<T: Simulator>(cluster: &mut Cluster<T>) {
         util::sleep_ms(20);
         let region_cnt = pd_client.get_split_count() + 1;
         if region_cnt >= min_region_cnt as usize {
-            return;
+            break;
         }
         try_cnt += 1;
         if try_cnt == 500 {
@@ -614,20 +611,25 @@ fn test_split_region_diff_check<T: Simulator>(cluster: &mut Cluster<T>) {
             );
         }
     }
-}
 
-#[test]
-fn test_server_split_region_diff_check() {
-    let count = 1;
-    let mut cluster = new_server_cluster(0, count);
-    test_split_region_diff_check(&mut cluster);
-}
-
-#[test]
-fn test_node_split_region_diff_check() {
-    let count = 1;
-    let mut cluster = new_node_cluster(0, count);
-    test_split_region_diff_check(&mut cluster);
+    let mut versions: Vec<_> = pd_client
+        .get_all_regions()
+        .into_iter()
+        .map(|t| t.get_region_epoch().get_version())
+        .collect();
+    versions.sort();
+    let (_, _, valid) = versions
+        .iter()
+        .fold((0, 0, false), |(last, cnt, valid), cur| {
+            if last == *cur {
+                (*cur, cnt + 1, valid)
+            } else if cnt > 2 {
+                (*cur, 1, true)
+            } else {
+                (*cur, 1, valid)
+            }
+        });
+    assert!(valid, "invalid version set for batch split: {:?}", versions);
 }
 
 fn test_split_stale_epoch<T: Simulator>(cluster: &mut Cluster<T>, right_derive: bool) {

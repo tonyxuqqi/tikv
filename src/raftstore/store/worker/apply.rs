@@ -1132,8 +1132,9 @@ impl ApplyDelegate {
             return Err(box_err!("missing split requests"));
         }
         let mut derived = self.region.clone();
-        let mut regions = Vec::with_capacity(split_reqs.get_requests().len() + 1);
-        let mut keys: VecDeque<Vec<u8>> = VecDeque::with_capacity(regions.capacity());
+        let new_region_cnt = split_reqs.get_requests().len();
+        let mut regions = Vec::with_capacity(new_region_cnt + 1);
+        let mut keys: VecDeque<Vec<u8>> = VecDeque::with_capacity(new_region_cnt + 1);
         for req in split_reqs.get_requests() {
             let split_key = req.get_split_key();
             if split_key.is_empty() {
@@ -1158,8 +1159,7 @@ impl ApplyDelegate {
         util::check_key_in_region(keys.back().unwrap(), &self.region)?;
 
         info!("{} split region {:?} with {:?}", self.tag, derived, keys);
-        // Maybe version should be increased by split_reqs.len()?
-        let new_version = derived.get_region_epoch().get_version() + 1;
+        let new_version = derived.get_region_epoch().get_version() + new_region_cnt as u64;
         derived.mut_region_epoch().set_version(new_version);
         // Note that the split requests only contain ids for new regions, so we need
         // to handle new regions and old region seperately.
@@ -2196,15 +2196,18 @@ impl Runnable<Task> for Runner {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::sync::atomic::*;
     use std::sync::*;
     use std::time::*;
 
-    use kvproto::metapb::RegionEpoch;
+    use kvproto::metapb::{self, RegionEpoch};
     use kvproto::raft_cmdpb::*;
     use protobuf::Message;
     use raftstore::coprocessor::*;
     use raftstore::store::msg::WriteResponse;
+    use raftstore::store::peer_storage::RAFT_INIT_LOG_INDEX;
+    use raftstore::store::util::{new_learner_peer, new_peer};
     use rocksdb::{Writable, WriteBatch, DB};
     use tempdir::TempDir;
 
@@ -2544,6 +2547,14 @@ mod tests {
             cmd.set_cmd_type(CmdType::IngestSST);
             cmd.mut_ingest_sst().set_sst(meta.clone());
             self.req.mut_requests().push(cmd);
+            self
+        }
+
+        fn split(mut self, splits: BatchSplitRequest) -> EntryBuilder {
+            let mut req = AdminRequest::new();
+            req.set_cmd_type(AdminCmdType::BatchSplit);
+            req.set_splits(splits);
+            self.req.set_admin_request(req);
             self
         }
 
@@ -2915,5 +2926,211 @@ mod tests {
         );
         assert_eq!(delegate1.metrics.written_keys, 3); // 2 kvs + 1 state
         assert_eq!(delegate2.metrics.written_keys, 2); // 1 kv + 1 state
+    }
+
+    fn new_split_req(key: &[u8], id: u64, children: Vec<u64>) -> SplitRequest {
+        let mut req = SplitRequest::new();
+        req.set_split_key(key.to_vec());
+        req.set_new_region_id(id);
+        req.set_new_peer_ids(children);
+        req
+    }
+
+    struct SplitResultChecker<'a> {
+        db: &'a DB,
+        origin_peers: &'a [metapb::Peer],
+        epoch: Rc<RefCell<RegionEpoch>>,
+    }
+
+    impl<'a> SplitResultChecker<'a> {
+        fn check(&self, start: &[u8], end: &[u8], id: u64, children: &[u64], check_initial: bool) {
+            let key = keys::region_state_key(id);
+            let state: RegionLocalState = self.db.get_msg_cf(CF_RAFT, &key).unwrap().unwrap();
+            assert_eq!(state.get_state(), PeerState::Normal);
+            assert_eq!(state.get_region().get_id(), id);
+            assert_eq!(state.get_region().get_start_key(), start);
+            assert_eq!(state.get_region().get_end_key(), end);
+            let expect_peers: Vec<_> = self.origin_peers
+                .iter()
+                .zip(children)
+                .map(|(p, new_id)| {
+                    let mut new_peer = metapb::Peer::clone(p);
+                    new_peer.set_id(*new_id);
+                    new_peer
+                })
+                .collect();
+            assert_eq!(state.get_region().get_peers(), expect_peers.as_slice());
+            assert!(!state.has_merge_state(), "{:?}", state);
+            let epoch = self.epoch.borrow();
+            assert_eq!(*state.get_region().get_region_epoch(), *epoch);
+            if !check_initial {
+                return;
+            }
+            let key = keys::apply_state_key(id);
+            let initial_state: RaftApplyState = self.db.get_msg_cf(CF_RAFT, &key).unwrap().unwrap();
+            assert_eq!(initial_state.get_applied_index(), RAFT_INIT_LOG_INDEX);
+            assert_eq!(
+                initial_state.get_truncated_state().get_index(),
+                RAFT_INIT_LOG_INDEX
+            );
+            assert_eq!(
+                initial_state.get_truncated_state().get_term(),
+                RAFT_INIT_LOG_INDEX
+            );
+        }
+    }
+
+    fn error_msg(resp: &RaftCmdResponse) -> &str {
+        resp.get_header().get_error().get_message()
+    }
+
+    #[test]
+    fn test_split() {
+        let (_path, db, raft_db) = create_tmp_engine("test-delegate");
+        let (_import_dir, importer) = create_tmp_importer("test-delegate");
+        let mut reg = Registration::default();
+        reg.region.set_id(1);
+        reg.region.set_end_key(b"k5".to_vec());
+        reg.region.mut_region_epoch().set_version(3);
+        let peers = vec![new_peer(2, 3), new_peer(4, 5), new_learner_peer(6, 7)];
+        reg.region.set_peers(RepeatedField::from_vec(peers.clone()));
+        let mut delegate = ApplyDelegate::from_registration(Arc::clone(&db), raft_db, reg);
+        let mut delegates = HashMap::default();
+        let (tx, rx) = mpsc::channel();
+        let host = CoprocessorHost::default();
+
+        let mut index_id = 1;
+        let mut exec_split = |delegate: &mut ApplyDelegate, reqs| {
+            let mut core = ApplyContextCore::new(&host, &importer).use_delete_range(true);
+            let mut apply_ctx = ApplyContext::new(&mut core, &mut delegates);
+            let epoch = delegate.region.get_region_epoch().to_owned();
+            let split = EntryBuilder::new(index_id, 1)
+                .split(reqs)
+                .epoch(epoch.get_conf_ver(), epoch.get_version())
+                .capture_resp(delegate, tx.clone())
+                .build();
+            delegate.handle_raft_committed_entries(&mut apply_ctx, vec![split]);
+            apply_ctx.write_to_db(&db);
+            index_id += 1;
+            rx.try_recv().unwrap()
+        };
+
+        let mut splits = BatchSplitRequest::new();
+        splits.set_right_derive(true);
+        splits.mut_requests().push(new_split_req(b"k1", 8, vec![]));
+        let resp = exec_split(&mut delegate, splits.clone());
+        // 3 followers are required.
+        assert!(error_msg(&resp).contains("id count"), "{:?}", resp);
+
+        splits.mut_requests().clear();
+        let resp = exec_split(&mut delegate, splits.clone());
+        // Empty requests should be rejected.
+        assert!(error_msg(&resp).contains("missing"), "{:?}", resp);
+
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k6", 8, vec![9, 10, 11]));
+        let resp = exec_split(&mut delegate, splits.clone());
+        // Out of range keys should be rejected.
+        assert!(
+            resp.get_header().get_error().has_key_not_in_region(),
+            "{:?}",
+            resp
+        );
+
+        splits
+            .mut_requests()
+            .push(new_split_req(b"", 8, vec![9, 10, 11]));
+        let resp = exec_split(&mut delegate, splits.clone());
+        // Empty key should be rejected.
+        assert!(error_msg(&resp).contains("missing"), "{:?}", resp);
+
+        splits.mut_requests().clear();
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k2", 8, vec![9, 10, 11]));
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k1", 8, vec![9, 10, 11]));
+        let resp = exec_split(&mut delegate, splits.clone());
+        // keys should be in ascend order.
+        assert!(error_msg(&resp).contains("invalid"), "{:?}", resp);
+
+        splits.mut_requests().clear();
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k1", 8, vec![9, 10, 11]));
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k2", 8, vec![9, 10]));
+        let resp = exec_split(&mut delegate, splits.clone());
+        // All requests should be checked.
+        assert!(error_msg(&resp).contains("id count"), "{:?}", resp);
+
+        let epoch = Rc::new(RefCell::new(delegate.region.get_region_epoch().clone()));
+        let mut new_version = epoch.borrow().get_version() + 1;
+        epoch.borrow_mut().set_version(new_version);
+        let checker = SplitResultChecker {
+            db: &db,
+            origin_peers: &peers,
+            epoch: epoch.clone(),
+        };
+
+        splits.mut_requests().clear();
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k1", 8, vec![9, 10, 11]));
+        let resp = exec_split(&mut delegate, splits.clone());
+        // Split should succeed.
+        assert!(!resp.get_header().has_error(), "{:?}", resp);
+        checker.check(b"", b"k1", 8, &[9, 10, 11], true);
+        checker.check(b"k1", b"k5", 1, &[3, 5, 7], false);
+
+        new_version = epoch.borrow().get_version() + 1;
+        epoch.borrow_mut().set_version(new_version);
+        splits.mut_requests().clear();
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k4", 12, vec![13, 14, 15]));
+        splits.set_right_derive(false);
+        let resp = exec_split(&mut delegate, splits.clone());
+        // Right derive should be respected.
+        assert!(!resp.get_header().has_error(), "{:?}", resp);
+        checker.check(b"k4", b"k5", 12, &[13, 14, 15], true);
+        checker.check(b"k1", b"k4", 1, &[3, 5, 7], false);
+
+        new_version = epoch.borrow().get_version() + 2;
+        epoch.borrow_mut().set_version(new_version);
+        splits.mut_requests().clear();
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k2", 16, vec![17, 18, 19]));
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k3", 20, vec![21, 22, 23]));
+        splits.set_right_derive(true);
+        let resp = exec_split(&mut delegate, splits.clone());
+        // Right derive should be respected.
+        assert!(!resp.get_header().has_error(), "{:?}", resp);
+        checker.check(b"k1", b"k2", 16, &[17, 18, 19], true);
+        checker.check(b"k2", b"k3", 20, &[21, 22, 23], true);
+        checker.check(b"k3", b"k4", 1, &[3, 5, 7], false);
+
+        new_version = epoch.borrow().get_version() + 2;
+        epoch.borrow_mut().set_version(new_version);
+        splits.mut_requests().clear();
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k31", 24, vec![25, 26, 27]));
+        splits
+            .mut_requests()
+            .push(new_split_req(b"k32", 28, vec![29, 30, 31]));
+        splits.set_right_derive(false);
+        let resp = exec_split(&mut delegate, splits.clone());
+        // Right derive should be respected.
+        assert!(!resp.get_header().has_error(), "{:?}", resp);
+        checker.check(b"k3", b"k31", 1, &[3, 5, 7], false);
+        checker.check(b"k31", b"k32", 24, &[25, 26, 27], true);
+        checker.check(b"k32", b"k4", 28, &[29, 30, 31], true);
     }
 }
