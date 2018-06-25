@@ -23,19 +23,21 @@ use super::Host;
 pub struct Checker {
     max_size: u64,
     split_size: u64,
+    max_pieces: usize,
     scanned_size: u64,
     current_size: u64,
     keys: Vec<Vec<u8>>,
 }
 
 impl Checker {
-    pub fn new(max_size: u64, split_size: u64) -> Checker {
+    pub fn new(max_size: u64, split_size: u64, max_pieces: usize) -> Checker {
         Checker {
             max_size,
             split_size,
+            max_pieces,
             scanned_size: 0,
             current_size: 0,
-            keys: vec![],
+            keys: Vec::with_capacity(max_pieces),
         }
     }
 }
@@ -49,7 +51,7 @@ impl SplitChecker for Checker {
             self.scanned_size += self.current_size - kv_size;
             self.current_size = kv_size;
         }
-        false
+        self.keys.len() >= self.max_pieces
     }
 
     fn split_keys(&mut self) -> Vec<Vec<u8>> {
@@ -64,6 +66,7 @@ impl SplitChecker for Checker {
 pub struct SizeCheckObserver<C> {
     region_max_size: u64,
     split_size: u64,
+    max_pieces: usize,
     ch: RetryableSendCh<Msg, C>,
 }
 
@@ -71,11 +74,13 @@ impl<C: Sender<Msg>> SizeCheckObserver<C> {
     pub fn new(
         region_max_size: u64,
         split_size: u64,
+        max_pieces: usize,
         ch: RetryableSendCh<Msg, C>,
     ) -> SizeCheckObserver<C> {
         SizeCheckObserver {
             region_max_size,
             split_size,
+            max_pieces,
             ch,
         }
     }
@@ -98,6 +103,7 @@ impl<C: Sender<Msg> + Send> SplitCheckObserver for SizeCheckObserver<C> {
                 host.add_checker(Box::new(Checker::new(
                     self.region_max_size,
                     self.split_size,
+                    self.max_pieces,
                 )));
                 return;
             }
@@ -128,6 +134,7 @@ impl<C: Sender<Msg> + Send> SplitCheckObserver for SizeCheckObserver<C> {
             host.add_checker(Box::new(Checker::new(
                 self.region_max_size,
                 self.split_size,
+                self.max_pieces,
             )));
         } else {
             // Does not need to check size.

@@ -201,6 +201,9 @@
 # bit smaller.
 # region-max-size = "144MB"
 # region-split-size = "96MB"
+# In case it takes too long to scan a region and schedule a split, you can
+# limit the split count in a batch.
+# split-batch-limit = 50
 
 [rocksdb]
 # Maximum number of concurrent background jobs (compactions and flushes)

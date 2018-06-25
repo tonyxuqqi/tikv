@@ -27,6 +27,7 @@ pub struct Config {
     /// be region_split_size (or a little bit smaller).
     pub region_max_size: ReadableSize,
     pub region_split_size: ReadableSize,
+    pub split_batch_limit: usize,
 }
 
 /// Default region split size.
@@ -39,6 +40,7 @@ impl Default for Config {
             split_region_on_table: true,
             region_split_size: split_size,
             region_max_size: split_size / 2 * 3,
+            split_batch_limit: 50,
         }
     }
 }
@@ -51,6 +53,9 @@ impl Config {
                 self.region_max_size.0,
                 self.region_split_size.0
             ));
+        }
+        if self.split_batch_limit == 0 {
+            return Err(box_err!("split_batch_limit should > 0."));
         }
 
         Ok(())
@@ -69,6 +74,10 @@ mod tests {
         cfg = Config::default();
         cfg.region_max_size = ReadableSize(10);
         cfg.region_split_size = ReadableSize(20);
+        assert!(cfg.validate().is_err());
+
+        cfg = Config::default();
+        cfg.split_batch_limit = 0;
         assert!(cfg.validate().is_err());
     }
 }
