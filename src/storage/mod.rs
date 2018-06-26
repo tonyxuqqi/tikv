@@ -40,9 +40,10 @@ pub mod types;
 
 pub use self::config::{Config, DEFAULT_DATA_DIR, DEFAULT_ROCKSDB_SUB_DIR};
 pub use self::engine::raftkv::RaftKv;
-pub use self::engine::{new_local_engine, CFStatistics, Cursor, Engine, Error as EngineError,
-                       FlowStatistics, Iterator, Modify, ScanMode, Snapshot, Statistics,
-                       StatisticsSummary, TEMP_DIR};
+pub use self::engine::{
+    new_local_engine, CFStatistics, Cursor, Engine, Error as EngineError, FlowStatistics, Iterator,
+    Modify, ScanMode, Snapshot, Statistics, StatisticsSummary, TEMP_DIR,
+};
 pub use self::readpool_context::Context as ReadPoolContext;
 pub use self::txn::{Msg, Scheduler, SnapshotStore, StoreScanner};
 pub use self::types::{make_key, Key, KvPair, MvccInfo, Value};
@@ -952,7 +953,8 @@ impl Storage {
                     let cf = Storage::rawkv_cf(cf)?;
                     // no scan_count for this kind of op.
                     let mut stats = Statistics::default();
-                    let result: Vec<Result<KvPair>> = keys.iter()
+                    let result: Vec<Result<KvPair>> = keys
+                        .iter()
                         .map(|k| (k, snapshot.get_cf(cf, k)))
                         .filter(|&(_, ref v)| !(v.is_ok() && v.as_ref().unwrap().is_none()))
                         .into_iter()
@@ -995,9 +997,11 @@ impl Storage {
         }
         self.engine.async_write(
             &ctx,
-            vec![
-                Modify::Put(Storage::rawkv_cf(cf)?, Key::from_encoded(key), value),
-            ],
+            vec![Modify::Put(
+                Storage::rawkv_cf(cf)?,
+                Key::from_encoded(key),
+                value,
+            )],
             box |(_, res): (_, engine::Result<_>)| callback(res.map_err(Error::from)),
         )?;
         KV_COMMAND_COUNTER_VEC.with_label_values(&["raw_put"]).inc();
@@ -1045,9 +1049,10 @@ impl Storage {
         }
         self.engine.async_write(
             &ctx,
-            vec![
-                Modify::Delete(Storage::rawkv_cf(cf)?, Key::from_encoded(key)),
-            ],
+            vec![Modify::Delete(
+                Storage::rawkv_cf(cf)?,
+                Key::from_encoded(key),
+            )],
             box |(_, res): (_, engine::Result<_>)| callback(res.map_err(Error::from)),
         )?;
         KV_COMMAND_COUNTER_VEC
@@ -1074,13 +1079,11 @@ impl Storage {
 
         self.engine.async_write(
             &ctx,
-            vec![
-                Modify::DeleteRange(
-                    Storage::rawkv_cf(cf)?,
-                    Key::from_encoded(start_key),
-                    Key::from_encoded(end_key),
-                ),
-            ],
+            vec![Modify::DeleteRange(
+                Storage::rawkv_cf(cf)?,
+                Key::from_encoded(start_key),
+                Key::from_encoded(end_key),
+            )],
             box |(_, res): (_, engine::Result<_>)| callback(res.map_err(Error::from)),
         )?;
         KV_COMMAND_COUNTER_VEC
@@ -1103,7 +1106,8 @@ impl Storage {
                 return Ok(());
             }
         }
-        let requests = keys.into_iter()
+        let requests = keys
+            .into_iter()
             .map(|k| Modify::Delete(cf, Key::from_encoded(k)))
             .collect();
         self.engine
@@ -1397,26 +1401,66 @@ quick_error! {
 
 pub type Result<T> = ::std::result::Result<T, Error>;
 
-pub fn get_tag_from_header(header: &errorpb::Error) -> &'static str {
-    if header.has_not_leader() {
-        "not_leader"
-    } else if header.has_region_not_found() {
-        "region_not_found"
-    } else if header.has_key_not_in_region() {
-        "key_not_in_region"
-    } else if header.has_stale_epoch() {
-        "stale_epoch"
-    } else if header.has_server_is_busy() {
-        "server_is_busy"
-    } else if header.has_stale_command() {
-        "stale_command"
-    } else if header.has_store_not_match() {
-        "store_not_match"
-    } else if header.has_raft_entry_too_large() {
-        "raft_entry_too_large"
-    } else {
-        "other"
+pub enum ErrorHeaderKind {
+    NotLeader,
+    RegionNotFound,
+    KeyNotInRegion,
+    StaleEpoch,
+    ServerIsBusy,
+    StaleCommand,
+    StoreNotMatch,
+    RaftEntryTooLarge,
+    Other,
+}
+
+impl ErrorHeaderKind {
+    /// TODO: This function is only used for bridging existing & legacy metric tags.
+    /// It should be removed once Coprocessor starts using new static metrics.
+    pub fn get_str(&self) -> &'static str {
+        match *self {
+            ErrorHeaderKind::NotLeader => "not_leader",
+            ErrorHeaderKind::RegionNotFound => "region_not_found",
+            ErrorHeaderKind::KeyNotInRegion => "key_not_in_region",
+            ErrorHeaderKind::StaleEpoch => "stale_epoch",
+            ErrorHeaderKind::ServerIsBusy => "server_is_busy",
+            ErrorHeaderKind::StaleCommand => "stale_command",
+            ErrorHeaderKind::StoreNotMatch => "store_not_match",
+            ErrorHeaderKind::RaftEntryTooLarge => "raft_entry_too_large",
+            ErrorHeaderKind::Other => "other",
+        }
     }
+}
+
+impl Display for ErrorHeaderKind {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "{}", self.get_str())
+    }
+}
+
+pub fn get_error_kind_from_header(header: &errorpb::Error) -> ErrorHeaderKind {
+    if header.has_not_leader() {
+        ErrorHeaderKind::NotLeader
+    } else if header.has_region_not_found() {
+        ErrorHeaderKind::RegionNotFound
+    } else if header.has_key_not_in_region() {
+        ErrorHeaderKind::KeyNotInRegion
+    } else if header.has_stale_epoch() {
+        ErrorHeaderKind::StaleEpoch
+    } else if header.has_server_is_busy() {
+        ErrorHeaderKind::ServerIsBusy
+    } else if header.has_stale_command() {
+        ErrorHeaderKind::StaleCommand
+    } else if header.has_store_not_match() {
+        ErrorHeaderKind::StoreNotMatch
+    } else if header.has_raft_entry_too_large() {
+        ErrorHeaderKind::RaftEntryTooLarge
+    } else {
+        ErrorHeaderKind::Other
+    }
+}
+
+pub fn get_tag_from_header(header: &errorpb::Error) -> &'static str {
+    get_error_kind_from_header(header).get_str()
 }
 
 #[cfg(test)]

@@ -19,8 +19,9 @@ use super::{Error, Result};
 use kvproto::kvrpcpb::IsolationLevel;
 use std::fmt;
 use storage::engine::{Modify, ScanMode, Snapshot};
-use storage::{is_short_value, Key, Mutation, Options, Statistics, Value, CF_DEFAULT, CF_LOCK,
-              CF_WRITE};
+use storage::{
+    is_short_value, Key, Mutation, Options, Statistics, Value, CF_DEFAULT, CF_LOCK, CF_WRITE,
+};
 
 pub const MAX_TXN_WRITE_SIZE: usize = 32 * 1024;
 
@@ -128,9 +129,7 @@ impl MvccTxn {
             if let Some((commit, _)) = self.reader.seek_write(key, u64::max_value())? {
                 // Abort on writes after our start timestamp ...
                 if commit >= self.start_ts {
-                    MVCC_CONFLICT_COUNTER
-                        .with_label_values(&["prewrite_write_conflict"])
-                        .inc();
+                    MVCC_CONFLICT_COUNTER.prewrite_write_conflict.inc();
                     return Err(Error::WriteConflict {
                         start_ts: self.start_ts,
                         conflict_ts: commit,
@@ -152,9 +151,7 @@ impl MvccTxn {
             }
             // No need to overwrite the lock and data.
             // If we use single delete, we can't put a key multiple times.
-            MVCC_DUPLICATE_CMD_COUNTER_VEC
-                .with_label_values(&["prewrite"])
-                .inc();
+            MVCC_DUPLICATE_CMD_COUNTER_VEC.prewrite.inc();
             return Ok(());
         }
 
@@ -193,9 +190,7 @@ impl MvccTxn {
             _ => {
                 return match self.reader.get_txn_commit_info(key, self.start_ts)? {
                     Some((_, WriteType::Rollback)) | None => {
-                        MVCC_CONFLICT_COUNTER
-                            .with_label_values(&["commit_lock_not_found"])
-                            .inc();
+                        MVCC_CONFLICT_COUNTER.commit_lock_not_found.inc();
                         // TODO:None should not appear
                         // Rollbacked by concurrent transaction.
                         info!(
@@ -212,9 +207,7 @@ impl MvccTxn {
                     Some((_, WriteType::Put))
                     | Some((_, WriteType::Delete))
                     | Some((_, WriteType::Lock)) => {
-                        MVCC_DUPLICATE_CMD_COUNTER_VEC
-                            .with_label_values(&["commit"])
-                            .inc();
+                        MVCC_DUPLICATE_CMD_COUNTER_VEC.commit.inc();
                         Ok(())
                     }
                 };
@@ -243,14 +236,10 @@ impl MvccTxn {
                     Some((ts, write_type)) => {
                         if write_type == WriteType::Rollback {
                             // return Ok on Rollback already exist
-                            MVCC_DUPLICATE_CMD_COUNTER_VEC
-                                .with_label_values(&["rollback"])
-                                .inc();
+                            MVCC_DUPLICATE_CMD_COUNTER_VEC.rollback.inc();
                             Ok(())
                         } else {
-                            MVCC_CONFLICT_COUNTER
-                                .with_label_values(&["rollback_committed"])
-                                .inc();
+                            MVCC_CONFLICT_COUNTER.rollback_committed.inc();
                             info!(
                                 "txn conflict (committed), key:{}, start_ts:{}, commit_ts:{}",
                                 key, self.start_ts, ts
@@ -342,8 +331,8 @@ impl MvccTxn {
 
 #[cfg(test)]
 mod tests {
-    use super::super::MvccReader;
     use super::super::write::{Write, WriteType};
+    use super::super::MvccReader;
     use super::MvccTxn;
     use kvproto::kvrpcpb::{Context, IsolationLevel};
     use storage::engine::{self, Engine, Modify, TEMP_DIR};
@@ -798,11 +787,13 @@ mod tests {
         let ctx = Context::new();
         let snapshot = engine.snapshot(&ctx).unwrap();
         let mut txn = MvccTxn::new(snapshot, 5, None, IsolationLevel::SI, true);
-        assert!(txn.prewrite(
-            Mutation::Put((make_key(key), value.to_vec())),
-            key,
-            &Options::default()
-        ).is_err());
+        assert!(
+            txn.prewrite(
+                Mutation::Put((make_key(key), value.to_vec())),
+                key,
+                &Options::default()
+            ).is_err()
+        );
 
         let ctx = Context::new();
         let snapshot = engine.snapshot(&ctx).unwrap();

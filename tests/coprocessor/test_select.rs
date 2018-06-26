@@ -17,7 +17,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::i64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
 use std::{cmp, mem};
 
 use kvproto::coprocessor::{KeyRange, Request, Response};
@@ -31,12 +30,13 @@ use tikv::storage::engine::{self, Engine, TEMP_DIR};
 use tikv::storage::{self, Key, Mutation, ALL_CFS};
 use tikv::util::codec::number::*;
 use tikv::util::worker::{Builder as WorkerBuilder, FutureWorker, Worker};
-use tipb::executor::{Aggregation, ExecType, Executor, IndexScan, Limit, Selection, TableScan, TopN};
+use tipb::executor::{
+    Aggregation, ExecType, Executor, IndexScan, Limit, Selection, TableScan, TopN,
+};
 use tipb::expression::{ByItem, Expr, ExprType, ScalarFuncSig};
 use tipb::schema::{self, ColumnInfo};
 use tipb::select::{Chunk, DAGRequest, EncodeType, SelectResponse, StreamResponse};
 
-use raftstore::util::MAX_LEADER_LEASE;
 use storage::sync_storage::SyncStorage;
 use storage::util::new_raft_engine;
 
@@ -213,12 +213,8 @@ impl Table {
 
     pub fn get_select_range(&self) -> KeyRange {
         let mut range = KeyRange::new();
-        let mut buf = Vec::with_capacity(8);
-        buf.encode_i64(i64::MIN).unwrap();
-        range.set_start(table::encode_row_key(self.id, &buf));
-        buf.clear();
-        buf.encode_i64(i64::MAX).unwrap();
-        range.set_end(table::encode_row_key(self.id, &buf));
+        range.set_start(table::encode_row_key(self.id, i64::MIN));
+        range.set_end(table::encode_row_key(self.id, i64::MAX));
         range
     }
 
@@ -314,11 +310,12 @@ impl<'a> Insert<'a> {
     }
 
     fn execute_with_ctx(self, ctx: Context) -> i64 {
-        let handle = self.values
+        let handle = self
+            .values
             .get(&self.table.handle_id)
             .cloned()
             .unwrap_or_else(|| Datum::I64(next_id()));
-        let key = build_row_key(self.table.id, handle.i64());
+        let key = table::encode_row_key(self.table.id, handle.i64());
         let ids: Vec<_> = self.values.keys().cloned().collect();
         let values: Vec<_> = self.values.values().cloned().collect();
         let value = table::encode_row(values, &ids).unwrap();
@@ -351,7 +348,7 @@ impl<'a> Delete<'a> {
         for (&id, v) in self.table.cols.keys().zip(row) {
             values.insert(id, v);
         }
-        let key = build_row_key(self.table.id, id);
+        let key = table::encode_row_key(self.table.id, id);
         let mut keys = vec![];
         keys.push(key);
         for (&idx_id, idx_cols) in &self.table.idxs {
@@ -400,7 +397,8 @@ impl Store {
     fn put(&mut self, ctx: Context, mut kv: Vec<(Vec<u8>, Vec<u8>)>) {
         self.handles.extend(kv.iter().map(|&(ref k, _)| k.clone()));
         let pk = kv[0].0.clone();
-        let kv = kv.drain(..)
+        let kv = kv
+            .drain(..)
             .map(|(k, v)| Mutation::Put((Key::from_raw(&k), v)))
             .collect();
         self.store.prewrite(ctx, kv, pk, self.current_ts).unwrap();
@@ -413,7 +411,8 @@ impl Store {
     fn delete(&mut self, mut keys: Vec<Vec<u8>>) {
         self.handles.extend(keys.clone());
         let pk = keys[0].clone();
-        let mutations = keys.drain(..)
+        let mutations = keys
+            .drain(..)
             .map(|k| Mutation::Delete(Key::from_raw(&k)))
             .collect();
         self.store
@@ -431,12 +430,6 @@ impl Store {
             .commit(ctx, handles, self.current_ts, next_id() as u64)
             .unwrap();
     }
-}
-
-fn build_row_key(table_id: i64, id: i64) -> Vec<u8> {
-    let mut buf = [0; 8];
-    (&mut buf as &mut [u8]).encode_i64(id).unwrap();
-    table::encode_row_key(table_id, &buf)
 }
 
 /// An example table for test purpose.
@@ -571,12 +564,8 @@ impl DAGSelect {
         exec.set_tbl_scan(tbl_scan);
 
         let mut range = KeyRange::new();
-        let mut buf = Vec::with_capacity(8);
-        buf.encode_i64(i64::MIN).unwrap();
-        range.set_start(table::encode_row_key(table.id, &buf));
-        buf.clear();
-        buf.encode_i64(i64::MAX).unwrap();
-        range.set_end(table::encode_row_key(table.id, &buf));
+        range.set_start(table::encode_row_key(table.id, i64::MIN));
+        range.set_end(table::encode_row_key(table.id, i64::MAX));
 
         DAGSelect {
             execs: vec![exec],
@@ -906,12 +895,12 @@ fn test_select_after_lease() {
     ];
 
     let product = ProductTable::new();
-    let (_cluster, raft_engine, ctx) = new_raft_engine(1, "");
+    let (cluster, raft_engine, ctx) = new_raft_engine(1, "");
     let (_, mut end_point) =
         init_data_with_engine_and_commit(ctx.clone(), raft_engine, &product, &data, true);
 
     // Sleep until the leader lease is expired.
-    thread::sleep(Duration::from_millis(MAX_LEADER_LEASE));
+    thread::sleep(cluster.cfg.raft_store.raft_store_max_leader_lease.0);
     let req = DAGSelect::from(&product.table).build_with(ctx.clone(), &[0]);
     let mut resp = handle_select(&end_point, req);
     let spliter = DAGChunkSpliter::new(resp.take_chunks().into_vec(), 3);
