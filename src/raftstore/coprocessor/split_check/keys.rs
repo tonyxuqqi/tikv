@@ -320,10 +320,12 @@ mod tests {
             let write_value = Write::new(WriteType::Put, 0, None).to_bytes();
             let write_cf = engine.cf_handle(CF_WRITE).unwrap();
             engine.put_cf(write_cf, &key, &write_value).unwrap();
-            engine.flush_cf(write_cf, true).unwrap();
             let default_cf = engine.cf_handle(CF_DEFAULT).unwrap();
             engine.put_cf(default_cf, &key, &[0; 1024]).unwrap();
-            engine.flush_cf(default_cf, true).unwrap();
+            if i % 10 == 0 {
+                engine.flush_cf(write_cf, true).unwrap();
+                engine.flush_cf(default_cf, true).unwrap();
+            }
         }
 
         runnable.run(SplitCheckTask::new(region.clone(), true, CheckPolicy::SCAN));
@@ -347,10 +349,12 @@ mod tests {
                 Write::new(WriteType::Put, 0, Some(b"shortvalue".to_vec())).to_bytes();
             let write_cf = engine.cf_handle(CF_WRITE).unwrap();
             engine.put_cf(write_cf, &key, &write_value).unwrap();
-            engine.flush_cf(write_cf, true).unwrap();
             let default_cf = engine.cf_handle(CF_DEFAULT).unwrap();
             engine.put_cf(default_cf, &key, &[0; 1024]).unwrap();
-            engine.flush_cf(default_cf, true).unwrap();
+            if i % 10 == 0 {
+                engine.flush_cf(write_cf, true).unwrap();
+                engine.flush_cf(default_cf, true).unwrap();
+            }
         }
 
         runnable.run(SplitCheckTask::new(region.clone(), true, CheckPolicy::SCAN));
@@ -370,10 +374,12 @@ mod tests {
             let write_value = Write::new(WriteType::Put, 0, None).to_bytes();
             let write_cf = engine.cf_handle(CF_WRITE).unwrap();
             engine.put_cf(write_cf, &key, &write_value).unwrap();
-            engine.flush_cf(write_cf, true).unwrap();
             let default_cf = engine.cf_handle(CF_DEFAULT).unwrap();
             engine.put_cf(default_cf, &key, &[0; 1024]).unwrap();
-            engine.flush_cf(default_cf, true).unwrap();
+            if i % 10 == 0 {
+                engine.flush_cf(write_cf, true).unwrap();
+                engine.flush_cf(default_cf, true).unwrap();
+            }
         }
 
         runnable.run(SplitCheckTask::new(region.clone(), true, CheckPolicy::SCAN));
@@ -397,10 +403,12 @@ mod tests {
             let write_value = Write::new(WriteType::Put, 0, None).to_bytes();
             let write_cf = engine.cf_handle(CF_WRITE).unwrap();
             engine.put_cf(write_cf, &key, &write_value).unwrap();
-            engine.flush_cf(write_cf, true).unwrap();
             let default_cf = engine.cf_handle(CF_DEFAULT).unwrap();
             engine.put_cf(default_cf, &key, &[0; 1024]).unwrap();
-            engine.flush_cf(default_cf, true).unwrap();
+            if i % 10 == 0 {
+                engine.flush_cf(write_cf, true).unwrap();
+                engine.flush_cf(default_cf, true).unwrap();
+            }
         }
 
         runnable.run(SplitCheckTask::new(region.clone(), true, CheckPolicy::SCAN));

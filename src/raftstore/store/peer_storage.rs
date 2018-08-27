@@ -13,7 +13,6 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
@@ -266,7 +265,6 @@ pub struct PeerStorage {
     snap_tried_cnt: RefCell<usize>,
 
     cache: EntryCache,
-    stats: Rc<RefCell<CacheQueryStats>>,
 
     pub tag: String,
 }
@@ -461,7 +459,6 @@ impl PeerStorage {
         region: &metapb::Region,
         region_sched: Scheduler<RegionTask>,
         tag: String,
-        stats: Rc<RefCell<CacheQueryStats>>,
     ) -> Result<PeerStorage> {
         debug!("creating storage on {} for {:?}", engines.kv.path(), region);
         let raft_state = init_raft_state(&engines.raft, region)?;
@@ -488,7 +485,6 @@ impl PeerStorage {
             applied_index_term: RAFT_INIT_LOG_TERM,
             last_term,
             cache: EntryCache::default(),
-            stats,
         })
     }
 
@@ -546,7 +542,6 @@ impl PeerStorage {
         let region_id = self.get_region_id();
         if high <= cache_low {
             // not overlap
-            self.stats.borrow_mut().miss += 1;
             fetch_entries_to(
                 &self.engines.raft,
                 region_id,
@@ -559,7 +554,6 @@ impl PeerStorage {
         }
         let mut fetched_size = 0;
         let begin_idx = if low < cache_low {
-            self.stats.borrow_mut().miss += 1;
             fetched_size = fetch_entries_to(
                 &self.engines.raft,
                 region_id,
@@ -577,7 +571,6 @@ impl PeerStorage {
             low
         };
 
-        self.stats.borrow_mut().hit += 1;
         self.cache
             .fetch_entries_to(begin_idx, high, fetched_size, max_size, &mut ents);
         Ok(ents)
@@ -1024,6 +1017,11 @@ impl PeerStorage {
         self.region().get_id()
     }
 
+    #[inline]
+    pub fn region_sched(&self) -> Scheduler<RegionTask> {
+        self.region_sched.clone()
+    }
+
     pub fn schedule_applying_snapshot(&mut self) {
         let status = Arc::new(AtomicUsize::new(JOB_STATUS_PENDING));
         self.set_snap_state(SnapState::Applying(Arc::clone(&status)));
@@ -1463,8 +1461,7 @@ mod test {
         let engines = Engines::new(kv_db, raft_db);
         bootstrap::bootstrap_store(&engines, 1, 1).expect("");
         let region = bootstrap::prepare_bootstrap(&engines, 1, 1, 1).expect("");
-        let metrics = Rc::new(RefCell::new(CacheQueryStats::default()));
-        PeerStorage::new(engines, &region, sched, "".to_owned(), metrics).unwrap()
+        PeerStorage::new(engines, &region, sched, "".to_owned()).unwrap()
     }
 
     fn new_storage_from_ents(

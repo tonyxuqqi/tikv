@@ -25,6 +25,7 @@ use rocksdb::DB;
 
 use raftstore::errors::RAFTSTORE_IS_BUSY;
 use raftstore::store::msg::Callback;
+use raftstore::store::peer_agent::ConfigProvider;
 use raftstore::store::store::Store;
 use raftstore::store::util::{self, LeaseState, RemoteLease};
 use raftstore::store::{

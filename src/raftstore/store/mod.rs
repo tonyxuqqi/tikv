@@ -24,8 +24,10 @@ pub mod util;
 mod local_metrics;
 mod metrics;
 mod peer;
+mod peer_agent;
 mod peer_storage;
 mod region_snapshot;
+mod router;
 mod snap;
 mod worker;
 
@@ -36,8 +38,8 @@ pub use self::bootstrap::{
 pub use self::config::Config;
 pub use self::engine::{Iterable, Mutable, Peekable};
 pub use self::msg::{
-    BatchReadCallback, Callback, Msg, ReadCallback, ReadResponse, SeekRegionCallback,
-    SeekRegionFilter, SeekRegionResult, SignificantMsg, Tick, WriteCallback, WriteResponse,
+    BatchReadCallback, Callback, ReadCallback, ReadResponse, SeekRegionCallback, StoreMsg,
+    SeekRegionFilter, SeekRegionResult, SignificantMsg, WriteCallback, WriteResponse, PeerMsg,
 };
 pub use self::peer::{
     Peer, PeerStat, ProposalContext, ReadExecutor, RequestInspector, RequestPolicy,

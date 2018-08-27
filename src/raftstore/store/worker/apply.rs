@@ -44,6 +44,7 @@ use raftstore::store::engine::{Mutable, Peekable, Snapshot};
 use raftstore::store::metrics::*;
 use raftstore::store::msg::Callback;
 use raftstore::store::peer::Peer;
+use raftstore::store::peer_agent::ConfigProvider;
 use raftstore::store::peer_storage::{
     self, compact_raft_log, write_initial_apply_state, write_peer_state,
 };
@@ -1958,7 +1959,7 @@ impl RegionProposal {
 }
 
 pub struct ApplyBatch {
-    vec: Vec<Apply>,
+    apply: Apply,
     start: Instant,
 }
 
@@ -1970,14 +1971,14 @@ pub struct Destroy {
 pub enum Task {
     Applies(ApplyBatch),
     Registration(Registration),
-    Proposals(Vec<RegionProposal>),
+    Proposals(RegionProposal),
     Destroy(Destroy),
 }
 
 impl Task {
-    pub fn applies(applies: Vec<Apply>) -> Task {
+    pub fn apply(apply: Apply) -> Task {
         Task::Applies(ApplyBatch {
-            vec: applies,
+            apply,
             start: Instant::now_coarse(),
         })
     }
@@ -1994,8 +1995,8 @@ impl Task {
 impl Display for Task {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match *self {
-            Task::Applies(ref a) => write!(f, "async applys count {}", a.vec.len()),
-            Task::Proposals(ref p) => write!(f, "region proposal count {}", p.len()),
+            Task::Applies(ref a) => write!(f, "[region {}] async applys", a.apply.region_id),
+            Task::Proposals(ref p) => write!(f, "[region {}] region proposal", p.region_id),
             Task::Registration(ref r) => {
                 write!(f, "[region {}] Reg {:?}", r.region.get_id(), r.apply_state)
             }
@@ -2045,8 +2046,8 @@ pub struct Runner {
 }
 
 impl Runner {
-    pub fn new<T, C>(
-        store: &Store<T, C>,
+    pub fn new<T>(
+        store: &Store<T>,
         notifier: Sender<TaskRes>,
         sync_log: bool,
         use_delete_range: bool,
@@ -2068,21 +2069,21 @@ impl Runner {
         }
     }
 
-    fn handle_applies(&mut self, applys: Vec<Apply>) {
+    fn handle_apply(&mut self, apply: Apply) {
         let t = SlowTimer::new();
 
         let mut core = ApplyContextCore::new(self.host.as_ref(), self.importer.as_ref())
-            .apply_res_capacity(applys.len())
+            .apply_res_capacity(1)
             .use_delete_range(self.use_delete_range)
             .enable_sync_log(self.sync_log);
-        for apply in applys {
+        'handle_apply: {
             if apply.entries.is_empty() || core.merged_regions.contains(&apply.region_id) {
-                continue;
+                break 'handle_apply;
             }
             let mut delegate = match self.delegates.get_mut(&apply.region_id) {
                 None => {
                     error!("[region {}] is missing", apply.region_id);
-                    continue;
+                    break 'handle_apply;
                 }
                 Some(e) => e.take().unwrap(),
             };
@@ -2129,38 +2130,33 @@ impl Runner {
         );
     }
 
-    fn handle_proposals(&mut self, proposals: Vec<RegionProposal>) {
-        let mut propose_num = 0;
-        for region_proposal in proposals {
-            propose_num += region_proposal.props.len();
-            let delegate = match self.delegates.get_mut(&region_proposal.region_id) {
-                Some(d) => d.as_mut().unwrap(),
-                None => {
-                    for p in region_proposal.props {
-                        let cmd = PendingCmd::new(p.index, p.term, p.cb);
-                        notify_region_removed(region_proposal.region_id, region_proposal.id, cmd);
-                    }
-                    continue;
+    fn handle_proposals(&mut self, region_proposal: RegionProposal) {
+        let delegate = match self.delegates.get_mut(&region_proposal.region_id) {
+            Some(d) => d.as_mut().unwrap(),
+            None => {
+                for p in region_proposal.props {
+                    let cmd = PendingCmd::new(p.index, p.term, p.cb);
+                    notify_region_removed(region_proposal.region_id, region_proposal.id, cmd);
                 }
-            };
-            assert_eq!(delegate.id, region_proposal.id);
-            for p in region_proposal.props {
-                let cmd = PendingCmd::new(p.index, p.term, p.cb);
-                if p.is_conf_change {
-                    if let Some(cmd) = delegate.pending_cmds.take_conf_change() {
-                        // if it loses leadership before conf change is replicated, there may be
-                        // a stale pending conf change before next conf change is applied. If it
-                        // becomes leader again with the stale pending conf change, will enter
-                        // this block, so we notify leadership may have been changed.
-                        notify_stale_command(&delegate.tag, delegate.term, cmd);
-                    }
-                    delegate.pending_cmds.set_conf_change(cmd);
-                } else {
-                    delegate.pending_cmds.append_normal(cmd);
+                return;
+            }
+        };
+        assert_eq!(delegate.id, region_proposal.id);
+        for p in region_proposal.props {
+            let cmd = PendingCmd::new(p.index, p.term, p.cb);
+            if p.is_conf_change {
+                if let Some(cmd) = delegate.pending_cmds.take_conf_change() {
+                    // if it loses leadership before conf change is replicated, there may be
+                    // a stale pending conf change before next conf change is applied. If it
+                    // becomes leader again with the stale pending conf change, will enter
+                    // this block, so we notify leadership may have been changed.
+                    notify_stale_command(&delegate.tag, delegate.term, cmd);
                 }
+                delegate.pending_cmds.set_conf_change(cmd);
+            } else {
+                delegate.pending_cmds.append_normal(cmd);
             }
         }
-        APPLY_PROPOSAL.observe(propose_num as f64);
     }
 
     fn handle_registration(&mut self, s: Registration) {
@@ -2204,7 +2200,7 @@ impl Runnable<Task> for Runner {
             Task::Applies(a) => {
                 let elapsed = duration_to_sec(a.start.elapsed());
                 APPLY_TASK_WAIT_TIME_HISTOGRAM.observe(elapsed);
-                self.handle_applies(a.vec);
+                self.handle_apply(a.apply);
             }
             Task::Proposals(props) => self.handle_proposals(props),
             Task::Registration(s) => self.handle_registration(s),
@@ -2362,7 +2358,7 @@ mod tests {
             }),
         );
         let region_proposal = RegionProposal::new(1, 1, vec![p]);
-        runner.run(Task::Proposals(vec![region_proposal]));
+        runner.run(Task::Proposals(region_proposal));
         // unregistered region should be ignored and notify failed.
         assert!(rx.try_recv().is_err());
         let resp = resp_rx.try_recv().unwrap();
@@ -2381,7 +2377,7 @@ mod tests {
             ),
         ];
         let region_proposal = RegionProposal::new(1, 2, pops);
-        runner.run(Task::Proposals(vec![region_proposal]));
+        runner.run(Task::Proposals(region_proposal));
         assert!(rx.try_recv().is_err());
         {
             let normals = &runner.delegates[&2].as_ref().unwrap().pending_cmds.normals;
@@ -2399,7 +2395,7 @@ mod tests {
 
         let p = Proposal::new(true, 4, 0, Callback::None);
         let region_proposal = RegionProposal::new(1, 2, vec![p]);
-        runner.run(Task::Proposals(vec![region_proposal]));
+        runner.run(Task::Proposals(region_proposal));
         assert!(rx.try_recv().is_err());
         {
             let cc = &runner.delegates[&2]
