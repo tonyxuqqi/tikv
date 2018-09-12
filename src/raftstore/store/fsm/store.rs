@@ -43,7 +43,7 @@ use util::sys as util_sys;
 use util::time::{duration_to_sec, SlowTimer};
 use util::timer::Timer;
 use util::transport::SendCh;
-use util::worker::{FutureWorker, Scheduler, Worker};
+use util::worker::{Builder as WorkerBuilder, FutureWorker, Scheduler, Worker};
 use util::RingQueue;
 
 use import::SSTImporter;
@@ -162,7 +162,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             pd_worker,
             consistency_check_worker: Worker::new("consistency-check"),
             cleanup_sst_worker: Worker::new("cleanup-sst"),
-            apply_worker: Worker::new("apply-worker"),
+            apply_worker: WorkerBuilder::new("apply-worker").batch_size(4096).create(),
             apply_res_receiver: None,
             local_reader,
             last_compact_checked_key: keys::DATA_MIN_KEY.to_vec(),
