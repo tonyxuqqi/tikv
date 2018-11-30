@@ -26,6 +26,8 @@
 #![feature(ascii_ctype)]
 #![feature(const_int_ops)]
 #![feature(use_extern_macros)]
+#![feature(cell_update)]
+#![feature(label_break_value)]
 #![recursion_limit = "200"]
 #![feature(range_contains)]
 // Currently this raises some false positives, so we allow it:
