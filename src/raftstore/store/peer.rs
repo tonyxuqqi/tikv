@@ -22,8 +22,8 @@ use std::{cmp, mem, slice, u64};
 use kvproto::metapb;
 use kvproto::pdpb::PeerStats;
 use kvproto::raft_cmdpb::{
-    self, AdminCmdType, AdminResponse, CmdType, RaftCmdRequest, RaftCmdResponse, Request, Response,
-    TransferLeaderRequest, TransferLeaderResponse,
+    self, AdminCmdType, AdminResponse, CmdType, RaftCmdRequest, RaftCmdResponse, RaftRequestHeader,
+    Request, Response, TransferLeaderRequest, TransferLeaderResponse,
 };
 use kvproto::raft_serverpb::{
     MergeState, PeerState, RaftApplyState, RaftMessage, RaftSnapshotData,
@@ -1816,6 +1816,21 @@ impl Peer {
             self.pre_propose_prepare_merge(poll_ctx, req)?;
             ctx.insert(ProposalContext::PREPARE_MERGE);
         }
+
+        let mut header = RaftRequestHeader::new();
+        if !req.get_header().get_uuid().is_empty() {
+            header.set_uuid(req.mut_header().take_uuid());
+        }
+        header.set_sync_log(req.get_header().get_sync_log());
+        if self.get_store().applied_index_term() != self.term()
+            || self.last_urgent_proposal_idx != u64::MAX
+                && self.last_urgent_proposal_idx > self.get_store().applied_index()
+            || is_request_urgent(&req)
+        {
+            header.set_region_epoch(req.mut_header().take_region_epoch());
+        }
+
+        req.set_header(header);
 
         Ok(ctx)
     }
