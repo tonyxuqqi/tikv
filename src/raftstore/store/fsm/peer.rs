@@ -679,7 +679,6 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
 
     fn on_raft_base_tick(&mut self) {
         if self.fsm.peer.pending_remove {
-            self.fsm.peer.mut_store().flush_cache_metrics();
             return;
         }
         // When having pending snapshot, if election timeout is met, it can't pass
@@ -695,7 +694,6 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
             self.fsm.has_ready = true;
         }
 
-        self.fsm.peer.mut_store().flush_cache_metrics();
         self.register_raft_base_tick();
     }
 
@@ -1383,7 +1381,13 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
             end_idx: state.get_index() + 1,
         };
         self.fsm.peer.last_compacted_idx = task.end_idx;
-        self.fsm.peer.mut_store().compact_to(task.end_idx);
+        self.fsm
+            .peer
+            .raft_group
+            .raft
+            .raft_log
+            .unstable
+            .compact_to(task.end_idx);
         if let Err(e) = self.ctx.raftlog_gc_scheduler.schedule(task) {
             error!(
                 "failed to schedule compact task";
@@ -2244,7 +2248,13 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
 
         let applied_idx = self.fsm.peer.get_store().applied_index();
         if !self.fsm.peer.is_leader() {
-            self.fsm.peer.mut_store().compact_to(applied_idx + 1);
+            self.fsm
+                .peer
+                .raft_group
+                .raft
+                .raft_log
+                .unstable
+                .compact_to(applied_idx + 1);
             return;
         }
 
@@ -2288,10 +2298,30 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
             );
             REGION_MAX_LOG_LAG.observe((last_idx - replicated_idx) as f64);
         }
-        self.fsm
-            .peer
-            .mut_store()
-            .maybe_gc_cache(alive_cache_idx, applied_idx);
+        if alive_cache_idx == applied_idx {
+            // The region is inactive, clear the cache immediately.
+            self.fsm
+                .peer
+                .raft_group
+                .raft
+                .raft_log
+                .unstable
+                .compact_to(applied_idx + 1);
+        } else {
+            let cache_first_idx = self.fsm.peer.raft_group.raft.raft_log.unstable.offset();
+            if cache_first_idx > alive_cache_idx + 1 {
+                // Catching up log requires accessing fs already, let's optimize for
+                // the common case.
+                // Maybe gc to second least replicated_idx is better.
+                self.fsm
+                    .peer
+                    .raft_group
+                    .raft
+                    .raft_log
+                    .unstable
+                    .compact_to(applied_idx + 1);
+            }
+        }
         let first_idx = self.fsm.peer.get_store().first_index();
         let mut compact_idx;
         if applied_idx > first_idx
