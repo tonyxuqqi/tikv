@@ -609,7 +609,7 @@ impl Peer {
             .committed_entries
             .as_ref()
             .map_or(0, |v| v.len() as u64);
-        metrics.append += ready.entries.len() as u64;
+        metrics.append += ready.unstable_count as u64;
 
         if !raft::is_empty_snap(&ready.snapshot) {
             metrics.snapshot += 1;
@@ -1046,7 +1046,14 @@ impl Peer {
                 });
         }
 
-        let invoke_ctx = match self.mut_store().handle_raft_ready(ctx, &ready) {
+        let (left, right) = &self.raft_group.raft.raft_log.unstable.unstable_entries();
+        let invoke_ctx = match self
+            .raft_group
+            .raft
+            .raft_log
+            .store
+            .handle_raft_ready(ctx, &ready, left, right)
+        {
             Ok(r) => r,
             Err(e) => {
                 // We may have written something to writebatch and it can't be reverted, so has
@@ -1120,7 +1127,7 @@ impl Peer {
         apply_snap_result
     }
 
-    pub fn handle_raft_ready_apply<T, C>(&mut self, ctx: &mut PollContext<T, C>, mut ready: Ready) {
+    pub fn handle_raft_ready_apply<T, C>(&mut self, ctx: &mut PollContext<T, C>, ready: Ready) {
         // Call `handle_raft_committed_entries` directly here may lead to inconsistency.
         // In some cases, there will be some pending committed entries when applying a
         // snapshot. If we call `handle_raft_committed_entries` directly, these updates
@@ -1132,7 +1139,6 @@ impl Peer {
             // Snapshot's metadata has been applied.
             self.last_applying_idx = self.get_store().truncated_index();
         } else {
-            let committed_entries = ready.committed_entries.take().unwrap();
             // leader needs to update lease and last committed split index.
             let mut lease_to_be_updated = self.is_leader();
             let mut split_to_be_updated = self.is_leader();
@@ -1143,43 +1149,50 @@ impl Peer {
                 // have no effect.
                 self.proposals.clear();
             }
-            for entry in committed_entries.iter().rev() {
-                // raft meta is very small, can be ignored.
-                self.raft_log_size_hint += entry.get_data().len() as u64;
-                if lease_to_be_updated {
-                    let propose_time = self.find_propose_time(entry.get_index(), entry.get_term());
-                    if let Some(propose_time) = propose_time {
-                        self.maybe_renew_leader_lease(&ctx.local_reader, propose_time);
-                        lease_to_be_updated = false;
+            if let Some(s) = ready.committed_entries {
+                let committed_entries = self
+                    .raft_group
+                    .raft
+                    .raft_log
+                    .slice(s.start, s.end, NO_LIMIT)
+                    .unwrap();
+                for entry in committed_entries.iter().rev() {
+                    // raft meta is very small, can be ignored.
+                    self.raft_log_size_hint += entry.get_data().len() as u64;
+                    if lease_to_be_updated {
+                        let propose_time =
+                            self.find_propose_time(entry.get_index(), entry.get_term());
+                        if let Some(propose_time) = propose_time {
+                            self.maybe_renew_leader_lease(&ctx.local_reader, propose_time);
+                            lease_to_be_updated = false;
+                        }
                     }
-                }
 
-                // We care about split/merge commands that are committed in the current term.
-                if entry.term == self.term() && (split_to_be_updated || merge_to_be_update) {
-                    let ctx = ProposalContext::from_bytes(&entry.context);
-                    if split_to_be_updated && ctx.contains(ProposalContext::SPLIT) {
-                        // We dont need to suspect its lease because peers of new region that
-                        // in other store do not start election before theirs election timeout
-                        // which is longer than the max leader lease.
-                        // It's safe to read local within its current lease, however, it's not
-                        // safe to renew its lease.
-                        self.last_committed_split_idx = entry.index;
-                        split_to_be_updated = false;
-                    }
-                    if merge_to_be_update && ctx.contains(ProposalContext::PREPARE_MERGE) {
-                        // We committed prepare merge, to prevent unsafe read index,
-                        // we must record its index.
-                        self.last_committed_prepare_merge_idx = entry.get_index();
-                        // After prepare_merge is committed, the leader can not know
-                        // when the target region merges majority of this region, also
-                        // it can not know when the target region writes new values.
-                        // To prevent unsafe local read, we suspect its leader lease.
-                        self.leader_lease.suspect(monotonic_raw_now());
-                        merge_to_be_update = false;
+                    // We care about split/merge commands that are committed in the current term.
+                    if entry.term == self.term() && (split_to_be_updated || merge_to_be_update) {
+                        let ctx = ProposalContext::from_bytes(&entry.context);
+                        if split_to_be_updated && ctx.contains(ProposalContext::SPLIT) {
+                            // We dont need to suspect its lease because peers of new region that
+                            // in other store do not start election before theirs election timeout
+                            // which is longer than the max leader lease.
+                            // It's safe to read local within its current lease, however, it's not
+                            // safe to renew its lease.
+                            self.last_committed_split_idx = entry.index;
+                            split_to_be_updated = false;
+                        }
+                        if merge_to_be_update && ctx.contains(ProposalContext::PREPARE_MERGE) {
+                            // We committed prepare merge, to prevent unsafe read index,
+                            // we must record its index.
+                            self.last_committed_prepare_merge_idx = entry.get_index();
+                            // After prepare_merge is committed, the leader can not know
+                            // when the target region merges majority of this region, also
+                            // it can not know when the target region writes new values.
+                            // To prevent unsafe local read, we suspect its leader lease.
+                            self.leader_lease.suspect(monotonic_raw_now());
+                            merge_to_be_update = false;
+                        }
                     }
                 }
-            }
-            if !committed_entries.is_empty() {
                 self.last_applying_idx = committed_entries.last().unwrap().get_index();
                 if self.last_applying_idx >= self.last_urgent_proposal_idx {
                     // Urgent requests are flushed, make it lazy again.
