@@ -32,7 +32,7 @@ use crate::raftstore::store::fsm::peer::{
 };
 use crate::raftstore::store::fsm::{
     batch, create_apply_batch_system, ApplyBatchSystem, ApplyPollerBuilder, ApplyRouter, ApplyTask,
-    ApplyTaskRes, BasicMailbox, BatchRouter, BatchSystem, HandlerBuilder,
+    ApplyTaskRes, BasicMailbox, BatchRouter, BatchSystem, HandlerBuilder, Mailbox,
 };
 use crate::raftstore::store::fsm::{ApplyNotifier, Fsm, PollHandler, RegionProposal};
 use crate::raftstore::store::keys::{self, data_end_key, data_key, enc_end_key, enc_start_key};
@@ -48,7 +48,7 @@ use crate::raftstore::store::worker::{
 };
 use crate::raftstore::store::{
     util, Callback, CasualMessage, PeerMsg, RaftCommand, SignificantMsg, SnapManager,
-    SnapshotDeleter, StoreMsg, StoreTick,
+    SnapshotDeleter, StoreMsg, StoreTick, PeerTicks,
 };
 use crate::raftstore::Result;
 use crate::storage::kv::{CompactedEvent, CompactionListener};
@@ -178,6 +178,22 @@ impl RaftRouter {
     }
 }
 
+pub struct ScheduleTask {
+    peer_id: u64,
+    region_id: u64,
+    mailbox: Mailbox<PeerFsm, PeerMsg>,
+}
+
+impl ScheduleTask {
+    pub fn new(region_id: u64, peer_id: u64, mailbox: Mailbox<PeerFsm, PeerMsg>) -> ScheduleTask {
+        ScheduleTask {
+            peer_id,
+            region_id,
+            mailbox,
+        }
+    }
+}
+
 pub struct PollContext<T, C: 'static> {
     pub cfg: Arc<Config>,
     pub store: metapb::Store,
@@ -199,6 +215,7 @@ pub struct PollContext<T, C: 'static> {
     pub applying_snap_count: Arc<AtomicUsize>,
     pub coprocessor_host: Arc<CoprocessorHost>,
     pub timer: SteadyTimer,
+    pub pending_ticks: Vec<(PeerTicks, Vec<ScheduleTask>)>,
     pub trans: T,
     pub pd_client: Arc<C>,
     pub global_stat: GlobalStoreStat,
@@ -639,6 +656,43 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm, StoreFsm> for RaftPoller<T,
     }
 
     fn end(&mut self, peers: &mut [Box<PeerFsm>]) {
+        if !self.poll_ctx.pending_ticks.is_empty() {
+            for (tick, tasks) in self.poll_ctx.pending_ticks.drain(..) {
+                let timeout = match tick {
+                    PeerTicks::RAFT => self.poll_ctx.cfg.raft_base_tick_interval.0,
+                    PeerTicks::RAFT_LOG_GC => self.poll_ctx.cfg.raft_log_gc_tick_interval.0,
+                    PeerTicks::PD_HEARTBEAT => self.poll_ctx.cfg.pd_heartbeat_tick_interval.0,
+                    PeerTicks::SPLIT_REGION_CHECK => self.poll_ctx.cfg.split_region_check_tick_interval.0,
+                    PeerTicks::CHECK_MERGE => self.poll_ctx.cfg.merge_check_tick_interval.0,
+                    PeerTicks::CHECK_PEER_STALE_STATE => self.poll_ctx.cfg.peer_stale_state_check_interval.0,
+                    _ => unreachable!(),
+                };
+                let f = self
+                    .poll_ctx
+                    .timer
+                    .delay(timeout)
+                    .map(move |_| {
+                        for task in tasks {
+                            if let Err(e) = task.mailbox.force_send(PeerMsg::Tick(tick)) {
+                                info!(
+                                    "failed to schedule peer tick";
+                                    "region_id" => task.region_id,
+                                    "peer_id" => task.peer_id,
+                                    "tick" => ?tick,
+                                    "err" => %e,
+                                );
+                            }
+                        }
+                    })
+                    .map_err(move |e| {
+                        panic!(
+                            "failed to schedule tick {:?} due to timeout error: {:?}",
+                            tick, e,
+                        )
+                    });
+                self.poll_ctx.future_poller.spawn(f).unwrap();
+            }
+        }
         if self.poll_ctx.has_ready {
             self.handle_raft_ready(peers);
         }
@@ -868,6 +922,7 @@ where
             cleanup_sst_scheduler: self.cleanup_sst_scheduler.clone(),
             local_reader: self.local_reader.clone(),
             region_scheduler: self.region_scheduler.clone(),
+            pending_ticks: Vec::new(),
             apply_router: self.apply_router.clone(),
             router: self.router.clone(),
             compact_scheduler: self.compact_scheduler.clone(),
