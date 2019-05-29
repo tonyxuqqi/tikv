@@ -1,6 +1,7 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
 #![cfg_attr(test, feature(test))]
+#![feature(alloc_layout_extra)]
 
 #[macro_use]
 extern crate futures;
@@ -56,6 +57,7 @@ pub mod keybuilder;
 pub mod logger;
 pub mod metrics;
 pub mod mpsc;
+pub mod object_pool;
 pub mod security;
 pub mod sys;
 pub mod threadpool;
