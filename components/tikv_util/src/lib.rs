@@ -2,6 +2,7 @@
 
 #![cfg_attr(test, feature(test))]
 #![feature(alloc_layout_extra)]
+#![feature(box_syntax)]
 
 #[macro_use]
 extern crate futures;
