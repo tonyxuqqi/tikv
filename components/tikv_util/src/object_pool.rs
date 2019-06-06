@@ -177,18 +177,20 @@ mod tests {
     use std::sync::mpsc;
     use test::Bencher;
 
+    const ARRAY_SIZE: usize = 20;
+
     pub struct LargeStruct {
-        a: [usize; 12],
+        a: [usize; ARRAY_SIZE],
     }
 
     pub fn move_raw_check(a: LargeStruct) {
-        for i in 0..12 {
+        for i in 0..ARRAY_SIZE {
             assert_eq!(a.a[i], i);
         }
     }
 
     pub fn move_pointer_check(a: Pointer<LargeStruct>) {
-        for i in 0..12 {
+        for i in 0..ARRAY_SIZE {
             assert_eq!(a.as_ref().a[i], i);
         }
     }
@@ -202,8 +204,8 @@ mod tests {
             }
         });
         b.iter(|| {
-            let mut a = LargeStruct { a: [0; 12] };
-            for i in 0..12 {
+            let mut a = LargeStruct { a: [0; ARRAY_SIZE] };
+            for i in 0..ARRAY_SIZE {
                 a.a[i] = i;
             }
             tx.send(a).unwrap();
@@ -221,7 +223,7 @@ mod tests {
         let mut pool: ObjectPool<LargeStruct> = ObjectPool::new();
         b.iter(|| {
             let mut a = pool.alloc_raw();
-            for i in 0..12 {
+            for i in 0..ARRAY_SIZE {
                 a.as_mut().a[i] = i;
             }
             tx.send(a).unwrap();
