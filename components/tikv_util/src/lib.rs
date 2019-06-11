@@ -1,8 +1,8 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
 #![cfg_attr(test, feature(test))]
-#![feature(alloc_layout_extra)]
 #![feature(box_syntax)]
+#![feature(ptr_offset_from)]
 
 #[macro_use]
 extern crate futures;
@@ -65,6 +65,7 @@ pub mod threadpool;
 pub mod time;
 pub mod timer;
 pub mod worker;
+pub mod mpsc_struct_pool;
 
 static PANIC_WHEN_UNEXPECTED_KEY_OR_DATA: AtomicBool = AtomicBool::new(false);
 
