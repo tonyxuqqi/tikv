@@ -183,6 +183,7 @@ members = [
   "components/panic_hook",
   "components/tipb_helper",
   "components/log_wrappers",
+  "components/thread_pool",
   "components/tikv_util",
   "components/tidb_query",
   "components/tidb_query_datatype",

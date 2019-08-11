@@ -1,0 +1,17 @@
+[package]
+name = "thread_pool"
+version = "0.1.0"
+authors = ["The TiKV Authors"]
+edition = "2018"
+
+[dependencies]
+num_cpus = "1.0"
+crossbeam-deque = "0.7"
+parking_lot_core = "0.6"
+
+[dev-dependencies]
+tokio-threadpool = { version = "0.1" }
+futures-cpupool = "0.1"
+futures = "0.1"
+rand = "0.6"
+threadpool = "1.0"
