@@ -491,10 +491,14 @@ mod tests {
     use tipb::Executor;
     use tipb::Expr;
 
-    use crate::coprocessor::readpool_impl::{build_read_pool, build_read_pool_for_test};
+    use crate::coprocessor::readpool_impl::{
+        build_read_pool, build_read_pool_for_test, MetricsFlusher,
+    };
+    use crate::server::readpool::Builder;
     use crate::storage::kv::{NoopReporter, RocksEngine};
     use crate::storage::TestEngineBuilder;
     use protobuf::Message;
+    use tikv_util::future_pool::CloneFactory;
 
     /// A unary `RequestHandler` that always produces a fixture.
     struct UnaryFixture {
@@ -722,15 +726,16 @@ mod tests {
     fn test_full() {
         let engine = TestEngineBuilder::new().build().unwrap();
 
-        let read_pool = build_read_pool(
-            &readpool::Config {
-                normal_concurrency: 1,
-                max_tasks_per_worker_normal: 2,
-                ..readpool::Config::default_for_test()
-            },
-            NoopReporter,
-            engine,
-        );
+        // Name will affect counter of tasks, so use a different name.
+        let read_pool = Builder::new(
+            "test-full",
+            CloneFactory(MetricsFlusher::new(NoopReporter, engine)),
+        )
+        .build(&readpool::Config {
+            normal_concurrency: 1,
+            max_tasks_per_worker_normal: 2,
+            ..readpool::Config::default_for_test()
+        });
 
         let cop = Endpoint::<RocksEngine>::new(&Config::default(), read_pool);
 

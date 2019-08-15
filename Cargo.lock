@@ -252,7 +252,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "chocolates"
 version = "0.1.0"
-source = "git+https://github.com/busyjay/chocolates.git?branch=dev#0544175fff774abff29a82533a17e8ed75ad6677"
+source = "git+https://github.com/busyjay/chocolates.git?branch=dev#e7b32417d7be7ba0f555316340bc584ab8130455"
 dependencies = [
  "crossbeam-deque 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.1.23 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2838,6 +2838,7 @@ dependencies = [
  "tokio-executor 0.1.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-fs 0.1.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-io 0.1.12 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tokio-threadpool 0.1.13 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-timer 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "toml 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "url 1.7.2 (registry+https://github.com/rust-lang/crates.io-index)",

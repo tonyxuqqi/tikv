@@ -64,23 +64,21 @@ impl<T: TickRunner> thread_pool::Runner for Runner<T> {
         self.runner.resume(ctx)
     }
 
-    fn handle(
-        &mut self,
-        ctx: &mut PoolContext<Self::Task>,
-        task: Self::Task,
-        fetch_time: std::time::Instant,
-    ) {
-        self.runner.handle(ctx, task, fetch_time);
+    fn handle(&mut self, ctx: &mut PoolContext<Self::Task>, task: Self::Task) -> bool {
+        if !self.runner.handle(ctx, task) {
+            return false;
+        }
         let now = Instant::now_coarse();
         self.tick_runner.handle(now);
         self.local_handled_task_count.inc();
         self.metrics.running_task_count.dec();
         if now.duration_since(self.last_tick_time) < TICK_INTERVAL {
-            return;
+            return true;
         }
         self.last_tick_time = now;
         self.local_handled_task_count.flush();
         self.tick_runner.on_tick();
+        true
     }
 
     fn end(&mut self, ctx: &PoolContext<Self::Task>) {

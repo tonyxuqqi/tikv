@@ -29,6 +29,12 @@ pub struct MetricsFlusher<E, R> {
     e: E,
 }
 
+impl<E, R> MetricsFlusher<E, R> {
+    pub fn new(r: R, e: E) -> MetricsFlusher<E, R> {
+        MetricsFlusher { reporter: r, e }
+    }
+}
+
 impl<E: Engine, R: FlowStatsReporter> TickRunner for MetricsFlusher<E, R> {
     fn start(&mut self) {
         set_tls_engine(self.e.clone());
