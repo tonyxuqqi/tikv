@@ -1,5 +1,7 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
+use chocolates::thread_pool::future::{FutureThreadPool, RunnerFactory as FutureRunnerFactory};
+use chocolates::thread_pool::Config as ThreadPoolConfig;
 use futures::future::{err, ok};
 use futures::sync::oneshot::{Receiver, Sender};
 #[cfg(feature = "failpoints")]
@@ -9,7 +11,6 @@ use hyper::service::service_fn;
 use hyper::{self, header, Body, Method, Request, Response, Server, StatusCode};
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio_threadpool::{Builder, ThreadPool};
 
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -71,7 +72,7 @@ static MISSING_ACTIONS: &[u8] = b"Missing param actions";
 static FAIL_POINTS_REQUEST_PATH: &str = "/fail";
 
 pub struct StatusServer {
-    thread_pool: ThreadPool,
+    thread_pool: FutureThreadPool,
     tx: Sender<()>,
     rx: Option<Receiver<()>>,
     addr: Option<SocketAddr>,
@@ -80,16 +81,9 @@ pub struct StatusServer {
 
 impl StatusServer {
     pub fn new(status_thread_pool_size: usize, tikv_config: TiKvConfig) -> Self {
-        let thread_pool = Builder::new()
-            .pool_size(status_thread_pool_size)
-            .name_prefix("status-server-")
-            .after_start(|| {
-                debug!("Status server started");
-            })
-            .before_stop(|| {
-                debug!("stopping status server");
-            })
-            .build();
+        let thread_pool = ThreadPoolConfig::new(thd_name!("status-server"))
+            .max_thread_count(status_thread_pool_size)
+            .spawn(FutureRunnerFactory::default());
         let (tx, rx) = futures::sync::oneshot::channel::<()>();
         StatusServer {
             thread_pool,
@@ -252,16 +246,13 @@ impl StatusServer {
         let graceful = server
             .with_graceful_shutdown(self.rx.take().unwrap())
             .map_err(|e| error!("Status server error: {:?}", e));
-        self.thread_pool.spawn(graceful);
+        self.thread_pool.spawn_future(graceful);
         Ok(())
     }
 
     pub fn stop(self) {
         let _ = self.tx.send(());
-        self.thread_pool
-            .shutdown_now()
-            .wait()
-            .unwrap_or_else(|e| error!("failed to stop the status server, error: {:?}", e));
+        self.thread_pool.shutdown();
     }
 
     // Return listening address, this may only be used for outer test
@@ -369,7 +360,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let handle = status_server.thread_pool.spawn_handle(lazy(move || {
+        let handle = status_server.thread_pool.spawn_future_handle(lazy(move || {
             client
                 .get(uri)
                 .map(|res| {
@@ -395,7 +386,7 @@ mod tests {
             .path_and_query("/config")
             .build()
             .unwrap();
-        let handle = status_server.thread_pool.spawn_handle(lazy(move || {
+        let handle = status_server.thread_pool.spawn_future_handle(lazy(move || {
             client
                 .get(uri)
                 .and_then(|resp| {
@@ -428,7 +419,7 @@ mod tests {
         let client = Client::new();
         let addr = status_server.listening_addr().to_string();
 
-        let handle = status_server.thread_pool.spawn_handle(lazy(move || {
+        let handle = status_server.thread_pool.spawn_future_handle(lazy(move || {
             // test add fail point
             let uri = Uri::builder()
                 .scheme("http")
@@ -561,7 +552,7 @@ mod tests {
         let client = Client::new();
         let addr = status_server.listening_addr().to_string();
 
-        let handle = status_server.thread_pool.spawn_handle(lazy(move || {
+        let handle = status_server.thread_pool.spawn_future_handle(lazy(move || {
             // test add fail point
             let uri = Uri::builder()
                 .scheme("http")
@@ -603,7 +594,7 @@ mod tests {
         let client = Client::new();
         let addr = status_server.listening_addr().to_string();
 
-        let handle = status_server.thread_pool.spawn_handle(lazy(move || {
+        let handle = status_server.thread_pool.spawn_future_handle(lazy(move || {
             // test add fail point
             let uri = Uri::builder()
                 .scheme("http")

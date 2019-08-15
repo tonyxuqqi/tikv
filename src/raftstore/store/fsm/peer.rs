@@ -738,7 +738,7 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
                     region_id, peer_id, tick, e
                 );
             });
-        self.ctx.future_poller.spawn(f).unwrap();
+        self.ctx.future_poller.spawn(f);
     }
 
     fn register_raft_base_tick(&mut self) {

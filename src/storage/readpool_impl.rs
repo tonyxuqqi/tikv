@@ -2,15 +2,15 @@
 
 use std::cell::RefCell;
 use std::mem;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use prometheus::local::*;
 
 use crate::server::readpool::{self, Builder, Config, ReadPool};
-use crate::storage::kv::{destroy_tls_engine, set_tls_engine};
+use crate::storage::kv::{destroy_tls_engine, set_tls_engine, NoopReporter};
 use crate::storage::{FlowStatistics, FlowStatsReporter};
 use tikv_util::collections::HashMap;
+use tikv_util::future_pool::{CloneFactory, TickRunner};
 
 use super::metrics::*;
 use super::Engine;
@@ -39,32 +39,44 @@ thread_local! {
     );
 }
 
+#[derive(Clone)]
+pub struct MetricsFlusher<E, R> {
+    reporter: R,
+    e: E,
+}
+
+impl<E: Engine, R: FlowStatsReporter> TickRunner for MetricsFlusher<E, R> {
+    fn start(&mut self) {
+        set_tls_engine(self.e.clone());
+    }
+
+    fn on_tick(&mut self) {
+        tls_flush(&self.reporter);
+    }
+
+    fn end(&mut self) {
+        destroy_tls_engine::<E>();
+        tls_flush(&self.reporter);
+    }
+}
+
 pub fn build_read_pool<E: Engine, R: FlowStatsReporter>(
     config: &readpool::Config,
     flow_reporter: R,
     engine: E,
 ) -> ReadPool {
-    let flow_reporter2 = flow_reporter.clone();
-    let engine = Arc::new(Mutex::new(engine));
-
-    Builder::from_config(config)
-        .name_prefix("store-read")
-        .on_tick(move || tls_flush(&flow_reporter))
-        .after_start(move || set_tls_engine(engine.lock().unwrap().clone()))
-        .before_stop(move || {
-            destroy_tls_engine::<E>();
-            tls_flush(&flow_reporter2)
-        })
-        .build()
+    Builder::new(
+        "store-read",
+        CloneFactory(MetricsFlusher {
+            e: engine,
+            reporter: flow_reporter,
+        }),
+    )
+    .build(config)
 }
 
 pub fn build_read_pool_for_test<E: Engine>(engine: E) -> ReadPool {
-    let engine = Arc::new(Mutex::new(engine));
-
-    Builder::from_config(&Config::default_for_test())
-        .after_start(move || set_tls_engine(engine.lock().unwrap().clone()))
-        .before_stop(|| destroy_tls_engine::<E>())
-        .build()
+    build_read_pool(&Config::default_for_test(), NoopReporter, engine)
 }
 
 #[inline]

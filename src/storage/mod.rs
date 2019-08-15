@@ -19,7 +19,7 @@ pub mod types;
 
 use std::fmt::{self, Debug, Display, Formatter};
 use std::io::Error as IoError;
-use std::sync::{atomic, Arc, Mutex};
+use std::sync::{atomic, Arc};
 use std::{cmp, error, u64};
 
 use engine::rocks::DB;
@@ -28,7 +28,7 @@ use futures::{future, Future};
 use kvproto::errorpb;
 use kvproto::kvrpcpb::{CommandPri, Context, KeyRange, LockInfo};
 
-use crate::server::readpool::{self, Builder as ReadPoolBuilder, ReadPool};
+use crate::server::readpool::{self, ReadPool};
 use crate::server::ServerRaftStoreRouter;
 use tikv_util::collections::HashMap;
 
@@ -652,11 +652,7 @@ impl<E: Engine> TestStorageBuilder<E> {
 
     /// Build a `Storage<E>`.
     pub fn build(self) -> Result<Storage<E>> {
-        let engine = Arc::new(Mutex::new(self.engine.clone()));
-        let read_pool = ReadPoolBuilder::from_config(&readpool::Config::default_for_test())
-            .after_start(move || set_tls_engine(engine.lock().unwrap().clone()))
-            .before_stop(|| destroy_tls_engine::<E>())
-            .build();
+        let read_pool = build_read_pool_for_test(self.engine.clone());
         Storage::from_engine(
             self.engine,
             &self.config,

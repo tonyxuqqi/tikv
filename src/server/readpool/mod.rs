@@ -8,9 +8,9 @@ pub use self::builder::Builder;
 pub use self::config::Config;
 pub use self::priority::Priority;
 
+use chocolates::thread_pool::future::SpawnHandle;
 use futures::Future;
 use tikv_util::future_pool::FuturePool;
-use tokio_threadpool::SpawnHandle;
 
 type Result<T> = std::result::Result<T, Full>;
 
@@ -77,9 +77,7 @@ impl ReadPool {
     pub fn spawn<F, R>(&self, priority: Priority, future_fn: F) -> Result<()>
     where
         F: FnOnce() -> R + Send + 'static,
-        R: Future + Send + 'static,
-        R::Item: Send + 'static,
-        R::Error: Send + 'static,
+        R: Future<Item = (), Error = ()> + Send + 'static,
     {
         self.gate_spawn(priority, |pool| pool.spawn(future_fn))
     }
@@ -131,6 +129,7 @@ mod tests {
     use std::sync::mpsc::{channel, Sender};
     use std::thread;
     use std::time::Duration;
+    use tikv_util::future_pool::NoopFactory;
 
     use super::*;
 
@@ -204,13 +203,11 @@ mod tests {
     fn test_full() {
         let (tx, rx) = channel();
 
-        let read_pool = builder::Builder::from_config(&Config {
+        let read_pool = builder::Builder::new("read-test-full", NoopFactory).build(&Config {
             high_concurrency: 2,
             max_tasks_per_worker_high: 2,
             ..Config::default_for_test()
-        })
-        .name_prefix("read-test-full")
-        .build();
+        });
 
         wait_on_new_thread(
             tx.clone(),

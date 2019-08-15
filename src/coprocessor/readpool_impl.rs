@@ -2,12 +2,12 @@
 
 use std::cell::RefCell;
 use std::mem;
-use std::sync::{Arc, Mutex};
 
 use crate::server::readpool::{self, Builder, Config, ReadPool};
-use crate::storage::kv::{destroy_tls_engine, set_tls_engine};
+use crate::storage::kv::{destroy_tls_engine, set_tls_engine, NoopReporter};
 use crate::storage::{Engine, FlowStatistics, FlowStatsReporter, Statistics};
 use tikv_util::collections::HashMap;
+use tikv_util::future_pool::{CloneFactory, TickRunner};
 
 use super::metrics::*;
 use prometheus::local::*;
@@ -21,6 +21,27 @@ pub struct CopLocalMetrics {
     pub local_copr_scan_details: LocalIntCounterVec,
     pub local_copr_rocksdb_perf_counter: LocalIntCounterVec,
     local_cop_flow_stats: HashMap<u64, FlowStatistics>,
+}
+
+#[derive(Clone)]
+pub struct MetricsFlusher<E, R> {
+    reporter: R,
+    e: E,
+}
+
+impl<E: Engine, R: FlowStatsReporter> TickRunner for MetricsFlusher<E, R> {
+    fn start(&mut self) {
+        set_tls_engine(self.e.clone());
+    }
+
+    fn on_tick(&mut self) {
+        tls_flush(&self.reporter);
+    }
+
+    fn end(&mut self) {
+        destroy_tls_engine::<E>();
+        tls_flush(&self.reporter);
+    }
 }
 
 thread_local! {
@@ -51,27 +72,18 @@ pub fn build_read_pool<E: Engine, R: FlowStatsReporter>(
     reporter: R,
     engine: E,
 ) -> ReadPool {
-    let reporter2 = reporter.clone();
-    let engine = Arc::new(Mutex::new(engine));
-
-    Builder::from_config(config)
-        .name_prefix("cop")
-        .on_tick(move || tls_flush(&reporter))
-        .after_start(move || set_tls_engine(engine.lock().unwrap().clone()))
-        .before_stop(move || {
-            destroy_tls_engine::<E>();
-            tls_flush(&reporter2)
-        })
-        .build()
+    Builder::new(
+        "cop",
+        CloneFactory(MetricsFlusher {
+            e: engine,
+            reporter,
+        }),
+    )
+    .build(config)
 }
 
 pub fn build_read_pool_for_test<E: Engine>(engine: E) -> ReadPool {
-    let engine = Arc::new(Mutex::new(engine));
-
-    Builder::from_config(&Config::default_for_test())
-        .after_start(move || set_tls_engine(engine.lock().unwrap().clone()))
-        .before_stop(|| destroy_tls_engine::<E>())
-        .build()
+    build_read_pool(&Config::default_for_test(), NoopReporter, engine)
 }
 
 #[inline]

@@ -406,6 +406,8 @@ impl<E: Engine> Endpoint<E> {
                 Self::handle_stream_request_impl(tracker, handler_builder) // Stream<Resp, Error>
                     .then(Ok::<_, mpsc::SendError<_>>) // Stream<Result<Resp, Error>, MpscError>
                     .forward(tx)
+                    .map(|_| ())
+                    .map_err(|_| ())
             })
             .map_err(|_| Error::MaxPendingTasksExceeded)?;
         Ok(rx.then(|r| r.unwrap()))
@@ -482,15 +484,15 @@ fn make_error_response(e: Error) -> coppb::Response {
 mod tests {
     use super::*;
 
-    use std::sync::{atomic, mpsc, Arc, Mutex};
+    use std::sync::{atomic, mpsc, Arc};
     use std::thread;
     use std::vec;
 
     use tipb::Executor;
     use tipb::Expr;
 
-    use crate::coprocessor::readpool_impl::build_read_pool_for_test;
-    use crate::storage::kv::{destroy_tls_engine, set_tls_engine, RocksEngine};
+    use crate::coprocessor::readpool_impl::{build_read_pool, build_read_pool_for_test};
+    use crate::storage::kv::{NoopReporter, RocksEngine};
     use crate::storage::TestEngineBuilder;
     use protobuf::Message;
 
@@ -720,16 +722,15 @@ mod tests {
     fn test_full() {
         let engine = TestEngineBuilder::new().build().unwrap();
 
-        let engine_lock = Arc::new(Mutex::new(engine.clone()));
-        let read_pool = readpool::Builder::from_config(&readpool::Config {
-            normal_concurrency: 1,
-            max_tasks_per_worker_normal: 2,
-            ..readpool::Config::default_for_test()
-        })
-        .name_prefix("cop-test-full")
-        .after_start(move || set_tls_engine(engine_lock.lock().unwrap().clone()))
-        .before_stop(|| destroy_tls_engine::<RocksEngine>())
-        .build();
+        let read_pool = build_read_pool(
+            &readpool::Config {
+                normal_concurrency: 1,
+                max_tasks_per_worker_normal: 2,
+                ..readpool::Config::default_for_test()
+            },
+            NoopReporter,
+            engine,
+        );
 
         let cop = Endpoint::<RocksEngine>::new(&Config::default(), read_pool);
 
@@ -991,13 +992,11 @@ mod tests {
         const PAYLOAD_LARGE: i64 = 6000;
 
         let engine = TestEngineBuilder::new().build().unwrap();
-
-        let engine_lock = Arc::new(Mutex::new(engine.clone()));
-        let read_pool =
-            readpool::Builder::from_config(&readpool::Config::default_with_concurrency(1))
-                .after_start(move || set_tls_engine(engine_lock.lock().unwrap().clone()))
-                .before_stop(|| destroy_tls_engine::<RocksEngine>())
-                .build();
+        let read_pool = build_read_pool(
+            &readpool::Config::default_with_concurrency(1),
+            NoopReporter,
+            engine,
+        );
 
         let mut config = Config::default();
         config.end_point_request_max_handle_duration =

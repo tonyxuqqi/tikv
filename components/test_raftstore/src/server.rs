@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use std::{thread, usize};
 
+use chocolates::thread_pool::future::{FutureThreadPool, RunnerFactory as FutureRunnerFactory};
+use chocolates::thread_pool::Config as ThreadPoolConfig;
 use grpcio::{EnvBuilder, Error as GrpcError};
 use kvproto::debugpb_grpc::create_debug;
 use kvproto::import_sstpb_grpc::create_import_sst;
@@ -62,7 +64,7 @@ pub struct ServerCluster {
     snap_paths: HashMap<u64, TempDir>,
     pd_client: Arc<TestPdClient>,
     raft_client: RaftClient<RaftStoreBlackHole>,
-    _stats_pool: tokio_threadpool::ThreadPool,
+    _stats_pool: FutureThreadPool,
 }
 
 impl ServerCluster {
@@ -74,14 +76,16 @@ impl ServerCluster {
                 .build(),
         );
         let security_mgr = Arc::new(SecurityManager::new(&Default::default()).unwrap());
-        let stats_pool = tokio_threadpool::Builder::new().pool_size(1).build();
+        let stats_pool = ThreadPoolConfig::new(thd_name!("stats_pool"))
+            .max_thread_count(1)
+            .spawn(FutureRunnerFactory::default());
         let raft_client = RaftClient::new(
             env,
             Arc::new(Config::default()),
             security_mgr,
             RaftStoreBlackHole,
             Arc::new(ThreadLoad::with_threshold(usize::MAX)),
-            stats_pool.sender().clone(),
+            stats_pool.sender(),
         );
         ServerCluster {
             metas: HashMap::default(),
