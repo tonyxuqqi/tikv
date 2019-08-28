@@ -1,6 +1,5 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::borrow::Cow;
 use std::collections::Bound::{Excluded, Included, Unbounded};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -94,7 +93,6 @@ pub struct PeerFsm {
     group_state: GroupState,
     stopped: bool,
     has_ready: bool,
-    mailbox: Option<BasicMailbox<PeerFsm>>,
     pub receiver: Receiver<PeerMsg>,
 }
 
@@ -155,7 +153,6 @@ impl PeerFsm {
                 group_state: GroupState::Ordered,
                 stopped: false,
                 has_ready: false,
-                mailbox: None,
                 receiver: rx,
             }),
         ))
@@ -192,7 +189,6 @@ impl PeerFsm {
                 group_state: GroupState::Ordered,
                 stopped: false,
                 has_ready: false,
-                mailbox: None,
                 receiver: rx,
             }),
         ))
@@ -213,11 +209,6 @@ impl PeerFsm {
         self.peer.peer_id()
     }
 
-    #[inline]
-    pub fn stop(&mut self) {
-        self.stopped = true;
-    }
-
     pub fn set_pending_merge_state(&mut self, state: MergeState) {
         self.peer.pending_merge_state = Some(state);
     }
@@ -233,30 +224,6 @@ impl PeerFsm {
 
 impl Fsm for PeerFsm {
     type Message = PeerMsg;
-
-    #[inline]
-    fn is_stopped(&self) -> bool {
-        self.stopped
-    }
-
-    /// Set a mailbox to Fsm, which should be used to send message to itself.
-    #[inline]
-    fn set_mailbox(&mut self, mailbox: Cow<'_, BasicMailbox<Self>>)
-    where
-        Self: Sized,
-    {
-        self.mailbox = Some(mailbox.into_owned());
-    }
-
-    /// Take the mailbox from Fsm. Implementation should ensure there will be
-    /// no reference to mailbox after calling this method.
-    #[inline]
-    fn take_mailbox(&mut self) -> Option<BasicMailbox<Self>>
-    where
-        Self: Sized,
-    {
-        self.mailbox.take()
-    }
 }
 
 pub struct PeerFsmDelegate<'a, T: 'static, C: 'static> {
@@ -1415,7 +1382,7 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
             panic!("{} destroy err {:?}", self.fsm.peer.tag, e);
         }
         self.ctx.router.close(region_id);
-        self.fsm.stop();
+        self.fsm.stopped = true;
 
         if is_initialized
             && !merged_by_target

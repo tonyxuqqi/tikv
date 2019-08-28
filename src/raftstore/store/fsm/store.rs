@@ -4,7 +4,7 @@ use chocolates::thread_pool::future::{
     FutureThreadPool, RunnerFactory as FutureRunnerFactory, Sender as ThreadPoolSender,
 };
 use chocolates::thread_pool::Config as ThreadPoolConfig;
-use crossbeam::channel::{TryRecvError, TrySendError};
+use crossbeam::channel::TrySendError;
 use engine::rocks;
 use engine::rocks::CompactionJobInfo;
 use engine::{WriteBatch, WriteOptions, DB};
@@ -36,7 +36,7 @@ use crate::raftstore::store::fsm::peer::{
 use crate::raftstore::store::fsm::ApplyTaskRes;
 use crate::raftstore::store::fsm::{
     batch, create_apply_batch_system, ApplyBatchSystem, ApplyPollerBuilder, ApplyRouter, ApplyTask,
-    BasicMailbox, BatchRouter, BatchSystem, HandlerBuilder,
+    BasicMailbox, BatchRouter, BatchSystem, HandlerBuilder, Managed,
 };
 use crate::raftstore::store::fsm::{ApplyNotifier, Fsm, PollHandler, RegionProposal};
 use crate::raftstore::store::keys::{self, data_end_key, data_key, enc_end_key, enc_start_key};
@@ -344,7 +344,6 @@ struct Store {
     // store id, before start the id is 0.
     id: u64,
     last_compact_checked_key: Key,
-    stopped: bool,
     start_time: Option<Timespec>,
     consistency_check_time: HashMap<u64, Instant>,
     last_unreachable_report: HashMap<u64, Instant>,
@@ -362,7 +361,6 @@ impl StoreFsm {
             store: Store {
                 id: 0,
                 last_compact_checked_key: keys::DATA_MIN_KEY.to_vec(),
-                stopped: false,
                 start_time: None,
                 consistency_check_time: HashMap::default(),
                 last_unreachable_report: HashMap::default(),
@@ -375,11 +373,6 @@ impl StoreFsm {
 
 impl Fsm for StoreFsm {
     type Message = StoreMsg;
-
-    #[inline]
-    fn is_stopped(&self) -> bool {
-        self.store.stopped
-    }
 }
 
 struct StoreFsmDelegate<'a, T: 'static, C: 'static> {
@@ -463,7 +456,7 @@ pub struct RaftPoller<T: 'static, C: 'static> {
 }
 
 impl<T: Transport, C: PdClient> RaftPoller<T, C> {
-    fn handle_raft_ready(&mut self, peers: &mut [Box<PeerFsm>]) {
+    fn handle_raft_ready(&mut self, peers: &mut [Managed<PeerFsm>]) {
         // Only enable the fail point when the store id is equal to 3, which is
         // the id of slow store in tests.
         fail_point!("on_raft_ready", self.poll_ctx.store_id() == 3, |_| {});
@@ -580,39 +573,38 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm, StoreFsm> for RaftPoller<T,
         self.timer = SlowTimer::new();
     }
 
-    fn handle_control(&mut self, store: &mut StoreFsm) -> Option<usize> {
-        let mut expected_msg_count = None;
-        while self.store_msg_buf.len() < self.messages_per_tick {
-            match store.receiver.try_recv() {
-                Ok(msg) => self.store_msg_buf.push(msg),
-                Err(TryRecvError::Empty) => {
-                    expected_msg_count = Some(0);
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    store.store.stopped = true;
-                    expected_msg_count = Some(0);
-                    break;
-                }
+    fn handle_control(&mut self, store: &mut Managed<StoreFsm>) -> bool {
+        store.reset_dirty_flag();
+        let available = store.receiver.len();
+        let (exhausted, count) = if self.messages_per_tick >= available {
+            (true, available)
+        } else {
+            (false, self.messages_per_tick)
+        };
+        // TODO: it's more efficient to let the receiver fetch batch
+        // into the buffer instead of poll one by one.
+        for _ in 0..count {
+            if let Ok(msg) = store.receiver.try_recv() {
+                self.store_msg_buf.push(msg);
+            } else {
+                unreachable!()
             }
         }
         let mut delegate = StoreFsmDelegate {
-            fsm: store,
+            fsm: &mut *store,
             ctx: &mut self.poll_ctx,
         };
         delegate.handle_msgs(&mut self.store_msg_buf);
-        expected_msg_count
+        exhausted
     }
 
-    fn handle_normal(&mut self, peer: &mut PeerFsm) -> Option<usize> {
-        let mut expected_msg_count = None;
+    fn handle_normal(&mut self, peer: &mut Managed<PeerFsm>) -> bool {
+        peer.reset_dirty_flag();
         if peer.have_pending_merge_apply_result() {
-            expected_msg_count = Some(peer.receiver.len());
-            let mut delegate = PeerFsmDelegate::new(peer, &mut self.poll_ctx);
+            let mut delegate = PeerFsmDelegate::new(&mut *peer, &mut self.poll_ctx);
             if !delegate.resume_handling_pending_apply_result() {
-                return expected_msg_count;
+                return true;
             }
-            expected_msg_count = None;
         }
 
         fail_point!(
@@ -621,41 +613,36 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm, StoreFsm> for RaftPoller<T,
             |_| unreachable!()
         );
 
-        while self.peer_msg_buf.len() < self.messages_per_tick {
-            match peer.receiver.try_recv() {
+        let available = peer.receiver.len();
+        let (exhausted, count) = if self.messages_per_tick >= available {
+            (true, available)
+        } else {
+            (false, self.messages_per_tick)
+        };
+        for _ in 0..count {
+            if let Ok(msg) = peer.receiver.try_recv() {
                 // TODO: we may need a way to optimize the message copy.
-                Ok(msg) => {
-                    fail_point!(
-                        "pause_on_peer_destroy_res",
-                        peer.peer_id() == 1
-                            && match msg {
-                                PeerMsg::ApplyRes {
-                                    res: ApplyTaskRes::Destroy { .. },
-                                } => true,
-                                _ => false,
-                            },
-                        |_| unreachable!()
-                    );
-                    self.peer_msg_buf.push(msg)
-                }
-                Err(TryRecvError::Empty) => {
-                    expected_msg_count = Some(0);
-                    break;
-                }
-                Err(TryRecvError::Disconnected) => {
-                    peer.stop();
-                    expected_msg_count = Some(0);
-                    break;
-                }
+                fail_point!(
+                    "pause_on_peer_destroy_res",
+                    peer.peer_id() == 1
+                        && match msg {
+                            PeerMsg::ApplyRes {
+                                res: ApplyTaskRes::Destroy { .. },
+                            } => true,
+                            _ => false,
+                        },
+                    |_| unreachable!()
+                );
+                self.peer_msg_buf.push(msg)
             }
         }
-        let mut delegate = PeerFsmDelegate::new(peer, &mut self.poll_ctx);
+        let mut delegate = PeerFsmDelegate::new(&mut *peer, &mut self.poll_ctx);
         delegate.handle_msgs(&mut self.peer_msg_buf);
         delegate.collect_ready(&mut self.pending_proposals);
-        expected_msg_count
+        exhausted
     }
 
-    fn end(&mut self, peers: &mut [Box<PeerFsm>]) {
+    fn end(&mut self, peers: &mut [Managed<PeerFsm>]) {
         self.poll_ctx.lease_time = None;
         if self.poll_ctx.has_ready {
             self.handle_raft_ready(peers);
