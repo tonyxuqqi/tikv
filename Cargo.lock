@@ -252,7 +252,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "chocolates"
 version = "0.1.0"
-source = "git+https://github.com/busyjay/chocolates.git?branch=dev#e7b32417d7be7ba0f555316340bc584ab8130455"
+source = "git+https://github.com/busyjay/chocolates.git?branch=dev#a060366cae36de65433356ce05624995bd6ec80a"
 dependencies = [
  "crossbeam-deque 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures 0.1.23 (registry+https://github.com/rust-lang/crates.io-index)",

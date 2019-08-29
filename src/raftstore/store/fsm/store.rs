@@ -573,7 +573,6 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm, StoreFsm> for RaftPoller<T,
     }
 
     fn handle_control(&mut self, store: &mut Managed<StoreFsm>) -> bool {
-        store.reset_dirty_flag();
         let available = store.receiver.len();
         let (exhausted, count) = if self.messages_per_tick >= available {
             (true, available)
@@ -598,7 +597,6 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm, StoreFsm> for RaftPoller<T,
     }
 
     fn handle_normal(&mut self, peer: &mut Managed<PeerFsm>) -> bool {
-        peer.reset_dirty_flag();
         if peer.have_pending_merge_apply_result() {
             let mut delegate = PeerFsmDelegate::new(&mut *peer, &mut self.poll_ctx);
             if !delegate.resume_handling_pending_apply_result() {
@@ -1130,6 +1128,7 @@ pub fn create_raft_batch_system(cfg: &Config) -> (RaftRouter, RaftBatchSystem) {
     let (router, system) = batch::create_system(
         cfg.store_pool_size,
         cfg.store_max_batch_size,
+        16,
         store_tx,
         store_fsm,
     );

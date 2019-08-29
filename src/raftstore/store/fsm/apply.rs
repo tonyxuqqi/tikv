@@ -2695,7 +2695,6 @@ impl PollHandler<ApplyFsm, ControlFsm> for ApplyPoller {
     }
 
     fn handle_normal(&mut self, normal: &mut Managed<ApplyFsm>) -> bool {
-        normal.reset_dirty_flag();
         if normal.delegate.wait_merge_state.is_some() {
             // We need to query the length first, otherwise there is a race
             // condition that new messages are queued after resuming and before
@@ -2860,6 +2859,8 @@ pub fn create_apply_batch_system(cfg: &Config) -> (ApplyRouter, ApplyBatchSystem
     super::batch::create_system(
         cfg.apply_pool_size,
         cfg.apply_max_batch_size,
+        // TODO: make it configurable
+        16,
         tx,
         Box::new(ControlFsm),
     )

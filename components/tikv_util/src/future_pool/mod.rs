@@ -56,8 +56,8 @@ impl<T: TickRunner> thread_pool::Runner for Runner<T> {
         self.tick_runner.start();
     }
 
-    fn pause(&mut self, ctx: &PoolContext<Self::Task>) {
-        self.runner.pause(ctx);
+    fn pause(&mut self, ctx: &PoolContext<Self::Task>) -> bool {
+        self.runner.pause(ctx)
     }
 
     fn resume(&mut self, ctx: &PoolContext<Self::Task>) {
