@@ -375,7 +375,6 @@ pub mod tests {
         type Message = Message;
     }
 
-    #[allow(clippy::type_complexity)]
     pub fn new_runner(cap: usize) -> (mpsc::LooseBoundedSender<Message>, Box<Runner>) {
         let (tx, rx) = mpsc::loose_bounded(cap);
         let fsm = Runner {

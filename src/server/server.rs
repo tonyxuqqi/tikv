@@ -10,7 +10,7 @@ use chocolates::thread_pool::future::{FutureThreadPool, RunnerFactory as FutureR
 use chocolates::thread_pool::Config as ThreadPoolConfig;
 use futures::Stream;
 use grpcio::{ChannelBuilder, EnvBuilder, Environment, Server as GrpcServer, ServerBuilder};
-use kvproto::tikvpb_grpc::*;
+use kvproto::tikvpb::*;
 use tokio_timer::timer::Handle;
 
 use crate::coprocessor::Endpoint;
@@ -239,13 +239,12 @@ mod tests {
     use super::super::resolve::{Callback as ResolveCallback, StoreAddrResolver};
     use super::super::transport::RaftStoreRouter;
     use super::super::{Config, Result};
-    use crate::coprocessor;
+    use crate::coprocessor::{self, readpool_impl};
     use crate::raftstore::store::transport::Transport;
     use crate::raftstore::store::*;
     use crate::raftstore::Result as RaftStoreResult;
     use crate::storage::TestStorageBuilder;
 
-    use crate::coprocessor::readpool_impl;
     use kvproto::raft_cmdpb::RaftCmdRequest;
     use kvproto::raft_serverpb::RaftMessage;
     use tikv_util::security::SecurityConfig;

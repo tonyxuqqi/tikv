@@ -17,7 +17,7 @@ use std::thread;
 use std::time::Duration;
 use std::{process, str, u64};
 
-use clap::{crate_authors, crate_version, App, AppSettings, Arg, ArgMatches, SubCommand};
+use clap::{crate_authors, App, AppSettings, Arg, ArgMatches, SubCommand};
 use futures::{future, stream, Future, Stream};
 use grpcio::{CallOption, ChannelBuilder, Environment};
 use protobuf::Message;
@@ -27,12 +27,11 @@ use engine::rocks::util::security::encrypted_env_from_cipher_file;
 use engine::Engines;
 use engine::{ALL_CFS, CF_DEFAULT, CF_LOCK, CF_WRITE};
 use kvproto::debugpb::{Db as DBType, *};
-use kvproto::debugpb_grpc::DebugClient;
 use kvproto::kvrpcpb::{MvccInfo, SplitRegionRequest};
 use kvproto::metapb::{Peer, Region};
 use kvproto::raft_cmdpb::RaftCmdRequest;
 use kvproto::raft_serverpb::{PeerState, SnapshotMeta};
-use kvproto::tikvpb_grpc::TikvClient;
+use kvproto::tikvpb::TikvClient;
 use pd_client::{Config as PdConfig, PdClient, RpcClient};
 use raft::eraftpb::{ConfChange, Entry, EntryType};
 use tikv::config::TiKvConfig;
@@ -955,7 +954,7 @@ fn main() {
     let mut app = App::new("TiKV Control (tikv-ctl)")
         .about("A tool for interacting with TiKV deployments.")
         .author(crate_authors!())
-        .version(crate_version!())
+        .version(version_info.as_ref())
         .long_version(version_info.as_ref())
         .setting(AppSettings::AllowExternalSubcommands)
         .arg(
@@ -975,7 +974,7 @@ fn main() {
                 .required(false)
                 .long("skip-paranoid-checks")
                 .takes_value(false)
-                .help("skip paranoid checks when open rocksdb"),
+                .help("Skip paranoid checks when open rocksdb"),
         )
         .arg(
             Arg::with_name("config")
@@ -1098,7 +1097,7 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("size")
-                .about("print region size")
+                .about("Print region size")
                 .arg(
                     Arg::with_name("region")
                         .short("r")
@@ -1204,7 +1203,7 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("print")
-                .about("print the raw value")
+                .about("Print the raw value")
                 .arg(
                     Arg::with_name("cf")
                         .short("c")
@@ -1259,7 +1258,7 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("diff")
-                .about("calculate difference of region keys from different dbs")
+                .about("Calculate difference of region keys from different dbs")
                 .arg(
                     Arg::with_name("region")
                         .required(true)
@@ -1521,7 +1520,7 @@ fn main() {
         .subcommand(SubCommand::with_name("bad-regions").about("Get all regions with corrupt raft"))
         .subcommand(
             SubCommand::with_name("modify-tikv-config")
-                .about("Modify tikv config, eg. ./tikv-ctl -h ip:port modify-tikv-config -m kvdb -n default.disable_auto_compactions -v true")
+                .about("Modify tikv config, eg. tikv-ctl --host ip:port modify-tikv-config -m kvdb -n default.disable_auto_compactions -v true")
                 .arg(
                     Arg::with_name("module")
                         .required(true)
@@ -1640,7 +1639,7 @@ fn main() {
                         .short("k")
                         .required(true)
                         .takes_value(true)
-                        .help("The key to split it, in unecoded escaped format")
+                        .help("The key to split it, in unencoded escaped format")
                 ),
         )
         .subcommand(

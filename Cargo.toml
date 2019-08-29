@@ -92,6 +92,7 @@ tokio-executor = "0.1"
 serde = "1.0"
 serde_json = "1.0"
 serde_derive = "1.0"
+serde_with = "1.0"
 zipf = "5.0.1"
 bitflags = "1.0.1"
 fail = "0.3"
@@ -188,6 +189,7 @@ members = [
   "components/tidb_query_datatype",
   "components/tidb_query_codegen",
   "components/pd_client",
+  "components/external_storage",
   "cmd",
 ]
 
