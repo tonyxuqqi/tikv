@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use std::usize;
 
 const CONNECTED_BIT: usize = 1;
+const REF_BASE: usize = 1 << 1;
 
 struct Channel<T> {
     state: AtomicUsize,
@@ -20,10 +21,10 @@ struct Channel<T> {
 impl<T> Channel<T> {
     fn is_connected(&self) -> bool {
         let state = self.state.load(Ordering::SeqCst);
-        state & CONNECTED_BIT != 0 && state != CONNECTED_BIT
+        state & CONNECTED_BIT != 0 && state != REF_BASE + CONNECTED_BIT
     }
 
-    fn disconnect(&self) -> bool {
+    fn disconnect(&self) {
         let mut state = self.state.load(Ordering::Acquire);
         loop {
             if state & CONNECTED_BIT != 0 {
@@ -33,11 +34,11 @@ impl<T> Channel<T> {
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ) {
-                    Ok(_) => return state == CONNECTED_BIT,
+                    Ok(_) => return,
                     Err(s) => state = s,
                 }
             } else {
-                return false;
+                return;
             }
         }
     }
@@ -66,7 +67,7 @@ pub struct Sender<T> {
 impl<T> Clone for Sender<T> {
     #[inline]
     fn clone(&self) -> Sender<T> {
-        self.as_chan().state.fetch_add(2, Ordering::Relaxed);
+        self.as_chan().state.fetch_add(REF_BASE, Ordering::Relaxed);
         Sender { chan: self.chan }
     }
 }
@@ -74,8 +75,8 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     #[inline]
     fn drop(&mut self) {
-        let res = self.as_chan().state.fetch_sub(2, Ordering::Release);
-        if res != 2 {
+        let res = self.as_chan().state.fetch_sub(REF_BASE, Ordering::Release);
+        if res != REF_BASE {
             return;
         }
         unsafe { drop_chan(self.chan) }
@@ -90,8 +91,25 @@ pub struct Receiver<T> {
 impl<T> Drop for Receiver<T> {
     #[inline]
     fn drop(&mut self) {
-        if self.as_chan().disconnect() {
-            unsafe { drop_chan(self.chan) }
+        let mut state = self.as_chan().state.load(Ordering::Acquire);
+        loop {
+            let new_state = (state & !CONNECTED_BIT) - REF_BASE;
+            match self.as_chan().state.compare_exchange_weak(
+                state,
+                new_state,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if new_state == 0 {
+                        unsafe {
+                            drop_chan(self.chan);
+                        }
+                    }
+                    return;
+                }
+                Err(s) => state = s,
+            }
         }
     }
 }
@@ -205,7 +223,7 @@ unsafe impl<T: Send> Send for Receiver<T> {}
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let chan = unsafe {
         NonNull::new_unchecked(Box::into_raw(Box::new(Channel {
-            state: AtomicUsize::new(3),
+            state: AtomicUsize::new((REF_BASE + REF_BASE) | CONNECTED_BIT),
             queue: SegQueue::new(),
         })))
     };

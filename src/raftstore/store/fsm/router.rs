@@ -123,7 +123,7 @@ impl<N> Drop for Managed<N> {
     fn drop(&mut self) {
         let state = self.as_state();
         let final_status = state.status.fetch_sub(STATE_REF_BASE, Ordering::Release);
-        if final_status & !NOTIFYSTATE_MASK == 0 {
+        if final_status & !NOTIFYSTATE_MASK == STATE_REF_BASE {
             unsafe {
                 drop_state_inner(self.ptr);
             }
@@ -156,11 +156,14 @@ impl<N> State<N> {
         let mut status = state.status.load(Ordering::Acquire);
         loop {
             let notify_state = status & NOTIFYSTATE_MASK;
-            if notify_state == NOTIFYSTATE_NOTIFIED {
+            if notify_state == NOTIFYSTATE_NOTIFIED || notify_state == NOTIFYSTATE_DROP {
                 return None;
             }
 
-            let new_status = (status & !NOTIFYSTATE_MASK | NOTIFYSTATE_NOTIFIED) + STATE_REF_BASE;
+            let mut new_status = status & !NOTIFYSTATE_MASK | NOTIFYSTATE_NOTIFIED;
+            if notify_state != NOTIFYSTATE_PROCESS {
+                new_status += STATE_REF_BASE;
+            }
             match state.status.compare_exchange_weak(
                 status,
                 new_status,
@@ -172,8 +175,6 @@ impl<N> State<N> {
                         return None;
                     } else if notify_state == NOTIFYSTATE_IDLE {
                         return Some(Managed { ptr: self.ptr });
-                    } else if notify_state == NOTIFYSTATE_DROP {
-                        return None;
                     } else {
                         panic!("unexpected state {}", notify_state);
                     }
@@ -226,7 +227,7 @@ impl<N> Drop for State<N> {
     fn drop(&mut self) {
         let state = self.as_state();
         let status = state.status.fetch_sub(STATE_REF_BASE, Ordering::Release);
-        if status & !NOTIFYSTATE_MASK != 0 {
+        if status & !NOTIFYSTATE_MASK != STATE_REF_BASE {
             return;
         }
         unsafe {
