@@ -1,5 +1,9 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
+use chocolates::thread_pool::future::{
+    FutureThreadPool, RunnerFactory as FutureRunnerFactory, Sender as ThreadPoolSender,
+};
+use chocolates::thread_pool::Config as ThreadPoolConfig;
 use crossbeam::channel::{TryRecvError, TrySendError};
 use engine::rocks;
 use engine::rocks::CompactionJobInfo;
@@ -19,7 +23,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{mem, thread, u64};
 use time::{self, Timespec};
-use tokio_threadpool::{Sender as ThreadPoolSender, ThreadPool};
 
 use crate::import::SSTImporter;
 use crate::raftstore::coprocessor::split_observer::SplitObserver;
@@ -282,7 +285,7 @@ impl<T: Transport, C> PollContext<T, C> {
                 .map_err(move |e| {
                     panic!("tick {:?} is lost due to timeout error: {:?}", tick, e);
                 });
-            self.future_poller.spawn(f).unwrap();
+            self.future_poller.spawn(f);
         }
     }
 
@@ -927,7 +930,7 @@ struct Workers {
     raftlog_gc_worker: Worker<RaftlogGcTask>,
     region_worker: Worker<RegionTask>,
     coprocessor_host: Arc<CoprocessorHost>,
-    future_poller: ThreadPool,
+    future_poller: FutureThreadPool,
 }
 
 pub struct RaftBatchSystem {
@@ -973,10 +976,9 @@ impl RaftBatchSystem {
             cleanup_worker: Worker::new("cleanup-worker"),
             raftlog_gc_worker: Worker::new("raft-gc-worker"),
             coprocessor_host: Arc::new(coprocessor_host),
-            future_poller: tokio_threadpool::Builder::new()
-                .name_prefix("future-poller")
-                .pool_size(cfg.future_poll_size)
-                .build(),
+            future_poller: ThreadPoolConfig::new(thd_name!("future-poller"))
+                .max_thread_count(cfg.future_poll_size)
+                .spawn(FutureRunnerFactory::default()),
         };
         let mut builder = RaftPollerBuilder {
             cfg: Arc::new(cfg),
@@ -1140,7 +1142,7 @@ impl RaftBatchSystem {
             }
         }
         workers.coprocessor_host.shutdown();
-        workers.future_poller.shutdown_now().wait().unwrap();
+        workers.future_poller.shutdown();
     }
 }
 
