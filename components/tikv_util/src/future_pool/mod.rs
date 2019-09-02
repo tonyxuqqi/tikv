@@ -255,7 +255,16 @@ where
 impl<F> Builder<F> {
     pub fn pool_size(mut self, val: usize) -> Self {
         self.cfg.max_thread_count(val);
+        self
+    }
+
+    pub fn active_pool_size(mut self, val: usize) -> Self {
         self.cfg.min_thread_count(val);
+        self
+    }
+
+    pub fn max_wait_time(mut self, time: Duration) -> Self {
+        self.cfg.max_wait_time(time);
         self
     }
 
@@ -397,6 +406,7 @@ mod tests {
 
         let pool = Builder::new("test_tick_multi_thread", CloneFactory(recorder))
             .pool_size(2)
+            .active_pool_size(2)
             .build();
 
         assert!(rx.try_recv().is_err());

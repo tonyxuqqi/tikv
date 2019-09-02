@@ -1027,8 +1027,14 @@ macro_rules! readpool_config {
         #[serde(rename_all = "kebab-case")]
         pub struct $struct_name {
             pub high_concurrency: usize,
+            pub high_active_concurrency: usize,
+            pub high_max_wait_time: ReadableDuration,
             pub normal_concurrency: usize,
+            pub normal_active_concurrency: usize,
+            pub normal_max_wait_time: ReadableDuration,
             pub low_concurrency: usize,
+            pub low_active_concurrency: usize,
+            pub low_max_wait_time: ReadableDuration,
             pub max_tasks_per_worker_high: usize,
             pub max_tasks_per_worker_normal: usize,
             pub max_tasks_per_worker_low: usize,
@@ -1045,12 +1051,18 @@ macro_rules! readpool_config {
                 match priority {
                     "high" => builder
                         .pool_size(self.high_concurrency)
+                        .active_pool_size(self.high_active_concurrency)
+                        .max_wait_time(self.high_max_wait_time.0)
                         .max_tasks(self.max_tasks_per_worker_high),
                     "normal" => builder
                         .pool_size(self.normal_concurrency)
+                        .active_pool_size(self.normal_active_concurrency)
+                        .max_wait_time(self.normal_max_wait_time.0)
                         .max_tasks(self.max_tasks_per_worker_normal),
                     "low" => builder
                         .pool_size(self.low_concurrency)
+                        .active_pool_size(self.low_active_concurrency)
+                        .max_wait_time(self.low_max_wait_time.0)
                         .max_tasks(self.max_tasks_per_worker_low),
                     _ => unimplemented!(),
                 }
@@ -1059,8 +1071,14 @@ macro_rules! readpool_config {
             pub fn default_for_test() -> Self {
                 Self {
                     high_concurrency: 2,
+                    high_active_concurrency: 0,
+                    high_max_wait_time: ReadableDuration::millis(1),
                     normal_concurrency: 2,
+                    normal_active_concurrency: 0,
+                    normal_max_wait_time: ReadableDuration::millis(1),
                     low_concurrency: 2,
+                    low_active_concurrency: 0,
+                    low_max_wait_time: ReadableDuration::millis(1),
                     max_tasks_per_worker_high: 2000,
                     max_tasks_per_worker_normal: 2000,
                     max_tasks_per_worker_low: 2000,
@@ -1068,13 +1086,16 @@ macro_rules! readpool_config {
                 }
             }
 
-            pub fn validate(&self) -> Result<(), Box<dyn Error>> {
+            pub fn validate(&mut self) -> Result<(), Box<dyn Error>> {
                 if self.high_concurrency == 0 {
                     return Err(format!(
                         "readpool.{}.high-concurrency should be > 0",
                         $display_name
                     )
                     .into());
+                }
+                if self.high_active_concurrency == 0 {
+                    self.high_active_concurrency = self.high_concurrency;
                 }
                 if self.normal_concurrency == 0 {
                     return Err(format!(
@@ -1083,12 +1104,18 @@ macro_rules! readpool_config {
                     )
                     .into());
                 }
+                if self.normal_active_concurrency == 0 {
+                    self.normal_active_concurrency = self.normal_concurrency;
+                }
                 if self.low_concurrency == 0 {
                     return Err(format!(
                         "readpool.{}.low-concurrency should be > 0",
                         $display_name
                     )
                     .into());
+                }
+                if self.low_active_concurrency == 0 {
+                    self.low_active_concurrency = self.low_concurrency;
                 }
                 if self.stack_size.0 < ReadableSize::mb(2).0 {
                     return Err(
@@ -1128,7 +1155,8 @@ macro_rules! readpool_config {
             #[test]
             fn test_validate() {
                 let cfg = $struct_name::default();
-                assert!(cfg.validate().is_ok());
+                let mut valid_cfg = cfg.clone();
+                assert!(valid_cfg.validate().is_ok());
 
                 let mut invalid_cfg = cfg.clone();
                 invalid_cfg.high_concurrency = 0;
@@ -1152,7 +1180,7 @@ macro_rules! readpool_config {
                 invalid_cfg.max_tasks_per_worker_high = 1;
                 assert!(invalid_cfg.validate().is_err());
                 invalid_cfg.max_tasks_per_worker_high = 100;
-                assert!(cfg.validate().is_ok());
+                assert!(invalid_cfg.validate().is_ok());
 
                 let mut invalid_cfg = cfg.clone();
                 invalid_cfg.max_tasks_per_worker_normal = 0;
@@ -1160,7 +1188,7 @@ macro_rules! readpool_config {
                 invalid_cfg.max_tasks_per_worker_normal = 1;
                 assert!(invalid_cfg.validate().is_err());
                 invalid_cfg.max_tasks_per_worker_normal = 100;
-                assert!(cfg.validate().is_ok());
+                assert!(invalid_cfg.validate().is_ok());
 
                 let mut invalid_cfg = cfg.clone();
                 invalid_cfg.max_tasks_per_worker_low = 0;
@@ -1168,7 +1196,7 @@ macro_rules! readpool_config {
                 invalid_cfg.max_tasks_per_worker_low = 1;
                 assert!(invalid_cfg.validate().is_err());
                 invalid_cfg.max_tasks_per_worker_low = 100;
-                assert!(cfg.validate().is_ok());
+                assert!(invalid_cfg.validate().is_ok());
             }
         }
     };
@@ -1190,8 +1218,14 @@ impl Default for StorageReadPoolConfig {
     fn default() -> Self {
         Self {
             high_concurrency: DEFAULT_STORAGE_READPOOL_CONCURRENCY,
+            high_active_concurrency: 0,
+            high_max_wait_time: ReadableDuration::millis(1),
             normal_concurrency: DEFAULT_STORAGE_READPOOL_CONCURRENCY,
+            normal_active_concurrency: 0,
+            normal_max_wait_time: ReadableDuration::millis(1),
             low_concurrency: DEFAULT_STORAGE_READPOOL_CONCURRENCY,
+            low_active_concurrency: 0,
+            low_max_wait_time: ReadableDuration::millis(1),
             max_tasks_per_worker_high: DEFAULT_READPOOL_MAX_TASKS_PER_WORKER,
             max_tasks_per_worker_normal: DEFAULT_READPOOL_MAX_TASKS_PER_WORKER,
             max_tasks_per_worker_low: DEFAULT_READPOOL_MAX_TASKS_PER_WORKER,
@@ -1218,8 +1252,14 @@ impl Default for CoprReadPoolConfig {
         };
         Self {
             high_concurrency: concurrency,
+            high_active_concurrency: 0,
+            high_max_wait_time: ReadableDuration::millis(1),
             normal_concurrency: concurrency,
+            normal_active_concurrency: 0,
+            normal_max_wait_time: ReadableDuration::millis(1),
             low_concurrency: concurrency,
+            low_active_concurrency: 0,
+            low_max_wait_time: ReadableDuration::millis(1),
             max_tasks_per_worker_high: DEFAULT_READPOOL_MAX_TASKS_PER_WORKER,
             max_tasks_per_worker_normal: DEFAULT_READPOOL_MAX_TASKS_PER_WORKER,
             max_tasks_per_worker_low: DEFAULT_READPOOL_MAX_TASKS_PER_WORKER,

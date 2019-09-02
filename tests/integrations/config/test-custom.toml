@@ -5,8 +5,14 @@ panic-when-unexpected-key-or-data = true
 
 [readpool.storage]
 high-concurrency = 1
+high-active-concurrency = 1
+high-max-wait-time = "10ms"
 normal-concurrency = 3
+normal-active-concurrency = 2
+normal-max-wait-time = "9ms"
 low-concurrency = 7
+low-active-concurrency = 3
+low-max-wait-time = "8ms"
 max-tasks-per-worker-high = 1000
 max-tasks-per-worker-normal = 1500
 max-tasks-per-worker-low = 2500
@@ -14,8 +20,14 @@ stack-size = "20MB"
 
 [readpool.coprocessor]
 high-concurrency = 2
+high-active-concurrency = 1
+high-max-wait-time = "10ms"
 normal-concurrency = 4
+normal-active-concurrency = 2
+normal-max-wait-time = "9ms"
 low-concurrency = 6
+low-active-concurrency = 3
+low-max-wait-time = "8ms"
 max-tasks-per-worker-high = 2000
 max-tasks-per-worker-normal = 1000
 max-tasks-per-worker-low = 3000
