@@ -26,6 +26,7 @@ use crate::pd::{PdClient, PdRunner, PdTask};
 use crate::raftstore::coprocessor::split_observer::SplitObserver;
 use crate::raftstore::coprocessor::{CoprocessorHost, RegionChangeEvent};
 use crate::raftstore::store::config::Config;
+use crate::raftstore::store::fsm::batch::NormalMailbox;
 use crate::raftstore::store::fsm::metrics::*;
 use crate::raftstore::store::fsm::peer::{
     maybe_destroy_source, new_admin_request, PeerFsm, PeerFsmDelegate,
@@ -49,7 +50,7 @@ use crate::raftstore::store::worker::{
     SplitCheckRunner, SplitCheckTask,
 };
 use crate::raftstore::store::{
-    util, Callback, CasualMessage, PeerMsg, RaftCommand, SignificantMsg, SnapManager,
+    util, Callback, CasualMessage, PeerMsg, PeerTicks, RaftCommand, SignificantMsg, SnapManager,
     SnapshotDeleter, StoreMsg, StoreTick,
 };
 use crate::raftstore::Result;
@@ -186,6 +187,36 @@ impl RaftRouter {
     }
 }
 
+struct TickReceiver {
+    region_id: u64,
+    peer_id: u64,
+    mailbox: NormalMailbox<PeerFsm, StoreFsm>,
+}
+
+pub struct PendingTicks {
+    pub tick: PeerTicks,
+    pub timeout: Duration,
+    receivers: Vec<TickReceiver>,
+}
+
+impl PendingTicks {
+    pub fn new(tick: PeerTicks, timeout: Duration) -> PendingTicks {
+        PendingTicks {
+            tick,
+            timeout,
+            receivers: vec![],
+        }
+    }
+
+    pub fn add(&mut self, region_id: u64, peer_id: u64, mailbox: NormalMailbox<PeerFsm, StoreFsm>) {
+        self.receivers.push(TickReceiver {
+            region_id,
+            peer_id,
+            mailbox,
+        })
+    }
+}
+
 pub struct PollContext<T, C: 'static> {
     pub cfg: Arc<Config>,
     pub store: metapb::Store,
@@ -214,6 +245,7 @@ pub struct PollContext<T, C: 'static> {
     pub kv_wb: WriteBatch,
     pub raft_wb: WriteBatch,
     pub pending_count: usize,
+    pub pending_ticks: Vec<PendingTicks>,
     pub sync_log: bool,
     pub has_ready: bool,
     pub ready_res: Vec<(Ready, InvokeContext)>,
@@ -458,6 +490,46 @@ pub struct RaftPoller<T: 'static, C: 'static> {
 }
 
 impl<T: Transport, C: PdClient> RaftPoller<T, C> {
+    fn before_block(&mut self) {
+        if self.poll_ctx.need_flush_trans {
+            self.poll_ctx.trans.flush();
+            self.poll_ctx.need_flush_trans = false;
+        }
+        if !self.poll_ctx.pending_ticks.is_empty() {
+            for mut t in self.poll_ctx.pending_ticks.drain(..) {
+                let tick = t.tick;
+                let f = self
+                    .poll_ctx
+                    .timer
+                    .delay(t.timeout)
+                    .map(move |_| {
+                        for r in t.receivers.drain(..) {
+                            fail_point!(
+                                "on_raft_log_gc_tick_1",
+                                tick == PeerTicks::RAFT_LOG_GC && r.peer_id == 1,
+                                |_| unreachable!()
+                            );
+                            // This can happen only when the peer is about to be destroyed
+                            // or the node is shutting down. So it's OK to not to clean up
+                            // registry.
+                            if let Err(e) = r.mailbox.force_send(PeerMsg::Tick(tick)) {
+                                info!(
+                                    "failed to schedule peer tick";
+                                    "region_id" => r.region_id,
+                                    "peer_id" => r.peer_id,
+                                    "tick" => ?tick,
+                                    "err" => %e,
+                                );
+                            }
+                        }
+                    })
+                    .map_err(move |e| {
+                        panic!("tick {:?} is lost due to timeout error: {:?}", tick, e);
+                    });
+                self.poll_ctx.future_poller.spawn(f).unwrap();
+            }
+        }
+    }
     fn handle_raft_ready(&mut self, peers: &mut [Box<PeerFsm>]) {
         // Only enable the fail point when the store id is equal to 3, which is
         // the id of slow store in tests.
@@ -469,11 +541,8 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
                     .schedule_task(prop.region_id, ApplyTask::Proposal(prop));
             }
         }
-        if self.poll_ctx.need_flush_trans
-            && (!self.poll_ctx.kv_wb.is_empty() || !self.poll_ctx.raft_wb.is_empty())
-        {
-            self.poll_ctx.trans.flush();
-            self.poll_ctx.need_flush_trans = false;
+        if !self.poll_ctx.kv_wb.is_empty() || !self.poll_ctx.raft_wb.is_empty() {
+            self.before_block();
         }
         let ready_cnt = self.poll_ctx.ready_res.len();
         self.poll_ctx.raft_metrics.ready.has_ready_region += ready_cnt as u64;
@@ -665,10 +734,7 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm, StoreFsm> for RaftPoller<T,
     }
 
     fn pause(&mut self) {
-        if self.poll_ctx.need_flush_trans {
-            self.poll_ctx.trans.flush();
-            self.poll_ctx.need_flush_trans = false;
-        }
+        self.before_block();
     }
 }
 
@@ -887,6 +953,7 @@ where
             snap_mgr: self.snap_mgr.clone(),
             applying_snap_count: self.applying_snap_count.clone(),
             coprocessor_host: self.coprocessor_host.clone(),
+            pending_ticks: Vec::new(),
             timer: SteadyTimer::default(),
             trans: self.trans.clone(),
             pd_client: self.pd_client.clone(),

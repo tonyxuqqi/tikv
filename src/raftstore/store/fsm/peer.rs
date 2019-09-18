@@ -13,7 +13,6 @@ use crate::raftstore::{Error, Result};
 use engine::Engines;
 use engine::CF_RAFT;
 use engine::{Peekable, Snapshot as EngineSnapshot};
-use futures::Future;
 use kvproto::errorpb;
 use kvproto::import_sstpb::SSTMeta;
 use kvproto::metapb::{self, Region, RegionEpoch};
@@ -36,7 +35,7 @@ use tikv_util::{escape, is_zero_duration};
 
 use crate::raftstore::coprocessor::RegionChangeEvent;
 use crate::raftstore::store::cmd_resp::{bind_term, new_error};
-use crate::raftstore::store::fsm::store::{PollContext, StoreMeta};
+use crate::raftstore::store::fsm::store::{PendingTicks, PollContext, StoreMeta};
 use crate::raftstore::store::fsm::{
     apply, ApplyMetrics, ApplyTask, ApplyTaskRes, BasicMailbox, CatchUpLogs, ChangePeer,
     ExecResult, Fsm, RegionProposal,
@@ -707,36 +706,15 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
             }
         };
         let peer_id = self.fsm.peer.peer_id();
-        let f = self
-            .ctx
-            .timer
-            .delay(timeout)
-            .map(move |_| {
-                fail_point!(
-                    "on_raft_log_gc_tick_1",
-                    peer_id == 1 && tick == PeerTicks::RAFT_LOG_GC,
-                    |_| unreachable!()
-                );
-                // This can happen only when the peer is about to be destroyed
-                // or the node is shutting down. So it's OK to not to clean up
-                // registry.
-                if let Err(e) = mb.force_send(PeerMsg::Tick(tick)) {
-                    info!(
-                        "failed to schedule peer tick";
-                        "region_id" => region_id,
-                        "peer_id" => peer_id,
-                        "tick" => ?tick,
-                        "err" => %e,
-                    );
-                }
-            })
-            .map_err(move |e| {
-                panic!(
-                    "[region {}] {} tick {:?} is lost due to timeout error: {:?}",
-                    region_id, peer_id, tick, e
-                );
-            });
-        self.ctx.future_poller.spawn(f).unwrap();
+        for t in &mut self.ctx.pending_ticks {
+            if t.tick == tick && t.timeout == timeout {
+                t.add(region_id, peer_id, mb);
+                return;
+            }
+        }
+        let mut t = PendingTicks::new(tick, timeout);
+        t.add(region_id, peer_id, mb);
+        self.ctx.pending_ticks.push(t);
     }
 
     fn register_raft_base_tick(&mut self) {

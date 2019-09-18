@@ -5,7 +5,7 @@
 //! represents a peer, the other is control FSM, which usually represents something
 //! that controls how the former is created or metrics are collected.
 
-use super::router::{BasicMailbox, Router};
+use super::router::{BasicMailbox, Mailbox, Router};
 use crossbeam::channel::{self, SendError, TryRecvError};
 use std::borrow::Cow;
 use std::thread::{self, JoinHandle};
@@ -430,6 +430,7 @@ where
 }
 
 pub type BatchRouter<N, C> = Router<N, C, NormalScheduler<N, C>, ControlScheduler<N, C>>;
+pub type NormalMailbox<N, C> = Mailbox<N, NormalScheduler<N, C>>;
 
 /// Create a batch system with the given thread name prefix and pool size.
 ///
