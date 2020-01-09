@@ -67,7 +67,7 @@ impl Stream for SnapChunk {
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Error> {
         if let Some(t) = self.first.take() {
-            let write_flags = WriteFlags::default().buffer_hint(true);
+            let write_flags = WriteFlags::default().buffer_hint(self.remain_bytes > 0);
             return Ok(Async::Ready(Some((t, write_flags))));
         }
 
@@ -84,7 +84,7 @@ impl Stream for SnapChunk {
                 chunk.set_data(buf);
                 Ok(Async::Ready(Some((
                     chunk,
-                    WriteFlags::default().buffer_hint(true),
+                    WriteFlags::default().buffer_hint(self.remain_bytes > 0),
                 ))))
             }
             Err(e) => Err(box_err!("failed to read snapshot chunk: {}", e)),
@@ -95,6 +95,7 @@ impl Stream for SnapChunk {
 struct SendStat {
     key: SnapKey,
     total_size: u64,
+    prepare_elapsed: Duration,
     elapsed: Duration,
 }
 
@@ -153,6 +154,7 @@ fn send_snap(
     let (sink, receiver) = client.snapshot()?;
 
     let send = chunks.forward(sink).map_err(Error::from);
+    let prepare_elapsed = timer.elapsed();
     let send = send
         .and_then(|(s, _)| receiver.map_err(Error::from).map(|_| s))
         .then(move |result| {
@@ -168,6 +170,7 @@ fn send_snap(
                 SendStat {
                     key,
                     total_size,
+                    prepare_elapsed,
                     elapsed: timer.elapsed(),
                 }
             })
@@ -387,7 +390,8 @@ impl<R: RaftStoreRouter + 'static> Runnable<Task> for Runner<R> {
                                     "region_id" => stat.key.region_id,
                                     "snap_key" => %stat.key,
                                     "size" => stat.total_size,
-                                    "duration" => ?stat.elapsed
+                                    "duration" => ?stat.elapsed,
+                                    "prepare_duration" => ?stat.prepare_elapsed,
                                 );
                                 cb(Ok(()));
                             }
