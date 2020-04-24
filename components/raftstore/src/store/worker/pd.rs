@@ -1,11 +1,11 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::fmt::{self, Display, Formatter};
-use std::io;
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread::{Builder, JoinHandle};
 use std::time::Duration;
+use std::{cmp, io};
 
 use futures::Future;
 use tokio_core::reactor::Handle;
@@ -18,6 +18,7 @@ use kvproto::metapb;
 use kvproto::pdpb;
 use kvproto::raft_cmdpb::{AdminCmdType, AdminRequest, RaftCmdRequest, SplitRequest};
 use kvproto::raft_serverpb::RaftMessage;
+use kvproto::replication_modepb::RegionReplicationStatus;
 use prometheus::local::LocalHistogram;
 use raft::eraftpb::ConfChangeType;
 
@@ -98,6 +99,7 @@ pub enum Task {
         written_keys: u64,
         approximate_size: Option<u64>,
         approximate_keys: Option<u64>,
+        replication_status: Option<RegionReplicationStatus>,
     },
     StoreHeartbeat {
         stats: pdpb::StoreStats,
@@ -206,12 +208,14 @@ impl Display for Task {
             Task::Heartbeat {
                 ref region,
                 ref peer,
+                ref replication_status,
                 ..
             } => write!(
                 f,
-                "heartbeat for region {:?}, leader {}",
+                "heartbeat for region {:?}, leader {}, replication status {:?}",
                 region,
-                peer.get_id()
+                peer.get_id(),
+                replication_status
             ),
             Task::StoreHeartbeat { ref stats, .. } => {
                 write!(f, "store heartbeat stats: {:?}", stats)
@@ -278,8 +282,8 @@ impl StatsMonitor {
             timer: None,
             sender: None,
             thread_info_interval: interval,
-            qps_info_interval: DEFAULT_QPS_INFO_INTERVAL,
-            collect_interval: DEFAULT_COLLECT_INTERVAL,
+            qps_info_interval: cmp::min(DEFAULT_QPS_INFO_INTERVAL, interval),
+            collect_interval: cmp::min(DEFAULT_COLLECT_INTERVAL, interval),
         }
     }
 
@@ -289,6 +293,10 @@ impl StatsMonitor {
         &mut self,
         mut auto_split_controller: AutoSplitController,
     ) -> Result<(), io::Error> {
+        if self.collect_interval < DEFAULT_COLLECT_INTERVAL {
+            info!("it seems we are running tests, skip stats monitoring.");
+            return Ok(());
+        }
         let mut timer_cnt = 0; // to run functions with different intervals in a loop
         let collect_interval = self.collect_interval;
         let thread_info_interval = self
@@ -406,12 +414,12 @@ impl<T: PdClient> Runner<T> {
         store_id: u64,
         pd_client: Arc<T>,
         router: RaftRouter<RocksEngine>,
-        db: Arc<DB>,
-        scheduler: Scheduler<Task>,
-        store_heartbeat_interval: u64,
+        db: E,
+        scheduler: Scheduler<Task<E>>,
+        store_heartbeat_interval: Duration,
         auto_split_controller: AutoSplitController,
     ) -> Runner<T> {
-        let interval = Duration::from_secs(store_heartbeat_interval) / Self::INTERVAL_DIVISOR;
+        let interval = store_heartbeat_interval / Self::INTERVAL_DIVISOR;
         let mut stats_monitor = StatsMonitor::new(interval, scheduler.clone());
         if let Err(e) = stats_monitor.start(auto_split_controller) {
             error!("failed to start stats collector, error = {:?}", e);
@@ -560,6 +568,7 @@ impl<T: PdClient> Runner<T> {
         region: metapb::Region,
         peer: metapb::Peer,
         region_stat: RegionStat,
+        replication_status: Option<RegionReplicationStatus>,
     ) {
         self.store_stat
             .region_bytes_written
@@ -576,7 +585,7 @@ impl<T: PdClient> Runner<T> {
 
         let f = self
             .pd_client
-            .region_heartbeat(term, region.clone(), peer, region_stat)
+            .region_heartbeat(term, region.clone(), peer, region_stat, replication_status)
             .map_err(move |e| {
                 debug!(
                     "failed to send heartbeat";
@@ -944,6 +953,7 @@ impl<T: PdClient> Runnable<Task> for Runner<T> {
                 written_keys,
                 approximate_size,
                 approximate_keys,
+                replication_status,
             } => {
                 let approximate_size = approximate_size.unwrap_or_else(|| {
                     get_region_approximate_size(self.db.c(), &region).unwrap_or_default()
@@ -999,6 +1009,7 @@ impl<T: PdClient> Runnable<Task> for Runner<T> {
                         approximate_keys,
                         last_report_ts,
                     },
+                    replication_status,
                 )
             }
             Task::StoreHeartbeat { stats, store_info } => {
