@@ -223,10 +223,13 @@ impl<SS: 'static> ExecutorsRunner<SS> {
         Ok(s_resp)
     }
 
-    pub fn handle_request(&mut self) -> Result<SelectResponse> {
+    pub fn handle_request(&mut self, id: u64) -> Result<SelectResponse> {
         let mut record_cnt = 0;
         let mut chunks = Vec::new();
         loop {
+            if record_cnt % 1000 == 0 && id > 0 {
+                info!("copr trace"; "stage" => "fetching records", "trace id" => id, "record_cnt" => record_cnt);
+            }
             match self.executor.next()? {
                 Some(row) => {
                     self.deadline.check()?;

@@ -125,9 +125,19 @@ impl DAGHandler {
 
 #[async_trait]
 impl RequestHandler for DAGHandler {
-    async fn handle_request(&mut self) -> Result<Response> {
-        let result = self.runner.handle_request();
-        handle_qe_response(result, self.runner.can_be_cached(), self.data_version)
+    async fn handle_request(&mut self, id: u64) -> Result<Response> {
+        if id > 0 {
+            info!("copr trace"; "stage" => "start handle", "trace id" => id);
+        }
+        let result = self.runner.handle_request(id);
+        if id > 0 {
+            info!("copr trace"; "stage" => "start generate response", "trace id" => id);
+        }
+        let res = handle_qe_response(result, self.runner.can_be_cached(), self.data_version);
+        if id > 0 {
+            info!("copr trace"; "stage" => "finish handle", "trace id" => id);
+        }
+        res
     }
 
     fn handle_streaming_request(&mut self) -> Result<(Option<Response>, bool)> {
@@ -167,9 +177,19 @@ impl BatchDAGHandler {
 
 #[async_trait]
 impl RequestHandler for BatchDAGHandler {
-    async fn handle_request(&mut self) -> Result<Response> {
-        let result = self.runner.handle_request().await;
-        handle_qe_response(result, self.runner.can_be_cached(), self.data_version)
+    async fn handle_request(&mut self, trace_id: u64) -> Result<Response> {
+        if trace_id > 0 {
+            info!("copr trace"; "stage" => "start handle", "trace id" => trace_id);
+        }
+        let result = self.runner.handle_request(trace_id).await;
+        if trace_id > 0 {
+            info!("copr trace"; "stage" => "start generate response", "trace id" => trace_id);
+        }
+        let res = handle_qe_response(result, self.runner.can_be_cached(), self.data_version);
+        if trace_id > 0 {
+            info!("copr trace"; "stage" => "finish handle", "trace id" => trace_id);
+        }
+        res
     }
 
     fn collect_scan_statistics(&mut self, dest: &mut Statistics) {

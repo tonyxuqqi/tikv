@@ -342,7 +342,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         })
     }
 
-    pub async fn handle_request(&mut self) -> Result<SelectResponse> {
+    pub async fn handle_request(&mut self, id: u64) -> Result<SelectResponse> {
         let mut chunks = vec![];
         let mut batch_size = BATCH_INITIAL_SIZE;
         let mut warnings = self.config.new_eval_warnings();
@@ -353,6 +353,9 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
             let time_slice_len = time_slice_start.elapsed();
             // Check whether we should yield from the execution
             if time_slice_len > MAX_TIME_SLICE {
+                if id > 0 {
+                    info!("copr trace"; "stage" => "before yielding", "trace id" => id);
+                }
                 reschedule().await;
                 time_slice_start = Instant::now();
             }

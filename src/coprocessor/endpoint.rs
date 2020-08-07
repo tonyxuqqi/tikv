@@ -101,6 +101,7 @@ impl<E: Engine> Endpoint<E> {
         mut req: coppb::Request,
         peer: Option<String>,
         is_streaming: bool,
+        trace_id: u64,
     ) -> Result<(RequestHandlerBuilder<E::Snap>, ReqContext)> {
         // This `Parser` is here because rust-proto supports customising its
         // recursion limit and Prost does not. Therefore we end up doing things
@@ -169,6 +170,9 @@ impl<E: Engine> Endpoint<E> {
                 parser.merge_to(&mut dag)?;
                 let mut table_scan = false;
                 let mut is_desc_scan = false;
+                if trace_id > 0 {
+                    info!("copr trace"; "stage" => "parsed", "dag" => ?dag, "trace id" => trace_id);
+                }
                 if let Some(scan) = dag.get_executors().iter().next() {
                     table_scan = scan.get_tp() == ExecType::TypeTableScan;
                     if table_scan {
@@ -309,6 +313,7 @@ impl<E: Engine> Endpoint<E> {
         semaphore: Option<Arc<Semaphore>>,
         mut tracker: Box<Tracker>,
         handler_builder: RequestHandlerBuilder<E::Snap>,
+        trace_id: u64,
     ) -> Result<coppb::Response> {
         // When this function is being executed, it may be queued for a long time, so that
         // deadline may exceed.
@@ -323,6 +328,9 @@ impl<E: Engine> Endpoint<E> {
         .await?;
         // When snapshot is retrieved, deadline may exceed.
         tracker.on_snapshot_finished();
+        if trace_id > 0 {
+            info!("copr trace"; "stage" => "snapshot fetched", "trace id" => trace_id);
+        }
         tracker.req_ctx.deadline.check()?;
 
         let mut handler = if tracker.req_ctx.cache_match_version.is_some()
@@ -336,7 +344,7 @@ impl<E: Engine> Endpoint<E> {
 
         tracker.on_begin_all_items();
 
-        let handle_request_future = track(handler.handle_request(), &mut tracker);
+        let handle_request_future = track(handler.handle_request(trace_id), &mut tracker);
         let result = if let Some(semaphore) = &semaphore {
             limit_concurrency(handle_request_future, semaphore, LIGHT_TASK_THRESHOLD).await
         } else {
@@ -370,15 +378,18 @@ impl<E: Engine> Endpoint<E> {
         &self,
         req_ctx: ReqContext,
         handler_builder: RequestHandlerBuilder<E::Snap>,
+        trace_id: u64,
     ) -> impl Future<Item = coppb::Response, Error = Error> {
         let priority = req_ctx.context.get_priority();
         let task_id = req_ctx.build_task_id();
         // box the tracker so that moving it is cheap.
         let tracker = Box::new(Tracker::new(req_ctx));
-
+        if trace_id > 0 {
+            info!("copr trace"; "stage" => "before spawning", "trace id" => trace_id);
+        }
         self.read_pool
             .spawn_handle(
-                Self::handle_unary_request_impl(self.semaphore.clone(), tracker, handler_builder),
+                Self::handle_unary_request_impl(self.semaphore.clone(), tracker, handler_builder, trace_id),
                 priority,
                 task_id,
             )
@@ -395,9 +406,17 @@ impl<E: Engine> Endpoint<E> {
         req: coppb::Request,
         peer: Option<String>,
     ) -> impl Future<Item = coppb::Response, Error = ()> {
+        let id = if req.get_start_ts() & 1023 != 0 {
+            0
+        } else {
+            std::cmp::max(1, thread_rng().gen())
+        };
+        if id > 0 {
+            info!("copr trace"; "stage" => "before parse", "trace id" => id, "req" => ?req);
+        }
         let result_of_future = self
-            .parse_request(req, peer, false)
-            .map(|(handler_builder, req_ctx)| self.handle_unary_request(req_ctx, handler_builder));
+            .parse_request(req, peer, false, id)
+            .map(|(handler_builder, req_ctx)| self.handle_unary_request(req_ctx, handler_builder, id));
 
         future::result(result_of_future)
             .flatten()
@@ -511,7 +530,7 @@ impl<E: Engine> Endpoint<E> {
         peer: Option<String>,
     ) -> impl Stream<Item = coppb::Response, Error = ()> {
         let result_of_stream =
-            self.parse_request(req, peer, true)
+            self.parse_request(req, peer, true, 0)
                 .and_then(|(handler_builder, req_ctx)| {
                     self.handle_stream_request(req_ctx, handler_builder)
                 }); // Result<Stream<Resp, Error>, Error>
@@ -622,7 +641,7 @@ mod tests {
 
     #[async_trait]
     impl RequestHandler for UnaryFixture {
-        async fn handle_request(&mut self) -> Result<coppb::Response> {
+        async fn handle_request(&mut self, _: u64) -> Result<coppb::Response> {
             if self.yieldable {
                 // We split the task into small executions of 1 second.
                 for _ in 0..self.handle_duration_millis / 1_000 {

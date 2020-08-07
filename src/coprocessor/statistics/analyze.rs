@@ -103,7 +103,7 @@ impl<S: Snapshot> AnalyzeContext<S> {
 
 #[async_trait]
 impl<S: Snapshot> RequestHandler for AnalyzeContext<S> {
-    async fn handle_request(&mut self) -> Result<Response> {
+    async fn handle_request(&mut self, _: u64) -> Result<Response> {
         let ret = match self.req.get_tp() {
             AnalyzeType::TypeIndex => {
                 let req = self.req.take_idx_req();
