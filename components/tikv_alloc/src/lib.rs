@@ -1,5 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
+#![feature(once_cell)]
+
 //! This crate controls the global allocator used by TiKV.
 //!
 //! As of now TiKV always turns on jemalloc on Unix, though libraries
@@ -110,6 +112,8 @@ mod imp;
 )))]
 #[path = "system.rs"]
 mod imp;
+
+mod trace;
 
 pub use crate::imp::*;
 
