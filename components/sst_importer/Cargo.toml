@@ -27,7 +27,7 @@ engine_rocks = { path = "../engine_rocks" }
 engine_traits = { path = "../engine_traits" }
 error_code = { path = "../error_code" }
 external_storage = { path = "../external_storage" }
-futures = "0.3"
+futures = { version = "0.3", features = ["thread-pool"] }
 futures-util = { version = "0.3", default-features = false, features = ["io"] }
 grpcio = { version = "0.6", default-features = false, features = ["openssl-vendored"] }
 keys = { path = "../keys" }

@@ -198,6 +198,7 @@ members = [
   "components/test_pd",
   "components/tikv_alloc",
   "components/match_template",
+  "components/memory-trace-macros",
   "components/engine_traits/tests",
   "components/codec",
   "components/configuration",

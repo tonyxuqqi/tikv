@@ -2121,6 +2121,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "memory-trace-macros"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "mimalloc-sys"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3088,6 +3096,7 @@ dependencies = [
  "lazy_static",
  "log",
  "log_wrappers",
+ "memory-trace-macros",
  "openssl",
  "panic_hook",
  "pd_client",
