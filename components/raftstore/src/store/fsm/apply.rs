@@ -13,7 +13,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::vec::Drain;
-use std::{cmp, usize};
+use std::{cmp, usize, thread, mem};
 
 use batch_system::{BasicMailbox, BatchRouter, BatchSystem, Fsm, HandlerBuilder, PollHandler};
 use crossbeam::channel::{TryRecvError, TrySendError};
@@ -39,6 +39,7 @@ use raft_proto::ConfChangeI;
 use sst_importer::SSTImporter;
 use tikv_util::collections::{HashMap, HashMapEntry, HashSet};
 use tikv_util::config::{Tracker, VersionTrack};
+use tikv_util::memory::HeapSize;
 use tikv_util::mpsc::{loose_bounded, LooseBoundedSender, Receiver};
 use tikv_util::time::{duration_to_sec, Instant};
 use tikv_util::worker::Scheduler;
@@ -48,6 +49,7 @@ use uuid::Builder as UuidBuilder;
 
 use crate::coprocessor::{Cmd, CoprocessorHost};
 use crate::store::fsm::RaftPollerBuilder;
+use crate::store::fsm::memory::{RaftStoreMemoryTrace, ApplyContextTrace};
 use crate::store::metrics::*;
 use crate::store::msg::{Callback, PeerMsg, ReadResponse, SignificantMsg};
 use crate::store::peer::Peer;
@@ -358,6 +360,7 @@ where
     /// Used for handling race between splitting and creating new peer.
     /// An uninitialized peer can be replaced to the one from splitting iff they are exactly the same peer.
     pending_create_peers: Arc<Mutex<HashMap<u64, (u64, bool)>>>,
+    memory_trace: Arc<RaftStoreMemoryTrace>,
 }
 
 impl<EK, W> ApplyContext<EK, W>
@@ -376,6 +379,7 @@ where
         cfg: &Config,
         store_id: u64,
         pending_create_peers: Arc<Mutex<HashMap<u64, (u64, bool)>>>,
+        memory_trace: Arc<RaftStoreMemoryTrace>,
     ) -> ApplyContext<EK, W> {
         ApplyContext {
             tag,
@@ -400,6 +404,7 @@ where
             yield_duration: cfg.apply_yield_duration.0,
             store_id,
             pending_create_peers,
+            memory_trace,
         }
     }
 
@@ -3454,7 +3459,21 @@ where
     apply_ctx: ApplyContext<EK, W>,
     messages_per_tick: usize,
     cfg_tracker: Tracker<Config>,
+    memory_trace: Option<Arc<ApplyContextTrace>>,
 }
+
+impl<EK, W> Drop for ApplyPoller<EK, W>
+where
+    EK: KvEngine,
+    W: WriteBatch<EK>, {
+        fn drop(&mut self) {
+            if self.memory_trace.take().is_some() {
+                let cur_id = thread::current().id();
+                let mut ctx = self.apply_ctx.memory_trace.apply_context.lock().unwrap();
+                ctx.retain(|(id, _)| *id != cur_id);
+            }
+        }
+    }
 
 impl<EK, W> PollHandler<ApplyFsm<EK>, ControlFsm> for ApplyPoller<EK, W>
 where
@@ -3543,6 +3562,22 @@ where
             }
         }
     }
+
+    fn pause(&mut self) {
+        if self.memory_trace.is_none() {
+            let t: Arc<ApplyContextTrace> = Arc::default();
+            let mut ctx = self.apply_ctx.memory_trace.apply_context.lock().unwrap();
+            ctx.push((thread::current().id(), t.clone()));
+            self.memory_trace = Some(t);
+        }
+        let trace = self.memory_trace.as_ref().unwrap();
+        // TODO: record raft batch size, there is no API ATM.
+        trace.cbs_size.store(self.apply_ctx.cbs.heap_size(), Ordering::Relaxed);
+        let mut size = self.apply_ctx.apply_res.heap_size();
+        size += self.msg_buf.heap_size();
+        size += mem::size_of::<Self>();
+        trace.rest.store(size, Ordering::Relaxed);
+    }
 }
 
 pub struct Builder<EK: KvEngine, W: WriteBatch<EK>> {
@@ -3557,6 +3592,7 @@ pub struct Builder<EK: KvEngine, W: WriteBatch<EK>> {
     _phantom: PhantomData<W>,
     store_id: u64,
     pending_create_peers: Arc<Mutex<HashMap<u64, (u64, bool)>>>,
+    memory_trace: Arc<RaftStoreMemoryTrace>,
 }
 
 impl<EK: KvEngine, W> Builder<EK, W>
@@ -3580,6 +3616,7 @@ where
             router,
             store_id: builder.store.get_id(),
             pending_create_peers: builder.pending_create_peers.clone(),
+            memory_trace: builder.memory_trace.clone(),
         }
     }
 }
@@ -3606,9 +3643,11 @@ where
                 &cfg,
                 self.store_id,
                 self.pending_create_peers.clone(),
+                self.memory_trace.clone(),
             ),
             messages_per_tick: cfg.messages_per_tick,
             cfg_tracker: self.cfg.clone().tracker(self.tag.clone()),
+            memory_trace: None,
         }
     }
 }

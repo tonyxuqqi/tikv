@@ -7,6 +7,7 @@
 pub mod apply;
 mod metrics;
 mod peer;
+mod memory;
 pub mod store;
 
 pub use self::apply::{
@@ -19,3 +20,5 @@ pub use self::peer::{DestroyPeerJob, GroupState, PeerFsm};
 pub use self::store::{
     create_raft_batch_system, RaftBatchSystem, RaftPollerBuilder, RaftRouter, StoreInfo, StoreMeta,
 };
+
+pub(crate) use self::apply::ApplyFsm;
