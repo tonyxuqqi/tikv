@@ -27,8 +27,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
-use std::{env, thread, u64};
-
+use std::{env, mem, thread, u64};
+use crate::memory::HeapSize;
 use fs2::FileExt;
 use rand::rngs::ThreadRng;
 
@@ -42,6 +42,7 @@ pub mod file;
 pub mod future;
 #[macro_use]
 pub mod macros;
+pub mod memory;
 pub mod callback;
 pub mod deadline;
 pub mod keybuilder;
@@ -390,6 +391,13 @@ impl<T> RingQueue<T> {
         } else {
             None
         }
+    }
+}
+
+impl<T> HeapSize for RingQueue<T> {
+    #[inline]
+    fn heap_size(&self) -> usize {
+        self.buf.capacity() * mem::size_of::<T>()
     }
 }
 
