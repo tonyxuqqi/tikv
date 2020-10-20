@@ -45,7 +45,7 @@ use crate::coprocessor::{BoxAdminObserver, CoprocessorHost, RegionChangeEvent};
 use crate::observe_perf_context_type;
 use crate::report_perf_context;
 use crate::store::config::Config;
-use crate::store::fsm::memory::{RaftStoreMemoryTrace, RaftStoreMemoryProvider, RaftContextTrace};
+use crate::store::fsm::memory::{RaftContextTrace, RaftStoreMemoryProvider, RaftStoreMemoryTrace};
 use crate::store::fsm::metrics::*;
 use crate::store::fsm::peer::{
     maybe_destroy_source, new_admin_request, PeerFsm, PeerFsmDelegate, SenderFsmPair,
@@ -153,7 +153,7 @@ impl StoreMeta {
                 return;
             }
         }
-        
+
         // TODO: may not be a good idea to panic when holding a lock.
         panic!("{} region corrupted", peer.tag);
     }
@@ -888,7 +888,9 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport, C: PdClient>
         }
         let trace = self.memory_trace.as_ref().unwrap();
         // TODO: record raft batch size, there is no API ATM.
-        trace.write_batch.store(self.poll_ctx.kv_wb.data_size(), Ordering::Relaxed);
+        trace
+            .write_batch
+            .store(self.poll_ctx.kv_wb.data_size(), Ordering::Relaxed);
         let mut size = self.poll_ctx.ready_res.heap_size() + self.poll_ctx.tick_batch.heap_size();
         size += self.store_msg_buf.heap_size();
         size += self.peer_msg_buf.heap_size();
@@ -897,16 +899,15 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport, C: PdClient>
     }
 }
 
-impl<EK: KvEngine, ER: RaftEngine, T, C>
-    Drop for RaftPoller<EK, ER, T, C> {
-        fn drop(&mut self) {
-            if self.memory_trace.take().is_some() {
-                let cur_id = thread::current().id();
-                let mut ctx = self.poll_ctx.memory_trace.raft_context.lock().unwrap();
-                ctx.retain(|(id, _)| *id != cur_id);
-            }
+impl<EK: KvEngine, ER: RaftEngine, T, C> Drop for RaftPoller<EK, ER, T, C> {
+    fn drop(&mut self) {
+        if self.memory_trace.take().is_some() {
+            let cur_id = thread::current().id();
+            let mut ctx = self.poll_ctx.memory_trace.raft_context.lock().unwrap();
+            ctx.retain(|(id, _)| *id != cur_id);
         }
     }
+}
 
 pub struct RaftPollerBuilder<EK: KvEngine, ER: RaftEngine, T, C> {
     pub cfg: Arc<VersionTrack<Config>>,
@@ -1208,7 +1209,10 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
         concurrency_manager: ConcurrencyManager,
     ) -> Result<()> {
         let memory_trace = Arc::new(RaftStoreMemoryTrace::default());
-        let provider = Box::new(RaftStoreMemoryProvider::new(store_meta.clone(), memory_trace.clone()));
+        let provider = Box::new(RaftStoreMemoryProvider::new(
+            store_meta.clone(),
+            memory_trace.clone(),
+        ));
         tikv_alloc::trace::register_provider(provider);
         assert!(self.workers.is_none());
         // TODO: we can get cluster meta regularly too later.

@@ -18,6 +18,9 @@ extern crate derive_more;
 #[cfg(test)]
 extern crate test;
 
+use crate::memory::HeapSize;
+use fs2::FileExt;
+use rand::rngs::ThreadRng;
 use std::collections::hash_map::Entry;
 use std::collections::vec_deque::{Iter, VecDeque};
 use std::fs::File;
@@ -28,9 +31,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 use std::{env, mem, thread, u64};
-use crate::memory::HeapSize;
-use fs2::FileExt;
-use rand::rngs::ThreadRng;
 
 #[macro_use]
 pub mod log;
@@ -42,12 +42,12 @@ pub mod file;
 pub mod future;
 #[macro_use]
 pub mod macros;
-pub mod memory;
 pub mod callback;
 pub mod deadline;
 pub mod keybuilder;
 pub mod logger;
 pub mod lru;
+pub mod memory;
 pub mod metrics;
 pub mod mpsc;
 pub mod sys;

@@ -5,9 +5,9 @@
 //! stores. They are mixed for now, will be separated in the future.
 
 pub mod apply;
+mod memory;
 mod metrics;
 mod peer;
-mod memory;
 pub mod store;
 
 pub use self::apply::{

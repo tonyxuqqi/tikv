@@ -13,7 +13,7 @@ use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::vec::Drain;
-use std::{cmp, usize, thread, mem};
+use std::{cmp, mem, thread, usize};
 
 use batch_system::{BasicMailbox, BatchRouter, BatchSystem, Fsm, HandlerBuilder, PollHandler};
 use crossbeam::channel::{TryRecvError, TrySendError};
@@ -48,8 +48,8 @@ use time::Timespec;
 use uuid::Builder as UuidBuilder;
 
 use crate::coprocessor::{Cmd, CoprocessorHost};
+use crate::store::fsm::memory::{ApplyContextTrace, RaftStoreMemoryTrace};
 use crate::store::fsm::RaftPollerBuilder;
-use crate::store::fsm::memory::{RaftStoreMemoryTrace, ApplyContextTrace};
 use crate::store::metrics::*;
 use crate::store::msg::{Callback, PeerMsg, ReadResponse, SignificantMsg};
 use crate::store::peer::Peer;
@@ -3465,15 +3465,16 @@ where
 impl<EK, W> Drop for ApplyPoller<EK, W>
 where
     EK: KvEngine,
-    W: WriteBatch<EK>, {
-        fn drop(&mut self) {
-            if self.memory_trace.take().is_some() {
-                let cur_id = thread::current().id();
-                let mut ctx = self.apply_ctx.memory_trace.apply_context.lock().unwrap();
-                ctx.retain(|(id, _)| *id != cur_id);
-            }
+    W: WriteBatch<EK>,
+{
+    fn drop(&mut self) {
+        if self.memory_trace.take().is_some() {
+            let cur_id = thread::current().id();
+            let mut ctx = self.apply_ctx.memory_trace.apply_context.lock().unwrap();
+            ctx.retain(|(id, _)| *id != cur_id);
         }
     }
+}
 
 impl<EK, W> PollHandler<ApplyFsm<EK>, ControlFsm> for ApplyPoller<EK, W>
 where
@@ -3572,7 +3573,9 @@ where
         }
         let trace = self.memory_trace.as_ref().unwrap();
         // TODO: record raft batch size, there is no API ATM.
-        trace.cbs_size.store(self.apply_ctx.cbs.heap_size(), Ordering::Relaxed);
+        trace
+            .cbs_size
+            .store(self.apply_ctx.cbs.heap_size(), Ordering::Relaxed);
         let mut size = self.apply_ctx.apply_res.heap_size();
         size += self.msg_buf.heap_size();
         size += mem::size_of::<Self>();

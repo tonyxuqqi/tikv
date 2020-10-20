@@ -1,8 +1,8 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
+use crate::collections::HashMap;
 use kvproto::metapb::{Region, RegionEpoch};
 use std::collections::BTreeMap;
-use crate::collections::HashMap;
 use std::mem;
 
 pub trait HeapSize {

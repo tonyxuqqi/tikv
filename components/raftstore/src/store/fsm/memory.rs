@@ -1,16 +1,16 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
-use tikv_util::memory::HeapSize;
-use tikv_alloc::trace::{MemoryTraceProvider, MemoryTrace};
 use super::StoreMeta;
-use std::mem;
-use crate::store::fsm::{PeerFsm, ApplyFsm};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicUsize;
-use std::thread::ThreadId;
-use tikv_util::collections::HashMap;
-use memory_trace_macros::MemoryTraceHelper;
+use crate::store::fsm::{ApplyFsm, PeerFsm};
 use engine_rocks::RocksEngine;
+use memory_trace_macros::MemoryTraceHelper;
+use std::mem;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
+use std::thread::ThreadId;
+use tikv_alloc::trace::{MemoryTrace, MemoryTraceProvider};
+use tikv_util::collections::HashMap;
+use tikv_util::memory::HeapSize;
 
 #[derive(MemoryTraceHelper, Default)]
 pub struct PeerMemoryTrace {
@@ -56,11 +56,11 @@ pub struct RaftStoreMemoryProvider {
 }
 
 impl RaftStoreMemoryProvider {
-    pub fn new(meta: Arc<Mutex<StoreMeta>>, components: Arc<RaftStoreMemoryTrace>) -> RaftStoreMemoryProvider {
-        RaftStoreMemoryProvider {
-            meta,
-            components,
-        }
+    pub fn new(
+        meta: Arc<Mutex<StoreMeta>>,
+        components: Arc<RaftStoreMemoryTrace>,
+    ) -> RaftStoreMemoryProvider {
+        RaftStoreMemoryProvider { meta, components }
     }
 }
 
@@ -70,16 +70,16 @@ impl MemoryTraceProvider for RaftStoreMemoryProvider {
         let store_meta_trace = sub_trace.add_sub_trace("store meta");
         let mut size = std::mem::size_of::<Mutex<StoreMeta>>();
         let meta = self.meta.lock().unwrap();
-        size += meta.region_ranges.heap_size() +
-        meta.regions.heap_size() +
-        meta.readers.heap_size() +
-        meta.pending_votes.heap_size() +
-        meta.pending_snapshot_regions.heap_size() +
-        meta.pending_merge_targets.heap_size() +
-        meta.targets_map.heap_size() +
-        meta.atomic_snap_regions.heap_size() +
-        meta.destroyed_region_for_snap.heap_size() +
-        meta.mem_size;
+        size += meta.region_ranges.heap_size()
+            + meta.regions.heap_size()
+            + meta.readers.heap_size()
+            + meta.pending_votes.heap_size()
+            + meta.pending_snapshot_regions.heap_size()
+            + meta.pending_merge_targets.heap_size()
+            + meta.targets_map.heap_size()
+            + meta.atomic_snap_regions.heap_size()
+            + meta.destroyed_region_for_snap.heap_size()
+            + meta.mem_size;
         drop(meta);
         store_meta_trace.set_size(size);
         sub_trace.add_size(size);
@@ -108,7 +108,8 @@ impl MemoryTraceProvider for RaftStoreMemoryProvider {
 
         let raft_context = self.components.raft_context.lock().unwrap();
         size = 0;
-        let raft_context_trace = sub_trace.add_sub_trace_with_capacity("Raft Context", raft_context.len());
+        let raft_context_trace =
+            sub_trace.add_sub_trace_with_capacity("Raft Context", raft_context.len());
         for (id, p) in raft_context.iter() {
             size += p.trace(id.as_u64(), raft_context_trace);
         }
@@ -118,14 +119,15 @@ impl MemoryTraceProvider for RaftStoreMemoryProvider {
 
         let apply_context = self.components.apply_context.lock().unwrap();
         size = 0;
-        let apply_context_trace = sub_trace.add_sub_trace_with_capacity("Apply Context", apply_context.len());
+        let apply_context_trace =
+            sub_trace.add_sub_trace_with_capacity("Apply Context", apply_context.len());
         for (id, p) in apply_context.iter() {
             size += p.trace(id.as_u64(), apply_context_trace);
         }
         apply_context_trace.set_size(size);
         drop(apply_context);
         sub_trace.add_size(size);
-        
+
         size = sub_trace.size();
         dump.add_size(size);
     }

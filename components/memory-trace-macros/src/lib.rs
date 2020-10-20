@@ -4,7 +4,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, Fields, Ident, DeriveInput};
+use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident};
 
 fn readable_name(name: &Ident) -> String {
     let mut name = name.to_string();
@@ -22,36 +22,34 @@ pub fn memory_trace_provider_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
     let imp;
-    
+
     match input.data {
-        Data::Struct(ref s) => {
-            match s.fields {
-                Fields::Named(ref fields) => {
-                    let total = fields.named.iter().map(|f| {
-                        let name = &f.ident;
-                        let id = readable_name(name.as_ref().unwrap());
-                        quote! {
-                            let s = self.#name.load(std::sync::atomic::Ordering::Relaxed);
-                            sum += s;
-                            sub_trace.add_sub_trace(#id).set_size(s);
-                        }
-                    });
-                    let sum = quote! {
-                        #(#total)*
-                    };
-                    let count = fields.named.len();
-                    imp = quote! {
-                        let sub_trace = trace.add_sub_trace_with_capacity(id, #count);
-                        let mut sum = 0;
-                        #sum
-                        sub_trace.set_size(sum);
-                        sum
-                    };
-                }
-                _ => unimplemented!() 
+        Data::Struct(ref s) => match s.fields {
+            Fields::Named(ref fields) => {
+                let total = fields.named.iter().map(|f| {
+                    let name = &f.ident;
+                    let id = readable_name(name.as_ref().unwrap());
+                    quote! {
+                        let s = self.#name.load(std::sync::atomic::Ordering::Relaxed);
+                        sum += s;
+                        sub_trace.add_sub_trace(#id).set_size(s);
+                    }
+                });
+                let sum = quote! {
+                    #(#total)*
+                };
+                let count = fields.named.len();
+                imp = quote! {
+                    let sub_trace = trace.add_sub_trace_with_capacity(id, #count);
+                    let mut sum = 0;
+                    #sum
+                    sub_trace.set_size(sum);
+                    sum
+                };
             }
-        }
-        _ => unimplemented!()
+            _ => unimplemented!(),
+        },
+        _ => unimplemented!(),
     };
     let expanded = quote! {
         impl #name {

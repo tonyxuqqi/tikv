@@ -1,8 +1,8 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use lazy_static::lazy_static;
-use std::sync::Mutex;
 use std::num::NonZeroU64;
+use std::sync::Mutex;
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum Id {
@@ -52,7 +52,11 @@ impl MemoryTrace {
         self.children.last_mut().unwrap()
     }
 
-    pub fn add_sub_trace_with_capacity(&mut self, id: impl Into<Id>, cap: usize) -> &mut MemoryTrace {
+    pub fn add_sub_trace_with_capacity(
+        &mut self,
+        id: impl Into<Id>,
+        cap: usize,
+    ) -> &mut MemoryTrace {
         let mut trace = MemoryTrace::new(id);
         trace.children.reserve(cap);
         self.children.push(trace);
@@ -95,11 +99,8 @@ impl MemoryTraceManager {
 }
 
 lazy_static! {
-    static ref GLOBAL_MEMORY_TRACE_MANAGER: Mutex<MemoryTraceManager> = {
-        Mutex::new(MemoryTraceManager {
-            providers: vec![],
-        })
-    };
+    static ref GLOBAL_MEMORY_TRACE_MANAGER: Mutex<MemoryTraceManager> =
+        Mutex::new(MemoryTraceManager { providers: vec![] });
 }
 
 pub fn register_provider(provider: Box<dyn MemoryTraceProvider + Send>) {
