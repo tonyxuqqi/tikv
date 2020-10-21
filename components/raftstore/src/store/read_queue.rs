@@ -10,6 +10,7 @@ use crate::store::{Callback, Config};
 use engine_traits::Snapshot;
 use kvproto::raft_cmdpb::RaftCmdRequest;
 use tikv_util::collections::HashMap;
+use tikv_util::memory::HeapSize;
 use tikv_util::time::{duration_to_sec, monotonic_raw_now};
 use tikv_util::MustConsumeVec;
 use time::Timespec;
@@ -57,6 +58,14 @@ where
     }
 }
 
+impl<S: Snapshot> HeapSize for ReadIndexRequest<S> {
+    #[inline]
+    fn heap_size(&self) -> usize {
+        // Protobuf will allocate for sub structs.
+        self.cmds.heap_size() + 8 * self.cmds.len()
+    }
+}
+
 impl<S> Drop for ReadIndexRequest<S>
 where
     S: Snapshot,
@@ -81,6 +90,7 @@ where
     contexts: HashMap<Uuid, usize>,
 
     retry_countdown: usize,
+    mem_size: usize,
 }
 
 impl<S> Default for ReadIndexQueue<S>
@@ -94,6 +104,7 @@ where
             handled_cnt: 0,
             contexts: HashMap::default(),
             retry_countdown: 0,
+            mem_size: 0,
         }
     }
 }
@@ -148,12 +159,14 @@ where
         self.contexts.clear();
         self.ready_cnt = 0;
         self.handled_cnt = 0;
+        self.mem_size = self.reads.heap_size();
     }
 
     pub fn clear_uncommitted_on_role_change(&mut self, term: u64) {
         let mut removed = 0;
         for mut read in self.reads.drain(self.ready_cnt..) {
             removed += read.cmds.len();
+            self.mem_size -= read.heap_size();
             for (_, cb, _) in read.cmds.drain(..) {
                 apply::notify_stale_req(term, cb);
             }
@@ -169,6 +182,7 @@ where
             let offset = self.handled_cnt + self.reads.len();
             self.contexts.insert(read.id, offset);
         }
+        self.mem_size += read.heap_size();
         self.reads.push_back(read);
         self.retry_countdown = usize::MAX;
     }
@@ -278,6 +292,7 @@ where
             .reads
             .pop_front()
             .expect("read_queue is empty but ready_cnt > 0");
+        self.mem_size -= res.heap_size();
         if res.in_contexts {
             res.in_contexts = false;
             self.contexts.remove(&res.id);
@@ -288,9 +303,17 @@ where
     /// Raft could have not been ready to handle the poped task. So put it back into the queue.
     pub fn push_front(&mut self, read: ReadIndexRequest<S>) {
         debug_assert!(read.read_index.is_some());
+        self.mem_size += read.heap_size();
         self.reads.push_front(read);
         self.ready_cnt += 1;
         self.handled_cnt -= 1;
+    }
+}
+
+impl<S: Snapshot> HeapSize for ReadIndexQueue<S> {
+    #[inline]
+    fn heap_size(&self) -> usize {
+        self.mem_size + self.contexts.heap_size()
     }
 }
 

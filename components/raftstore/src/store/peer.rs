@@ -43,6 +43,7 @@ use crate::store::{Callback, Config, GlobalReplicationState, PdTask, ReadRespons
 use crate::{Error, Result};
 use pd_client::INVALID_ID;
 use tikv_util::collections::{HashMap, HashSet};
+use tikv_util::memory::HeapSize;
 use tikv_util::time::{duration_to_sec, monotonic_raw_now};
 use tikv_util::time::{Instant as UtilInstant, ThreadReadId};
 use tikv_util::worker::{FutureScheduler, Scheduler};
@@ -932,6 +933,21 @@ where
     #[inline]
     pub fn get_pending_snapshot(&self) -> Option<&eraftpb::Snapshot> {
         self.raft_group.snap()
+    }
+
+    #[inline]
+    pub fn proposal_size(&self) -> usize {
+        self.proposals.queue.heap_size() + self.pending_reads.heap_size()
+    }
+
+    #[inline]
+    pub fn rest_size(&self) -> usize {
+        self.peer_cache.borrow().heap_size()
+            + self.peer_heartbeats.heap_size()
+            + self.pending_messages.heap_size()
+            + self.peers_start_pending_time.heap_size()
+            + self.down_peer_ids.heap_size()
+            + self.check_stale_peers.heap_size()
     }
 
     fn add_ready_metric(&self, ready: &Ready, metrics: &mut RaftReadyMetrics) {

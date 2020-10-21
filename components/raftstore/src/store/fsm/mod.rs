@@ -22,3 +22,4 @@ pub use self::store::{
 };
 
 pub(crate) use self::apply::ApplyFsm;
+pub(crate) use self::memory::PeerMemoryTrace;

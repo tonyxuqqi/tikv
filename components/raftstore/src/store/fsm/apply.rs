@@ -48,7 +48,7 @@ use time::Timespec;
 use uuid::Builder as UuidBuilder;
 
 use crate::coprocessor::{Cmd, CoprocessorHost};
-use crate::store::fsm::memory::{ApplyContextTrace, RaftStoreMemoryTrace};
+use crate::store::fsm::memory::{ApplyContextTrace, ApplyMemoryTrace, RaftStoreMemoryTrace};
 use crate::store::fsm::RaftPollerBuilder;
 use crate::store::metrics::*;
 use crate::store::msg::{Callback, PeerMsg, ReadResponse, SignificantMsg};
@@ -170,6 +170,13 @@ where
     // TODO: seems we don't need to separate conf change from normal entries.
     fn set_conf_change(&mut self, cmd: PendingCmd<S>) {
         self.conf_change = Some(cmd);
+    }
+}
+
+impl<S: Snapshot> HeapSize for PendingCmdQueue<S> {
+    #[inline]
+    fn heap_size(&self) -> usize {
+        self.normals.capacity() * mem::size_of::<PendingCmd<S>>()
     }
 }
 
@@ -694,6 +701,7 @@ where
     /// the source peer has applied its logs and pending entries
     /// are all handled.
     pending_msgs: Vec<Msg<EK>>,
+    approximate_size: usize,
 }
 
 impl<EK> Debug for YieldState<EK>
@@ -705,6 +713,20 @@ where
             .field("pending_entries", &self.pending_entries.len())
             .field("pending_msgs", &self.pending_msgs.len())
             .finish()
+    }
+}
+
+impl<EK: KvEngine> HeapSize for YieldState<EK> {
+    fn heap_size(&self) -> usize {
+        let mut size = self.pending_entries.capacity() * mem::size_of::<Entry>()
+            + self.pending_msgs.capacity() * mem::size_of::<Msg<EK>>();
+        for e in &self.pending_entries {
+            size += e.get_data().len() + e.get_context().len();
+        }
+        for m in &self.pending_msgs {
+            size += m.heap_size();
+        }
+        size
     }
 }
 
@@ -790,6 +812,8 @@ where
     /// Info about cmd observer.
     observe_cmd: Option<ObserveCmd>,
 
+    trace: Option<Arc<ApplyMemoryTrace>>,
+
     /// The local metrics, and it will be flushed periodically.
     metrics: ApplyMetrics,
 }
@@ -819,6 +843,7 @@ where
             last_merge_version: 0,
             pending_request_snapshot_count: reg.pending_request_snapshot_count,
             observe_cmd: None,
+            trace: None,
         }
     }
 
@@ -886,6 +911,7 @@ where
                     self.yield_state = Some(YieldState {
                         pending_entries,
                         pending_msgs: Vec::default(),
+                        approximate_size: 0,
                     });
                     if let ApplyResult::WaitMergeSource(logs_up_to_date) = res {
                         self.wait_merge_state = Some(WaitSourceMergeState { logs_up_to_date });
@@ -1201,6 +1227,12 @@ where
     fn destroy<W: WriteBatch<EK>>(&mut self, apply_ctx: &mut ApplyContext<EK, W>) {
         self.stopped = true;
         apply_ctx.router.close(self.region_id());
+        apply_ctx
+            .memory_trace
+            .applys
+            .lock()
+            .unwrap()
+            .remove(&self.id);
         for cmd in self.pending_cmds.normals.drain(..) {
             notify_region_removed(self.region.get_id(), self.id, cmd);
         }
@@ -2913,6 +2945,20 @@ where
     }
 }
 
+impl<EK: KvEngine> HeapSize for Msg<EK> {
+    #[inline]
+    fn heap_size(&self) -> usize {
+        match self {
+            Msg::Apply { apply, .. } => apply.entries_mem_size as usize,
+            Msg::Registration(r) => r.region.heap_size(),
+            Msg::LogsUpToDate(_) => 8,
+            Msg::Change { .. } | Msg::Snapshot(_) | Msg::Destroy(_) | Msg::Noop => 0,
+            #[cfg(any(test, feature = "testexport"))]
+            Msg::Validate(_, _) => 0,
+        }
+    }
+}
+
 impl<EK> Debug for Msg<EK>
 where
     EK: KvEngine,
@@ -3361,6 +3407,12 @@ where
         apply_ctx: &mut ApplyContext<EK, W>,
         msgs: &mut Vec<Msg<EK>>,
     ) {
+        if self.delegate.trace.is_none() {
+            let mut applys = apply_ctx.memory_trace.applys.lock().unwrap();
+            let trace = applys.entry(self.delegate.id).or_default().clone();
+            drop(applys);
+            self.delegate.trace = Some(trace);
+        }
         let mut channel_timer = None;
         let mut drainer = msgs.drain(..);
         loop {
@@ -3397,6 +3449,19 @@ where
             let elapsed = duration_to_sec(timer.elapsed());
             APPLY_TASK_WAIT_TIME_HISTOGRAM.observe(elapsed);
         }
+        let trace = self.delegate.trace.as_ref().unwrap();
+        trace
+            .pending_cmds
+            .store(self.delegate.pending_cmds.heap_size(), Ordering::Relaxed);
+        let s = self.delegate.yield_state.as_mut().map_or(0, |s| {
+            if s.approximate_size == 0 {
+                s.approximate_size = s.heap_size();
+            }
+            s.approximate_size
+        });
+        trace
+            .rest
+            .store(s + mem::size_of::<Self>(), Ordering::Relaxed);
     }
 }
 
@@ -4037,6 +4102,7 @@ mod tests {
             _phantom: Default::default(),
             store_id: 1,
             pending_create_peers,
+            memory_trace: Arc::default(),
         };
         system.spawn("test-basic".to_owned(), builder);
 
@@ -4402,6 +4468,7 @@ mod tests {
             _phantom: Default::default(),
             store_id: 1,
             pending_create_peers,
+            memory_trace: Arc::default(),
         };
         system.spawn("test-handle-raft".to_owned(), builder);
 
@@ -4760,6 +4827,7 @@ mod tests {
             _phantom: Default::default(),
             store_id: 1,
             pending_create_peers,
+            memory_trace: Arc::default(),
         };
         system.spawn("test-handle-raft".to_owned(), builder);
 
@@ -5059,6 +5127,7 @@ mod tests {
             _phantom: Default::default(),
             store_id: 2,
             pending_create_peers,
+            memory_trace: Arc::default(),
         };
         system.spawn("test-split".to_owned(), builder);
 

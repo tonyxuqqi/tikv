@@ -16,17 +16,14 @@ use tikv_util::memory::HeapSize;
 pub struct PeerMemoryTrace {
     pub log_cache: AtomicUsize,
     pub raft_machine: AtomicUsize,
-    pub cache_and_heartbeats: AtomicUsize,
     pub proposals: AtomicUsize,
-    pub abnormal_peers: AtomicUsize,
-    pub merge_queue: AtomicUsize,
-    pub epoch_checker: AtomicUsize,
+    pub rest: AtomicUsize,
 }
 
-#[derive(MemoryTraceHelper, Default)]
+#[derive(MemoryTraceHelper, Default, Debug)]
 pub struct ApplyMemoryTrace {
     pub pending_cmds: AtomicUsize,
-    pub yield_states: AtomicUsize,
+    pub rest: AtomicUsize,
 }
 
 #[derive(MemoryTraceHelper, Default)]
