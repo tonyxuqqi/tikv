@@ -3063,7 +3063,11 @@ where
     }
 
     /// Handles peer registration. When a peer is created, it will register an apply delegate.
-    fn handle_registration(&mut self, reg: Registration) {
+    fn handle_registration<W: WriteBatch<EK>>(
+        &mut self,
+        reg: Registration,
+        apply_ctx: &mut ApplyContext<EK, W>,
+    ) {
         info!(
             "re-register to apply delegates";
             "region_id" => self.delegate.region_id(),
@@ -3074,6 +3078,8 @@ where
         self.delegate.term = reg.term;
         self.delegate.clear_all_commands_as_stale();
         self.delegate = ApplyDelegate::from_registration(reg);
+        let applys = apply_ctx.memory_trace.applys.lock().unwrap();
+        self.delegate.trace = applys.get(&self.delegate.id).cloned();
     }
 
     /// Handles apply tasks, and uses the apply delegate to handle the committed entries.
@@ -3409,9 +3415,7 @@ where
     ) {
         if self.delegate.trace.is_none() {
             let mut applys = apply_ctx.memory_trace.applys.lock().unwrap();
-            let trace = applys.entry(self.delegate.id).or_default().clone();
-            drop(applys);
-            self.delegate.trace = Some(trace);
+            self.delegate.trace = Some(applys.entry(self.delegate.id).or_default().clone());
         }
         let mut channel_timer = None;
         let mut drainer = msgs.drain(..);
@@ -3427,7 +3431,7 @@ where
                         break;
                     }
                 }
-                Some(Msg::Registration(reg)) => self.handle_registration(reg),
+                Some(Msg::Registration(reg)) => self.handle_registration(reg, apply_ctx),
                 Some(Msg::Destroy(d)) => self.handle_destroy(apply_ctx, d),
                 Some(Msg::LogsUpToDate(cul)) => self.logs_up_to_date_for_merge(apply_ctx, cul),
                 Some(Msg::Noop) => {}

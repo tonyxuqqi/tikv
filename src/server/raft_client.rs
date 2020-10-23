@@ -15,6 +15,7 @@ use grpcio::{
 };
 use kvproto::raft_serverpb::{Done, RaftMessage};
 use kvproto::tikvpb::{BatchRaftMessage, TikvClient};
+use memory_trace_macros::MemoryTraceHelper;
 use raft::SnapshotStatus;
 use raftstore::errors::DiscardReason;
 use raftstore::router::RaftStoreRouter;
@@ -23,12 +24,14 @@ use std::collections::VecDeque;
 use std::ffi::CString;
 use std::marker::Unpin;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{cmp, mem, result};
+use tikv_alloc::trace::{MemoryTrace, MemoryTraceProvider};
 use tikv_util::collections::{HashMap, HashSet};
 use tikv_util::lru::LruCache;
+use tikv_util::memory::HeapSize;
 use tikv_util::timer::GLOBAL_TIMER_HANDLE;
 use tikv_util::worker::Scheduler;
 use yatp::task::future::TaskCell;
@@ -44,21 +47,45 @@ static CONN_ID: AtomicI32 = AtomicI32::new(0);
 
 const _ON_RESOLVE_FP: &str = "transport_snapshot_on_resolve";
 
+pub struct CachedSizeMessage {
+    msg: RaftMessage,
+    size: usize,
+}
+
+impl CachedSizeMessage {
+    fn new(msg: RaftMessage) -> CachedSizeMessage {
+        let mut msg_size = msg.start_key.len() + msg.end_key.len();
+        for entry in msg.get_message().get_entries() {
+            msg_size += entry.data.len();
+        }
+        CachedSizeMessage {
+            msg,
+            size: msg_size,
+        }
+    }
+}
+
 /// A quick queue for sending raft messages.
 struct Queue {
-    buf: ArrayQueue<RaftMessage>,
+    buf: ArrayQueue<CachedSizeMessage>,
     /// A flag indicates whether the queue can still accept messages.
     connected: AtomicBool,
     waker: Mutex<Option<Waker>>,
+    mem_size: RaftClientMemoryTrace,
 }
 
 impl Queue {
     /// Creates a Queue that can store at lease `cap` messages.
-    fn with_capacity(cap: usize) -> Queue {
+    fn with_capacity(cap: usize, mem_size: RaftClientMemoryTrace) -> Queue {
+        let buf = ArrayQueue::new(cap);
+        mem_size
+            .mem_size
+            .fetch_add(buf.heap_size(), Ordering::Relaxed);
         Queue {
-            buf: ArrayQueue::new(cap),
+            buf,
             connected: AtomicBool::new(true),
             waker: Mutex::new(None),
+            mem_size,
         }
     }
 
@@ -72,8 +99,12 @@ impl Queue {
         // Another way is pop the old messages, but it makes things
         // complicated.
         if self.connected.load(Ordering::Relaxed) {
+            let msg = CachedSizeMessage::new(msg);
+            let size = msg.size;
             match self.buf.push(msg) {
-                Ok(()) => (),
+                Ok(()) => {
+                    self.mem_size.mem_size.fetch_add(size, Ordering::Relaxed);
+                }
                 Err(PushError(_)) => return Err(DiscardReason::Full),
             }
         } else {
@@ -107,8 +138,16 @@ impl Queue {
     }
 
     /// Gets message from the head of the queue.
-    fn try_pop(&self) -> Option<RaftMessage> {
-        self.buf.pop().ok()
+    fn try_pop(&self) -> Option<CachedSizeMessage> {
+        match self.buf.pop() {
+            Ok(msg) => {
+                self.mem_size
+                    .mem_size
+                    .fetch_sub(msg.size, Ordering::Relaxed);
+                Some(msg)
+            }
+            Err(_) => None,
+        }
     }
 
     /// Same as `try_pop` but register interest on readiness when `None` is returned.
@@ -116,20 +155,26 @@ impl Queue {
     /// The method should be called in polling context. If the queue is empty,
     /// it will register current polling task for notifications.
     #[inline]
-    fn pop(&self, ctx: &Context) -> Option<RaftMessage> {
-        match self.buf.pop() {
-            Ok(msg) => Some(msg),
-            Err(_) => {
-                {
-                    let mut waker = self.waker.lock().unwrap();
-                    *waker = Some(ctx.waker().clone());
-                }
-                match self.buf.pop() {
-                    Ok(msg) => Some(msg),
-                    Err(_) => None,
-                }
-            }
+    fn pop(&self, ctx: &Context) -> Option<CachedSizeMessage> {
+        let res = self.try_pop();
+        if res.is_some() {
+            return res;
         }
+
+        {
+            let mut waker = self.waker.lock().unwrap();
+            *waker = Some(ctx.waker().clone());
+        }
+        self.try_pop()
+    }
+}
+
+impl Drop for Queue {
+    fn drop(&mut self) {
+        self.mem_size
+            .mem_size
+            .fetch_sub(self.buf.heap_size(), Ordering::Relaxed);
+        while self.try_pop().is_some() {}
     }
 }
 
@@ -141,7 +186,7 @@ trait Buffer {
     /// A full buffer should be flushed successfully before calling `push`.
     fn full(&self) -> bool;
     /// Pushes the message into buffer.
-    fn push(&mut self, msg: RaftMessage);
+    fn push(&mut self, msg: CachedSizeMessage);
     /// Checks if the batch is empty.
     fn empty(&self) -> bool;
     /// Flushes the message to grpc.
@@ -158,7 +203,7 @@ trait Buffer {
 /// A buffer for BatchRaftMessage.
 struct BatchMessageBuffer {
     batch: BatchRaftMessage,
-    overflowing: Option<RaftMessage>,
+    overflowing: Option<CachedSizeMessage>,
     size: usize,
     cfg: Arc<Config>,
 }
@@ -183,22 +228,18 @@ impl Buffer for BatchMessageBuffer {
     }
 
     #[inline]
-    fn push(&mut self, msg: RaftMessage) {
-        let mut msg_size = msg.start_key.len() + msg.end_key.len();
-        for entry in msg.get_message().get_entries() {
-            msg_size += entry.data.len();
-        }
+    fn push(&mut self, msg: CachedSizeMessage) {
         // To avoid building too large batch, we limit each batch's size. Since `msg_size`
         // is estimated, `GRPC_SEND_MSG_BUF` is reserved for errors.
         if self.size > 0
-            && (self.size + msg_size + GRPC_SEND_MSG_BUF >= self.cfg.max_grpc_send_msg_len as usize
+            && (self.size + msg.size + GRPC_SEND_MSG_BUF >= self.cfg.max_grpc_send_msg_len as usize
                 || self.batch.get_msgs().len() >= RAFT_MSG_MAX_BATCH_SIZE)
         {
             self.overflowing = Some(msg);
             return;
         }
-        self.size += msg_size;
-        self.batch.mut_msgs().push(msg);
+        self.size += msg.size;
+        self.batch.mut_msgs().push(msg.msg);
     }
 
     #[inline]
@@ -229,7 +270,7 @@ impl Buffer for BatchMessageBuffer {
         self.batch.mut_msgs().clear();
 
         if let Some(ref msg) = self.overflowing {
-            hook(msg);
+            hook(&msg.msg);
         }
         self.overflowing.take();
     }
@@ -257,8 +298,8 @@ impl Buffer for MessageBuffer {
     }
 
     #[inline]
-    fn push(&mut self, msg: RaftMessage) {
-        self.batch.push_back(msg);
+    fn push(&mut self, msg: CachedSizeMessage) {
+        self.batch.push_back(msg.msg);
     }
 
     #[inline]
@@ -418,8 +459,8 @@ where
                 Some(msg) => msg,
                 None => return,
             };
-            if msg.get_message().has_snapshot() {
-                self.send_snapshot_sock(msg);
+            if msg.msg.get_message().has_snapshot() {
+                self.send_snapshot_sock(msg.msg);
                 continue;
             } else {
                 self.buffer.push(msg);
@@ -580,7 +621,7 @@ where
         let len = self.queue.len();
         for _ in 0..len {
             let msg = self.queue.try_pop().unwrap();
-            report_unreachable(&self.builder.router, &msg)
+            report_unreachable(&self.builder.router, &msg.msg)
         }
     }
 
@@ -752,6 +793,18 @@ struct CachedQueue {
     dirty: bool,
 }
 
+#[derive(MemoryTraceHelper, Default, Clone)]
+struct RaftClientMemoryTrace {
+    mem_size: Arc<AtomicUsize>,
+}
+
+impl MemoryTraceProvider for RaftClientMemoryTrace {
+    fn trace(&mut self, dump: &mut MemoryTrace) {
+        let s = RaftClientMemoryTrace::trace(self, "RaftClient", dump);
+        dump.add_size(s);
+    }
+}
+
 /// A raft client that can manages connections correctly.
 ///
 /// A correct usage of raft client is:
@@ -770,6 +823,7 @@ pub struct RaftClient<S, R> {
     need_flush: Vec<(u64, usize)>,
     future_pool: Arc<ThreadPool<TaskCell>>,
     builder: ConnectionBuilder<S, R>,
+    trace: RaftClientMemoryTrace,
 }
 
 impl<S, R> RaftClient<S, R>
@@ -783,12 +837,15 @@ where
                 .max_thread_count(1)
                 .build_future_pool(),
         );
+        let trace = RaftClientMemoryTrace::default();
+        tikv_alloc::trace::register_provider(Box::new(trace.clone()));
         RaftClient {
             pool: Arc::default(),
             cache: LruCache::with_capacity_and_sample(0, 7),
             need_flush: vec![],
             future_pool,
             builder,
+            trace,
         }
     }
 
@@ -806,7 +863,8 @@ where
                 pool.connections
                     .entry((store_id, conn_id))
                     .or_insert_with(|| {
-                        let queue = Arc::new(Queue::with_capacity(QUEUE_CAPACITY));
+                        let queue =
+                            Arc::new(Queue::with_capacity(QUEUE_CAPACITY, self.trace.clone()));
                         let back_end = StreamBackEnd {
                             store_id,
                             queue: queue.clone(),
@@ -924,6 +982,7 @@ where
             need_flush: vec![],
             future_pool: self.future_pool.clone(),
             builder: self.builder.clone(),
+            trace: self.trace.clone(),
         }
     }
 }

@@ -4742,6 +4742,7 @@ dependencies = [
  "log",
  "log_wrappers",
  "match_template",
+ "memory-trace-macros",
  "mime",
  "minitrace",
  "more-asserts",

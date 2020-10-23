@@ -1,6 +1,7 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use crate::collections::HashMap;
+use crossbeam::queue::ArrayQueue;
 use kvproto::metapb::{Region, RegionEpoch};
 use std::collections::{BTreeMap, VecDeque};
 use std::mem;
@@ -46,6 +47,13 @@ impl<K> HeapSize for Vec<K> {
 }
 
 impl<K> HeapSize for VecDeque<K> {
+    #[inline]
+    fn heap_size(&self) -> usize {
+        self.capacity() * mem::size_of::<K>()
+    }
+}
+
+impl<K> HeapSize for ArrayQueue<K> {
     #[inline]
     fn heap_size(&self) -> usize {
         self.capacity() * mem::size_of::<K>()
