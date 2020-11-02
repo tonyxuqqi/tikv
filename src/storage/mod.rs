@@ -199,6 +199,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
             config.scheduler_worker_pool_size,
             config.scheduler_pending_write_threshold.0 as usize,
             pipelined_pessimistic_lock,
+            config.enable_async_apply_prewrite,
         );
 
         info!("Storage started.");
@@ -405,7 +406,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                         ) = match req_snap {
                             Ok(req_snap) => req_snap,
                             Err(e) => {
-                                results.push(Err(e.into()));
+                                results.push(Err(e));
                                 continue;
                             }
                         };
@@ -1528,6 +1529,11 @@ impl<E: Engine, L: LockManager> TestStorageBuilder<E, L> {
         self
     }
 
+    pub fn set_async_apply_prewrite(mut self, enabled: bool) -> Self {
+        self.config.enable_async_apply_prewrite = enabled;
+        self
+    }
+
     /// Build a `Storage<E>`.
     pub fn build(self) -> Result<Storage<E, L>> {
         let read_pool = build_read_pool_for_test(
@@ -2628,7 +2634,7 @@ mod tests {
         )));
         storage
             .sched_txn_command::<()>(
-                commands::Pause::new(vec![Key::from_raw(b"x")], 1000, Context::default()).into(),
+                commands::Pause::new(vec![Key::from_raw(b"x")], 1000, Context::default()),
                 expect_ok_callback(tx.clone(), 1),
             )
             .unwrap();
@@ -3921,7 +3927,9 @@ mod tests {
                     false,
                     3,
                     TimeStamp::default(),
+                    TimeStamp::default(),
                     None,
+                    false,
                     Context::default(),
                 ),
                 expect_ok_callback(tx.clone(), 0),
@@ -4497,7 +4505,9 @@ mod tests {
                     false,
                     3,
                     ts(10, 1),
+                    TimeStamp::default(),
                     Some(vec![b"k1".to_vec(), b"k2".to_vec()]),
+                    false,
                     Context::default(),
                 ),
                 expect_ok_callback(tx.clone(), 0),
@@ -4628,7 +4638,9 @@ mod tests {
                     false,
                     2,
                     TimeStamp::zero(),
+                    TimeStamp::default(),
                     None,
+                    false,
                     Context::default(),
                 ),
                 expect_ok_callback(tx.clone(), 0),
@@ -4700,7 +4712,9 @@ mod tests {
                     false,
                     2,
                     TimeStamp::zero(),
+                    TimeStamp::default(),
                     None,
+                    false,
                     Context::default(),
                 ),
                 expect_ok_callback(tx.clone(), 0),
@@ -4816,7 +4830,9 @@ mod tests {
                     10.into(),
                     1,
                     TimeStamp::zero(),
+                    TimeStamp::default(),
                     None,
+                    false,
                     Context::default(),
                 ),
                 expect_ok_callback(tx.clone(), 0),
@@ -5487,7 +5503,9 @@ mod tests {
                     false,
                     3,
                     TimeStamp::default(),
+                    TimeStamp::default(),
                     Some(vec![b"a".to_vec(), b"b".to_vec()]),
+                    false,
                     Context::default(),
                 ),
                 Box::new(move |res| {
@@ -5529,7 +5547,9 @@ mod tests {
                     400.into(),
                     2,
                     401.into(),
+                    TimeStamp::default(),
                     Some(vec![b"e".to_vec()]),
+                    false,
                     Context::default(),
                 ),
                 Box::new(move |res| {
