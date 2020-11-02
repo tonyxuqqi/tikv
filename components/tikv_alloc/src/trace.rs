@@ -3,6 +3,7 @@
 use lazy_static::lazy_static;
 use std::num::NonZeroU64;
 use std::sync::Mutex;
+use std::fmt::{self, Display};
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum Id {
@@ -28,6 +29,15 @@ impl From<NonZeroU64> for Id {
     #[inline]
     fn from(id: NonZeroU64) -> Self {
         Id::Number(id.into())
+    }
+}
+
+impl Display for Id {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Id::Number(n) => write!(f, "{}", n),
+            Id::Name(n) => write!(f, "{}", n),
+        }
     }
 }
 
@@ -73,6 +83,14 @@ impl MemoryTrace {
 
     pub fn size(&self) -> usize {
         self.size.unwrap_or_default()
+    }
+
+    pub fn id(&self) -> Id {
+        self.id
+    }
+
+    pub fn children(&self) -> &[MemoryTrace] {
+        &self.children
     }
 }
 

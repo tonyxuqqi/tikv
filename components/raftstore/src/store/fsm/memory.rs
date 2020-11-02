@@ -70,7 +70,7 @@ impl MemoryTraceProvider for RaftStoreMemoryProvider {
         size += meta.region_ranges.heap_size()
             + meta.regions.heap_size()
             + meta.readers.heap_size()
-            + meta.pending_votes.heap_size()
+            + meta.pending_msgs.heap_size()
             + meta.pending_snapshot_regions.heap_size()
             + meta.pending_merge_targets.heap_size()
             + meta.targets_map.heap_size()
