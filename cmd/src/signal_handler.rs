@@ -21,11 +21,16 @@ mod imp {
         } else {
             write!(trace, ";{}", snapshot.id())?;
         }
+        let mut total = 0;
         append_readable_size(trace, snapshot.size());
         for c in snapshot.children() {
             fill_flamegraph(buffer, trace, c)?;
+            total += c.size();
         }
-        write!(buffer, "{} {}\n", trace, snapshot.size())?;
+        // When merging frame, size will of children will also be counted.
+        if snapshot.size() > total {
+            write!(buffer, "{} {}\n", trace, snapshot.size() -  total)?;
+        }
         trace.truncate(origin_len);
         Ok(())
     }
