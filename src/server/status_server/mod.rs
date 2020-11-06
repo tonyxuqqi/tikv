@@ -29,9 +29,11 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio_openssl::SslStream;
 
 use std::error::Error as StdError;
+use std::fmt::Write;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::result;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -75,6 +77,59 @@ mod profiler_guard {
             let _ = deactivate_prof();
         }
     }
+}
+
+fn fill_flamegraph(
+    buffer: &mut String,
+    trace: &mut String,
+    snapshot: &tikv_alloc::trace::MemoryTrace,
+) {
+    let origin_len = trace.len();
+    if trace.is_empty() {
+        write!(trace, "{}", snapshot.id()).unwrap();
+    } else {
+        write!(trace, ";{}", snapshot.id()).unwrap();
+    }
+    let mut total = 0;
+    append_readable_size(trace, snapshot.size());
+    for c in snapshot.children() {
+        fill_flamegraph(buffer, trace, c);
+        total += c.size();
+    }
+    // When merging frame, size will of children will also be counted.
+    if snapshot.size() > total {
+        writeln!(buffer, "{} {}", trace, snapshot.size() - total).unwrap();
+    }
+    trace.truncate(origin_len);
+}
+
+fn append_readable_size(s: &mut String, size: usize) {
+    let units = &["", "KiB", "MiB", "GiB"];
+    let mut size = size as f64;
+    for unit in units {
+        if size > 1024.0 {
+            size /= 1024.0;
+            continue;
+        }
+        write!(s, "-{:.1}{}", size, unit).unwrap();
+        return;
+    }
+    write!(s, " {:.1}TiB", size).unwrap();
+}
+
+fn dump_memory_trace(
+    snapshot: &tikv_alloc::trace::MemoryTrace,
+) -> result::Result<Vec<u8>, Box<dyn StdError>> {
+    let mut buffer = String::new();
+    let mut trace = String::new();
+    fill_flamegraph(&mut buffer, &mut trace, &snapshot);
+    let mut out = Vec::default();
+    inferno::flamegraph::from_lines(
+        &mut inferno::flamegraph::Options::default(),
+        buffer.lines(),
+        &mut out,
+    )?;
+    Ok(out)
 }
 
 const COMPONENT_REQUEST_RETRY: usize = 5;
@@ -232,6 +287,16 @@ where
                     .unwrap();
                 Ok(response)
             }
+            Err(err) => Ok(StatusServer::err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                err.to_string(),
+            )),
+        }
+    }
+
+    fn memory_trace_to_resp() -> hyper::Result<Response<Body>> {
+        match dump_memory_trace(&tikv_alloc::trace::snapshot()) {
+            Ok(buf) => Ok(StatusServer::err_response(StatusCode::OK, buf)),
             Err(err) => Ok(StatusServer::err_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 err.to_string(),
@@ -706,6 +771,7 @@ where
                             (Method::GET, "/debug/pprof/heap") => {
                                 Self::dump_prof_to_resp(req).await
                             }
+                            (Method::GET, "/debug/trace/memory") => Self::memory_trace_to_resp(),
                             (Method::GET, "/config") => {
                                 Self::get_config(req, &cfg_controller).await
                             }

@@ -1,9 +1,9 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use lazy_static::lazy_static;
+use std::fmt::{self, Display};
 use std::num::NonZeroU64;
 use std::sync::Mutex;
-use std::fmt::{self, Display};
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum Id {

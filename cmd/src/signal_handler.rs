@@ -9,12 +9,16 @@ mod imp {
     use libc::c_int;
     use nix::sys::signal::{SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2};
     use signal::trap::Trap;
-    use tikv_util::metrics;
-    use std::{fmt, env, error};
     use std::fmt::Write;
     use std::fs::File;
+    use std::{env, error, fmt};
+    use tikv_util::metrics;
 
-    fn fill_flamegraph(buffer: &mut String, trace: &mut String, snapshot: &tikv_alloc::trace::MemoryTrace) -> fmt::Result {
+    fn fill_flamegraph(
+        buffer: &mut String,
+        trace: &mut String,
+        snapshot: &tikv_alloc::trace::MemoryTrace,
+    ) -> fmt::Result {
         let origin_len = trace.len();
         if trace.is_empty() {
             write!(trace, "{}", snapshot.id())?;
@@ -29,7 +33,7 @@ mod imp {
         }
         // When merging frame, size will of children will also be counted.
         if snapshot.size() > total {
-            write!(buffer, "{} {}\n", trace, snapshot.size() -  total)?;
+            write!(buffer, "{} {}\n", trace, snapshot.size() - total)?;
         }
         trace.truncate(origin_len);
         Ok(())
@@ -49,16 +53,22 @@ mod imp {
         write!(s, " {:.1}TiB", size).unwrap();
     }
 
-    fn generate_flamegraph(snapshot: &tikv_alloc::trace::MemoryTrace) -> Result<(), Box<dyn error::Error>> {
+    fn generate_flamegraph(
+        snapshot: &tikv_alloc::trace::MemoryTrace,
+    ) -> Result<(), Box<dyn error::Error>> {
         let mut buffer = String::new();
         let mut trace = String::new();
         fill_flamegraph(&mut buffer, &mut trace, &snapshot)?;
-        
+
         let path = env::temp_dir().join("tikv_memory.svg");
         let out = File::create(&path)?;
         info!("{}", buffer);
-        inferno::flamegraph::from_lines(&mut inferno::flamegraph::Options::default(), buffer.lines(), out)?;
-        
+        inferno::flamegraph::from_lines(
+            &mut inferno::flamegraph::Options::default(),
+            buffer.lines(),
+            out,
+        )?;
+
         info!("memory flamegraph is generated at {}", path.display());
         Ok(())
     }
