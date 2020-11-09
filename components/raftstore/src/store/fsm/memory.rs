@@ -2,6 +2,7 @@
 
 use super::StoreMeta;
 use crate::store::fsm::{ApplyFsm, PeerFsm};
+use batch_system::RouterTrace;
 use engine_rocks::RocksEngine;
 use memory_trace_macros::MemoryTraceHelper;
 use std::mem;
@@ -45,6 +46,21 @@ pub struct RaftStoreMemoryTrace {
     pub applys: Mutex<HashMap<u64, Arc<ApplyMemoryTrace>>>,
     pub raft_context: Mutex<Vec<(ThreadId, Arc<RaftContextTrace>)>>,
     pub apply_context: Mutex<Vec<(ThreadId, Arc<ApplyContextTrace>)>>,
+    pub raft_router: RouterTrace,
+    pub apply_router: RouterTrace,
+}
+
+impl RaftStoreMemoryTrace {
+    pub fn new(raft_router: RouterTrace, apply_router: RouterTrace) -> RaftStoreMemoryTrace {
+        RaftStoreMemoryTrace {
+            peers: Default::default(),
+            applys: Default::default(),
+            raft_context: Default::default(),
+            apply_context: Default::default(),
+            raft_router,
+            apply_router,
+        }
+    }
 }
 
 pub struct RaftStoreMemoryProvider {
@@ -123,6 +139,14 @@ impl MemoryTraceProvider for RaftStoreMemoryProvider {
         }
         apply_context_trace.set_size(size);
         drop(apply_context);
+        sub_trace.add_size(size);
+
+        size = self.components.raft_router.trace("Raft Router", sub_trace);
+        sub_trace.add_size(size);
+        size = self
+            .components
+            .apply_router
+            .trace("Apply Router", sub_trace);
         sub_trace.add_size(size);
 
         size = sub_trace.size();

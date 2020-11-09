@@ -3826,7 +3826,7 @@ where
         // queued inside both queue of control fsm and normal fsm, which can reorder
         // messages.
         let (sender, apply_fsm) = ApplyFsm::from_registration(reg);
-        let mailbox = BasicMailbox::new(sender, apply_fsm);
+        let mailbox = BasicMailbox::new(sender, apply_fsm, self.state_cnt().clone());
         self.register(region_id, mailbox);
     }
 }
@@ -3854,7 +3854,10 @@ impl<EK: KvEngine> ApplyBatchSystem<EK> {
         let mut mailboxes = Vec::with_capacity(peers.size_hint().0);
         for peer in peers {
             let (tx, fsm) = ApplyFsm::from_peer(peer);
-            mailboxes.push((peer.region().get_id(), BasicMailbox::new(tx, fsm)));
+            mailboxes.push((
+                peer.region().get_id(),
+                BasicMailbox::new(tx, fsm, self.router().state_cnt().clone()),
+            ));
         }
         self.router().register_all(mailboxes);
     }

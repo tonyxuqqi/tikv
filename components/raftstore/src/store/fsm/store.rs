@@ -1209,7 +1209,12 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
         global_replication_state: Arc<Mutex<GlobalReplicationState>>,
         concurrency_manager: ConcurrencyManager,
     ) -> Result<()> {
-        let memory_trace = Arc::new(RaftStoreMemoryTrace::default());
+        let apply_router_trace = self.apply_router.trace();
+        let raft_router_trace = self.router.trace();
+        let memory_trace = Arc::new(RaftStoreMemoryTrace::new(
+            raft_router_trace,
+            apply_router_trace,
+        ));
         let provider = Box::new(RaftStoreMemoryProvider::new(
             store_meta.clone(),
             memory_trace.clone(),
@@ -1329,7 +1334,10 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
         let mut address = Vec::with_capacity(region_peers.len());
         for (tx, fsm) in region_peers {
             address.push(fsm.region_id());
-            mailboxes.push((fsm.region_id(), BasicMailbox::new(tx, fsm)));
+            mailboxes.push((
+                fsm.region_id(),
+                BasicMailbox::new(tx, fsm, self.router.state_cnt().clone()),
+            ));
         }
         self.router.register_all(mailboxes);
 
@@ -1844,7 +1852,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport, C: PdClient>
         meta.regions
             .insert(region_id, peer.get_peer().region().to_owned());
 
-        let mailbox = BasicMailbox::new(tx, peer);
+        let mailbox = BasicMailbox::new(tx, peer, self.ctx.router.state_cnt().clone());
         self.ctx.router.register(region_id, mailbox);
         self.ctx
             .router

@@ -270,6 +270,7 @@ dependencies = [
  "serde_derive",
  "slog",
  "slog-global",
+ "tikv_alloc",
  "tikv_util",
 ]
 
@@ -589,7 +590,6 @@ dependencies = [
  "futures 0.3.7",
  "grpcio",
  "hex 0.4.2",
- "inferno 0.10.1",
  "keys",
  "kvproto",
  "libc",
