@@ -28,6 +28,7 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio_openssl::SslStream;
 
+use std::borrow::Cow;
 use std::error::Error as StdError;
 use std::fmt::Write;
 use std::marker::PhantomData;
@@ -46,6 +47,7 @@ use pd_client::RpcClient;
 use security::{self, SecurityConfig};
 use tikv_alloc::error::ProfError;
 use tikv_util::collections::HashMap;
+use tikv_util::config::ReadableSize;
 use tikv_util::metrics::dump;
 use tikv_util::timer::GLOBAL_TIMER_HANDLE;
 
@@ -79,21 +81,45 @@ mod profiler_guard {
     }
 }
 
-fn fill_flamegraph(
+fn trace_to_json(buffer: &mut String, snapshot: &tikv_alloc::trace::MemoryTrace) {
+    write!(buffer, r#""{}":"#, snapshot.id()).unwrap();
+    if snapshot.children().is_empty() {
+        buffer.push('"');
+        ReadableSize(snapshot.size() as u64).round_and_format(buffer);
+        buffer.push('"');
+    } else {
+        buffer.push('{');
+        let mut total = 0;
+        for c in snapshot.children() {
+            trace_to_json(buffer, c);
+            buffer.push(',');
+            total += c.size();
+        }
+        buffer.push_str(r#""total":""#);
+        ReadableSize(snapshot.size() as u64).round_and_format(buffer);
+        if snapshot.size() > total {
+            buffer.push_str(r#"","size":""#);
+            ReadableSize((snapshot.size() - total) as u64).round_and_format(buffer);
+        }
+        buffer.push_str(r#""}"#);
+    }
+}
+
+fn trace_to_flamegraph(
     buffer: &mut String,
     trace: &mut String,
     snapshot: &tikv_alloc::trace::MemoryTrace,
 ) {
     let origin_len = trace.len();
     if trace.is_empty() {
-        write!(trace, "{}", snapshot.id()).unwrap();
+        write!(trace, "{}-", snapshot.id()).unwrap();
     } else {
-        write!(trace, ";{}", snapshot.id()).unwrap();
+        write!(trace, ";{}-", snapshot.id()).unwrap();
     }
+    ReadableSize(snapshot.size() as u64).round_and_format(trace);
     let mut total = 0;
-    append_readable_size(trace, snapshot.size());
     for c in snapshot.children() {
-        fill_flamegraph(buffer, trace, c);
+        trace_to_flamegraph(buffer, trace, c);
         total += c.size();
     }
     // When merging frame, size will of children will also be counted.
@@ -103,33 +129,27 @@ fn fill_flamegraph(
     trace.truncate(origin_len);
 }
 
-fn append_readable_size(s: &mut String, size: usize) {
-    let units = &["", "KiB", "MiB", "GiB"];
-    let mut size = size as f64;
-    for unit in units {
-        if size > 1024.0 {
-            size /= 1024.0;
-            continue;
-        }
-        write!(s, "-{:.1}{}", size, unit).unwrap();
-        return;
-    }
-    write!(s, " {:.1}TiB", size).unwrap();
-}
-
 fn dump_memory_trace(
     snapshot: &tikv_alloc::trace::MemoryTrace,
+    is_json: bool,
 ) -> result::Result<Vec<u8>, Box<dyn StdError>> {
     let mut buffer = String::new();
-    let mut trace = String::new();
-    fill_flamegraph(&mut buffer, &mut trace, &snapshot);
-    let mut out = Vec::default();
-    inferno::flamegraph::from_lines(
-        &mut inferno::flamegraph::Options::default(),
-        buffer.lines(),
-        &mut out,
-    )?;
-    Ok(out)
+    if is_json {
+        buffer.push('{');
+        trace_to_json(&mut buffer, snapshot);
+        buffer.push('}');
+        Ok(buffer.into_bytes())
+    } else {
+        let mut trace = String::new();
+        trace_to_flamegraph(&mut buffer, &mut trace, &snapshot);
+        let mut out = Vec::default();
+        inferno::flamegraph::from_lines(
+            &mut inferno::flamegraph::Options::default(),
+            buffer.lines(),
+            &mut out,
+        )?;
+        Ok(out)
+    }
 }
 
 const COMPONENT_REQUEST_RETRY: usize = 5;
@@ -294,9 +314,30 @@ where
         }
     }
 
-    fn memory_trace_to_resp() -> hyper::Result<Response<Body>> {
-        match dump_memory_trace(&tikv_alloc::trace::snapshot()) {
-            Ok(buf) => Ok(StatusServer::err_response(StatusCode::OK, buf)),
+    fn memory_trace_to_resp(req: Request<Body>) -> hyper::Result<Response<Body>> {
+        let query = match req.uri().query() {
+            Some(query) => query,
+            None => {
+                return Ok(StatusServer::err_response(
+                    StatusCode::BAD_REQUEST,
+                    "request should have the query part",
+                ));
+            }
+        };
+        let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+        let is_json = matches!(query_pairs.get("type"), Some(Cow::Borrowed("json")));
+
+        match dump_memory_trace(&tikv_alloc::trace::snapshot(), is_json) {
+            Ok(buf) => {
+                if is_json {
+                    Ok(Response::builder()
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(buf))
+                        .unwrap())
+                } else {
+                    Ok(StatusServer::err_response(StatusCode::OK, buf))
+                }
+            }
             Err(err) => Ok(StatusServer::err_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 err.to_string(),
@@ -771,7 +812,7 @@ where
                             (Method::GET, "/debug/pprof/heap") => {
                                 Self::dump_prof_to_resp(req).await
                             }
-                            (Method::GET, "/debug/trace/memory") => Self::memory_trace_to_resp(),
+                            (Method::GET, "/debug/trace/memory") => Self::memory_trace_to_resp(req),
                             (Method::GET, "/config") => {
                                 Self::get_config(req, &cfg_controller).await
                             }
