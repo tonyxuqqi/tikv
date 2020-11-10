@@ -23,22 +23,16 @@ pub struct RouterTrace {
 }
 
 impl RouterTrace {
-    pub fn new(mailbox_unit: usize, state_unit: usize, message_unit: usize) -> RouterTrace {
-        RouterTrace {
-            alive: Arc::default(),
-            total: Arc::default(),
-            mailbox_unit,
-            state_unit,
-            message_unit,
-        }
-    }
-
     pub fn trace(&self, id: impl Into<Id>, sub_trace: &mut MemoryTrace) -> usize {
         let total = self.total.load(Ordering::Relaxed);
         let alive = self.alive.load(Ordering::Relaxed);
-        let leak = if total > alive { total - alive } else { 0 };
+        let leak = if total > alive + 1 {
+            total - alive - 1
+        } else {
+            0
+        };
         // hashbrown uses 7/8 of allocated memory.
-        let alive_mem = alive.next_power_of_two() * self.mailbox_unit * 8 / 7
+        let alive_mem = alive * self.mailbox_unit * 8 / 7
             + self.state_unit * alive
             + (self.message_unit + 8) * 31 * alive;
         let leak_mem = self.state_unit * leak + (self.message_unit + 8) * 31 * leak;
@@ -341,11 +335,13 @@ where
     }
 
     pub fn trace(&self) -> RouterTrace {
-        RouterTrace::new(
-            mem::size_of::<(u64, BasicMailbox<N>)>(),
-            mem::size_of::<FsmState<N>>(),
-            mem::size_of::<N::Message>(),
-        )
+        RouterTrace {
+            alive: self.normals.lock().unwrap().alive_cnt.clone(),
+            total: self.state_cnt.clone(),
+            mailbox_unit: mem::size_of::<(u64, BasicMailbox<N>)>(),
+            state_unit: mem::size_of::<FsmState<N>>(),
+            message_unit: mem::size_of::<N::Message>(),
+        }
     }
 }
 
