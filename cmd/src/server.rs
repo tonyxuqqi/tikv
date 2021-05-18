@@ -124,8 +124,9 @@ pub fn run_tikv(config: TiKvConfig) {
             tikv.run_server(server_config);
             tikv.run_status_server();
 
-            signal_handler::wait_for_signal(Some(tikv.engines.take().unwrap().engines));
-            tikv.stop();
+            let engines = tikv.engines.take().unwrap().engines.clone();
+            signal_handler::wait_for_signal(Some(engines.clone()));
+            tikv.stop(engines);
         }};
     }
 
@@ -921,7 +922,7 @@ impl<ER: RaftEngine> TiKVServer<ER> {
         }
     }
 
-    fn stop(self) {
+    fn stop(self, engines: Engines<RocksEngine, ER>) {
         let mut servers = self.servers.unwrap();
         servers
             .server
@@ -934,6 +935,17 @@ impl<ER: RaftEngine> TiKVServer<ER> {
         servers.lock_mgr.stop();
 
         self.to_stop.into_iter().for_each(|s| s.stop());
+        if self.config.raft_store.disable_kv_wal {
+            let db = engines.kv.as_inner();
+            for cf_name in db.cf_names() {
+                let cf = db.cf_handle(cf_name).unwrap();
+                if let Err(e) = db.flush_cf(cf, true) {
+                    error!("failed to flush kv engine"; "error" => ?e, "cf" => %cf_name);
+                } else {
+                    info!("flushed kv engine"; "cf" => %cf_name);
+                }
+            }
+        }
     }
 }
 

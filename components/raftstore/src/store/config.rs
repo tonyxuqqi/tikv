@@ -166,6 +166,8 @@ pub struct Config {
     pub dev_assert: bool,
     #[config(hidden)]
     pub apply_yield_duration: ReadableDuration,
+    #[config(skip)]
+    pub disable_kv_wal: bool,
 
     // Deprecated! These configuration has been moved to Coprocessor.
     // They are preserved for compatibility check.
@@ -249,6 +251,7 @@ impl Default for Config {
             hibernate_regions: tikv_util::build_on_master_branch(),
             dev_assert: false,
             apply_yield_duration: ReadableDuration::millis(500),
+            disable_kv_wal: false,
 
             // They are preserved for compatibility check.
             region_max_size: ReadableSize(0),
