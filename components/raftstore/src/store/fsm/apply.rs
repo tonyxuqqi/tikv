@@ -380,6 +380,7 @@ where
     sync_log_hint: bool,
     // Whether to use the delete range API instead of deleting one by one.
     use_delete_range: bool,
+    disable_kv_wal: bool,
 
     perf_context: EK::PerfContext,
 
@@ -445,6 +446,7 @@ where
             kv_wb_last_keys: 0,
             committed_count: 0,
             sync_log_hint: false,
+            disable_kv_wal: cfg.disable_kv_wal,
             exec_ctx: None,
             use_delete_range: cfg.use_delete_range,
             perf_context: engine.get_perf_context(cfg.perf_level, PerfContextKind::RaftstoreApply),
@@ -512,6 +514,7 @@ where
         if !self.kv_wb_mut().is_empty() {
             let mut write_opts = engine_traits::WriteOptions::new();
             write_opts.set_sync(need_sync);
+            write_opts.set_disable_wal(self.disable_kv_wal);
             self.kv_wb().write_opt(&write_opts).unwrap_or_else(|e| {
                 panic!("failed to write to engine: {:?}", e);
             });
