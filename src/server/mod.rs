@@ -26,7 +26,7 @@ pub use self::metrics::CONFIG_ROCKSDB_GAUGE;
 pub use self::metrics::CPU_CORES_QUOTA_GAUGE;
 pub use self::node::{create_raft_storage, Node};
 pub use self::proxy::{build_forward_option, get_target_address, Proxy};
-pub use self::raft_client::{ConnectionBuilder, RaftClient};
+pub use self::raft_client::{ConnectionBuilder, RaftClient, QUEUE_CAPACITY};
 pub use self::raftkv::RaftKv;
 pub use self::resolve::{PdStoreAddrResolver, StoreAddrResolver};
 pub use self::server::{Server, GRPC_THREAD_PREFIX};
