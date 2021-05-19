@@ -134,7 +134,13 @@ where
     pub fn try_bootstrap_store(&mut self, engines: Engines<RocksEngine, ER>) -> Result<()> {
         let mut store_id = self.check_store(&engines)?;
         if store_id == INVALID_ID {
-            store_id = self.alloc_id()?;
+            let cfg = self.store_cfg.value();
+            store_id = if cfg.id == 0 {
+                self.alloc_id()?
+            } else {
+                warn!("bootstrap with given ID"; "store_id" => cfg.id);
+                cfg.id
+            };
             debug!("alloc store id"; "store_id" => store_id);
             store::bootstrap_store(&engines, self.cluster_id, store_id)?;
             fail_point!("node_after_bootstrap_store", |_| Err(box_err!(

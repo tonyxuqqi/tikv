@@ -32,6 +32,9 @@ with_prefix!(prefix_store "store-");
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
+    /// ID for unsafe recover. TiKV will use this ID to bootstrap the node.
+    #[config(skip)]
+    pub id: u64,
     // minimizes disruption when a partitioned node rejoins the cluster by using a two phase election.
     #[config(skip)]
     pub prevote: bool,
@@ -198,6 +201,7 @@ impl Default for Config {
     fn default() -> Config {
         let split_size = ReadableSize::mb(coprocessor::config::SPLIT_SIZE_MB);
         Config {
+            id: 0,
             prevote: true,
             raftdb_path: String::new(),
             capacity: ReadableSize(0),
