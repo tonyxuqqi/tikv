@@ -257,7 +257,13 @@ where
     }
 
     fn bootstrap_store(&self, engines: &Engines<RocksEngine, ER>) -> Result<u64> {
-        let store_id = self.alloc_id()?;
+        let cfg = self.store_cfg.value();
+        let store_id = if cfg.id == 0 {
+            self.alloc_id()?
+        } else {
+            warn!("bootstrap with given ID"; "store_id" => cfg.id);
+            cfg.id
+        };
         debug!("alloc store id"; "store_id" => store_id);
 
         store::bootstrap_store(&engines, self.cluster_id, store_id)?;
