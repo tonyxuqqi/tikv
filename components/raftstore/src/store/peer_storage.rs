@@ -1436,6 +1436,7 @@ where
             Some(r) => r,
             None => return None,
         };
+        self.set_applied_term(self.apply_state.get_truncated_state().get_term());
         // cleanup data before scheduling apply task
         if self.is_initialized() {
             if let Err(e) = self.clear_extra_data(self.region(), &snap_region) {
