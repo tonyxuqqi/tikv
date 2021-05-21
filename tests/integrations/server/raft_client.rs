@@ -345,5 +345,8 @@ fn test_notify_early() {
     check_msg_count(500, &msg_count, tikv::server::QUEUE_CAPACITY * 3 + 1);
     drop(raft_client);
     drop(mock_server);
-    assert_eq!(msg_count.load(Ordering::SeqCst), tikv::server::QUEUE_CAPACITY * 3 + 1);
+    assert_eq!(
+        msg_count.load(Ordering::SeqCst),
+        tikv::server::QUEUE_CAPACITY * 3 + 1
+    );
 }

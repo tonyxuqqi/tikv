@@ -99,6 +99,7 @@ endpoints = [
 job = "tikv_1"
 
 [raftstore]
+id = 3
 prevote = false
 raftdb-path = "/var"
 capacity = 123
@@ -160,6 +161,7 @@ future-poll-size = 2
 hibernate-regions = false
 dev-assert = true
 perf-level = 5
+disable-kv-wal = true
 
 [coprocessor]
 split-region-on-table = false

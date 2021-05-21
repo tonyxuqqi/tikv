@@ -914,15 +914,13 @@ where
                 } else {
                     s.full = false;
                 }
-            } else {
-                if *need_flush {
-                    let l = self.pool.lock().unwrap();
-                    if let Some(q) = l.connections.get(&id) {
-                        q.notify();
-                        self.flush_cnt += 1;
-                    }
-                    continue;
+            } else if *need_flush {
+                let l = self.pool.lock().unwrap();
+                if let Some(q) = l.connections.get(&id) {
+                    q.notify();
+                    self.flush_cnt += 1;
                 }
+                continue;
             }
             REPORT_FAILURE_MSG_COUNTER
                 .with_label_values(&["full", &store_id.to_string()])
