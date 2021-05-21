@@ -693,7 +693,7 @@ where
 
     snap_state: RefCell<SnapState>,
     gen_snap_task: RefCell<Option<GenSnapTask>>,
-    region_sched: Scheduler<RegionTask<EK::Snapshot>>,
+    region_sched: Scheduler<RegionTask>,
     snap_tried_cnt: RefCell<usize>,
 
     // Entry cache if `ER doesn't have an internal entry cache.
@@ -745,7 +745,7 @@ where
     pub fn new(
         engines: Engines<EK, ER>,
         region: &metapb::Region,
-        region_sched: Scheduler<RegionTask<EK::Snapshot>>,
+        region_sched: Scheduler<RegionTask>,
         peer_id: u64,
         tag: String,
     ) -> Result<PeerStorage<EK, ER>> {
@@ -1685,22 +1685,22 @@ where
     Ok(())
 }
 
-pub fn do_snapshot<E>(
+pub fn do_snapshot<EK, ER>(
     mgr: SnapManager,
-    engine: &E,
-    kv_snap: E::Snapshot,
+    engines: &Engines<EK, ER>,
     region_id: u64,
-    last_applied_index_term: u64,
-    last_applied_state: RaftApplyState,
     for_balance: bool,
 ) -> raft::Result<Snapshot>
 where
-    E: KvEngine,
+    EK: KvEngine,
+    ER: RaftEngine,
 {
     debug!(
         "begin to generate a snapshot";
         "region_id" => region_id,
     );
+
+    let kv_snap = engines.kv.snapshot();
 
     let msg = kv_snap
         .get_msg_cf(CF_RAFT, &keys::apply_state_key(region_id))
@@ -1714,13 +1714,24 @@ where
         }
         Some(state) => state,
     };
-    assert_eq!(apply_state, last_applied_state);
 
-    let key = SnapKey::new(
-        region_id,
-        last_applied_index_term,
-        apply_state.get_applied_index(),
-    );
+    let apply_index = apply_state.get_applied_index();
+    let apply_term = if apply_index == apply_state.get_truncated_state().get_index() {
+        apply_state.get_truncated_state().get_term()
+    } else {
+        match engines.raft.get_entry(region_id, apply_index) {
+            Ok(Some(e)) => e.term,
+            Ok(None) => {
+                return Err(storage_error(format!(
+                    "could not load entry at {}",
+                    apply_index
+                )));
+            }
+            Err(e) => return Err(into_other::<_, raft::Error>(e)),
+        }
+    };
+
+    let key = SnapKey::new(region_id, apply_term, apply_index);
 
     mgr.register(key.clone(), SnapEntry::Generating);
     defer!(mgr.deregister(&key, &SnapEntry::Generating));
@@ -1755,7 +1766,7 @@ where
     snap_data.set_region(state.get_region().clone());
     let mut stat = SnapshotStatistics::new();
     s.build(
-        engine,
+        &engines.kv,
         &kv_snap,
         state.get_region(),
         &mut snap_data,
@@ -1855,7 +1866,7 @@ mod tests {
     use crate::store::worker::RegionRunner;
     use crate::store::worker::RegionTask;
     use crate::store::{bootstrap_store, initial_region, prepare_bootstrap_cluster};
-    use engine_test::kv::{KvTestEngine, KvTestSnapshot, KvTestWriteBatch};
+    use engine_test::kv::{KvTestEngine, KvTestWriteBatch};
     use engine_test::raft::{RaftTestEngine, RaftTestWriteBatch};
     use engine_traits::Engines;
     use engine_traits::{Iterable, SyncMutable, WriteBatch, WriteBatchExt};
@@ -1890,7 +1901,7 @@ mod tests {
     }
 
     fn new_storage(
-        sched: Scheduler<RegionTask<KvTestSnapshot>>,
+        sched: Scheduler<RegionTask>,
         path: &TempDir,
     ) -> PeerStorage<KvTestEngine, RaftTestEngine> {
         let kv_db = engine_test::kv::new_engine(path.path().to_str().unwrap(), None, ALL_CFS, None)
@@ -1942,7 +1953,7 @@ mod tests {
     }
 
     fn new_storage_from_ents(
-        sched: Scheduler<RegionTask<KvTestSnapshot>>,
+        sched: Scheduler<RegionTask>,
         path: &TempDir,
         ents: &[Entry],
     ) -> PeerStorage<KvTestEngine, RaftTestEngine> {
@@ -2190,30 +2201,6 @@ mod tests {
         }
     }
 
-    fn generate_and_schedule_snapshot(
-        gen_task: GenSnapTask,
-        engines: &Engines<KvTestEngine, RaftTestEngine>,
-        sched: &Scheduler<RegionTask<KvTestSnapshot>>,
-    ) -> Result<()> {
-        let apply_state: RaftApplyState = engines
-            .kv
-            .get_msg_cf(CF_RAFT, &keys::apply_state_key(gen_task.region_id))
-            .unwrap()
-            .unwrap();
-        let idx = apply_state.get_applied_index();
-        let entry = engines
-            .raft
-            .get_msg::<Entry>(&keys::raft_log_key(gen_task.region_id, idx))
-            .unwrap()
-            .unwrap();
-        gen_task.generate_and_schedule_snapshot::<KvTestEngine>(
-            engines.kv.clone().snapshot(),
-            entry.get_term(),
-            apply_state,
-            sched,
-        )
-    }
-
     #[test]
     fn test_storage_create_snapshot() {
         let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
@@ -2228,7 +2215,7 @@ mod tests {
         let mut s = new_storage_from_ents(sched.clone(), &td, &ents);
         let (router, _) = mpsc::sync_channel(100);
         let runner = RegionRunner::new(
-            s.engines.kv.clone(),
+            s.engines.clone(),
             mgr,
             0,
             true,
@@ -2241,7 +2228,7 @@ mod tests {
         assert_eq!(snap.unwrap_err(), unavailable);
         assert_eq!(*s.snap_tried_cnt.borrow(), 1);
         let gen_task = s.gen_snap_task.borrow_mut().take().unwrap();
-        generate_and_schedule_snapshot(gen_task, &s.engines, &sched).unwrap();
+        gen_task.generate_and_schedule_snapshot(&sched).unwrap();
         let snap = match *s.snap_state.borrow() {
             SnapState::Generating { ref receiver, .. } => {
                 receiver.recv_timeout(Duration::from_secs(3)).unwrap()
@@ -2317,7 +2304,7 @@ mod tests {
         assert_eq!(*s.snap_tried_cnt.borrow(), 1);
 
         let gen_task = s.gen_snap_task.borrow_mut().take().unwrap();
-        generate_and_schedule_snapshot(gen_task, &s.engines, &sched).unwrap();
+        gen_task.generate_and_schedule_snapshot(&sched).unwrap();
         match *s.snap_state.borrow() {
             SnapState::Generating { ref receiver, .. } => {
                 receiver.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -2332,7 +2319,7 @@ mod tests {
         // Disconnected channel should trigger another try.
         assert_eq!(s.snapshot(0).unwrap_err(), unavailable);
         let gen_task = s.gen_snap_task.borrow_mut().take().unwrap();
-        generate_and_schedule_snapshot(gen_task, &s.engines, &sched).unwrap_err();
+        gen_task.generate_and_schedule_snapshot(&sched).unwrap_err();
         assert_eq!(*s.snap_tried_cnt.borrow(), 2);
 
         for cnt in 2..super::MAX_SNAP_TRY_CNT + 10 {
@@ -2347,7 +2334,8 @@ mod tests {
             // Scheduled job failed should trigger .
             assert_eq!(s.snapshot(0).unwrap_err(), unavailable);
             let gen_task = s.gen_snap_task.borrow_mut().take().unwrap();
-            generate_and_schedule_snapshot(gen_task, &s.engines, &sched).unwrap_err();
+            gen_task.generate_and_schedule_snapshot(&sched).unwrap_err();
+            assert_eq!(*s.snap_tried_cnt.borrow(), cnt + 1);
         }
 
         // When retry too many times, it should report a different error.
@@ -2608,7 +2596,7 @@ mod tests {
         let s1 = new_storage_from_ents(sched.clone(), &td1, &ents);
         let (router, _) = mpsc::sync_channel(100);
         let runner = RegionRunner::new(
-            s1.engines.kv.clone(),
+            s1.engines.clone(),
             mgr,
             0,
             true,
@@ -2618,7 +2606,7 @@ mod tests {
         worker.start(runner);
         assert!(s1.snapshot(0).is_err());
         let gen_task = s1.gen_snap_task.borrow_mut().take().unwrap();
-        generate_and_schedule_snapshot(gen_task, &s1.engines, &sched).unwrap();
+        gen_task.generate_and_schedule_snapshot(&sched).unwrap();
 
         let snap1 = match *s1.snap_state.borrow() {
             SnapState::Generating { ref receiver, .. } => {

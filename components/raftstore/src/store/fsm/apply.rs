@@ -362,7 +362,7 @@ where
     timer: Option<Instant>,
     host: CoprocessorHost<EK>,
     importer: Arc<SSTImporter>,
-    region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
+    region_scheduler: Scheduler<RegionTask>,
     router: ApplyRouter<EK>,
     notifier: Box<dyn Notifier<EK>>,
     engine: EK,
@@ -417,7 +417,7 @@ where
         tag: String,
         host: CoprocessorHost<EK>,
         importer: Arc<SSTImporter>,
-        region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
+        region_scheduler: Scheduler<RegionTask>,
         engine: EK,
         router: ApplyRouter<EK>,
         notifier: Box<dyn Notifier<EK>>,
@@ -2933,28 +2933,15 @@ impl GenSnapTask {
         self.for_balance = true;
     }
 
-    pub fn generate_and_schedule_snapshot<EK>(
+    pub fn generate_and_schedule_snapshot(
         self,
-        kv_snap: EK::Snapshot,
-        last_applied_index_term: u64,
-        last_applied_state: RaftApplyState,
-        region_sched: &Scheduler<RegionTask<EK::Snapshot>>,
-    ) -> Result<()>
-    where
-        EK: KvEngine,
-    {
-        self.index
-            .store(last_applied_state.applied_index, Ordering::SeqCst);
+        region_sched: &Scheduler<RegionTask>,
+    ) -> Result<()> {
         let snapshot = RegionTask::Gen {
             region_id: self.region_id,
             notifier: self.snap_notifier,
             for_balance: self.for_balance,
-            last_applied_index_term,
-            last_applied_state,
             canceled: self.canceled,
-            // This snapshot may be held for a long time, which may cause too many
-            // open files in rocksdb.
-            kv_snap,
         };
         box_try!(region_sched.schedule(snapshot));
         Ok(())
@@ -3380,12 +3367,7 @@ where
             self.delegate.last_flush_applied_index = applied_index;
         }
 
-        if let Err(e) = snap_task.generate_and_schedule_snapshot::<EK>(
-            apply_ctx.engine.snapshot(),
-            self.delegate.applied_index_term,
-            self.delegate.apply_state.clone(),
-            &apply_ctx.region_scheduler,
-        ) {
+        if let Err(e) = snap_task.generate_and_schedule_snapshot(&apply_ctx.region_scheduler) {
             error!(
                 "schedule snapshot failed";
                 "error" => ?e,
@@ -3711,7 +3693,7 @@ pub struct Builder<EK: KvEngine, W: WriteBatch<EK>> {
     cfg: Arc<VersionTrack<Config>>,
     coprocessor_host: CoprocessorHost<EK>,
     importer: Arc<SSTImporter>,
-    region_scheduler: Scheduler<RegionTask<<EK as KvEngine>::Snapshot>>,
+    region_scheduler: Scheduler<RegionTask>,
     engine: EK,
     sender: Box<dyn Notifier<EK>>,
     router: ApplyRouter<EK>,
@@ -4404,16 +4386,11 @@ mod tests {
             }) => res,
             e => panic!("unexpected apply result: {:?}", e),
         };
-        let apply_state_key = keys::apply_state_key(2);
-        let apply_state = match snapshot_rx.recv_timeout(Duration::from_secs(3)) {
-            Ok(Some(RegionTask::Gen { kv_snap, .. })) => kv_snap
-                .get_msg_cf(CF_RAFT, &apply_state_key)
-                .unwrap()
-                .unwrap(),
+        match snapshot_rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(Some(RegionTask::Gen { .. })) => (),
             e => panic!("unexpected apply result: {:?}", e),
-        };
+        }
         assert_eq!(apply_res.region_id, 2);
-        assert_eq!(apply_res.apply_state, apply_state);
         assert_eq!(apply_res.apply_state.get_applied_index(), 5);
         assert!(apply_res.exec_res.is_empty());
         // empty entry will make applied_index step forward and should write apply state to engine.

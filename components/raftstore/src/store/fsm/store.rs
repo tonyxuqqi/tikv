@@ -337,7 +337,7 @@ where
     // handle Compact, CleanupSST task
     pub cleanup_scheduler: Scheduler<CleanupTask>,
     pub raftlog_gc_scheduler: Scheduler<RaftlogGcTask>,
-    pub region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
+    pub region_scheduler: Scheduler<RegionTask>,
     pub apply_router: ApplyRouter<EK>,
     pub router: RaftRouter<EK, ER>,
     pub importer: Arc<SSTImporter>,
@@ -934,7 +934,7 @@ pub struct RaftPollerBuilder<EK: KvEngine, ER: RaftEngine, T> {
     split_check_scheduler: Scheduler<SplitCheckTask>,
     cleanup_scheduler: Scheduler<CleanupTask>,
     raftlog_gc_scheduler: Scheduler<RaftlogGcTask>,
-    pub region_scheduler: Scheduler<RegionTask<EK::Snapshot>>,
+    pub region_scheduler: Scheduler<RegionTask>,
     apply_router: ApplyRouter<EK>,
     pub router: RaftRouter<EK, ER>,
     pub importer: Arc<SSTImporter>,
@@ -1247,7 +1247,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
         };
         mgr.init()?;
         let region_runner = RegionRunner::new(
-            engines.kv.clone(),
+            engines.clone(),
             mgr.clone(),
             cfg.value().snap_apply_batch_size.0 as usize,
             cfg.value().use_delete_range,
