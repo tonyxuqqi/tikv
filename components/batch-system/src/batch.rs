@@ -238,6 +238,7 @@ struct Poller<N: Fsm, C: Fsm, Handler> {
     handler: Handler,
     max_batch_size: usize,
     reschedule_duration: Duration,
+    adjust_priority: bool,
 }
 
 enum ReschedulePolicy {
@@ -267,6 +268,12 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
 
     // Poll for readiness and forward to handler. Remove stale peer if necessary.
     fn poll(&mut self) {
+        if self.adjust_priority {
+            if let Err(e) = tikv_util::sys::thread::set_priority(tikv_util::sys::HIGH_PRI) {
+                warn!("set thread priority failed"; "error" => ?e, "thread" => %thread::current().name().unwrap_or(""));
+            }
+        }
+
         let mut batch = Batch::with_capacity(self.max_batch_size);
         let mut reschedule_fsms = Vec::with_capacity(self.max_batch_size);
 
@@ -378,7 +385,7 @@ where
     }
 
     /// Start the batch system.
-    pub fn spawn<B>(&mut self, name_prefix: String, mut builder: B)
+    pub fn spawn<B>(&mut self, name_prefix: String, mut builder: B, adjust_priority: bool)
     where
         B: HandlerBuilder<N, C>,
         B::Handler: Send + 'static,
@@ -391,6 +398,7 @@ where
                 handler,
                 max_batch_size: self.max_batch_size,
                 reschedule_duration: self.reschedule_duration,
+                adjust_priority,
             };
             let t = thread::Builder::new()
                 .name(thd_name!(format!("{}-{}", name_prefix, i)))

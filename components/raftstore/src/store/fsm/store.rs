@@ -39,7 +39,7 @@ use tikv_util::mpsc::{self, LooseBoundedSender, Receiver};
 use tikv_util::time::{duration_to_sec, Instant as TiInstant};
 use tikv_util::timer::SteadyTimer;
 use tikv_util::worker::{FutureScheduler, FutureWorker, Scheduler, Worker};
-use tikv_util::{is_zero_duration, sys as sys_util, Either, RingQueue};
+use tikv_util::{is_zero_duration, Either, RingQueue};
 
 use crate::coprocessor::split_observer::SplitObserver;
 use crate::coprocessor::{BoxAdminObserver, CoprocessorHost, RegionChangeEvent};
@@ -1291,7 +1291,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
         });
 
         let tag = format!("raftstore-{}", store.get_id());
-        self.system.spawn(tag, builder);
+        self.system.spawn(tag, builder, true);
         let mut mailboxes = Vec::with_capacity(region_peers.len());
         let mut address = Vec::with_capacity(region_peers.len());
         for (tx, fsm) in region_peers {
@@ -1311,7 +1311,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
             .unwrap();
 
         self.apply_system
-            .spawn("apply".to_owned(), apply_poller_builder);
+            .spawn("apply".to_owned(), apply_poller_builder, false);
 
         let pd_runner = PdRunner::new(
             store.get_id(),
@@ -1324,10 +1324,6 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
             snap_mgr,
         );
         box_try!(workers.pd_worker.start(pd_runner));
-
-        if let Err(e) = sys_util::thread::set_priority(sys_util::HIGH_PRI) {
-            warn!("set thread priority for raftstore failed"; "error" => ?e);
-        }
         self.workers = Some(workers);
         Ok(())
     }
