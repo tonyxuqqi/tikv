@@ -63,7 +63,7 @@ impl WriteOptions {
     pub fn no_slowdown(&self) -> bool {
         self.no_slowdown
     }
-    
+
     pub fn set_disable_wal(&mut self, disable_wal: bool) {
         self.disable_wal = disable_wal;
         if disable_wal {
