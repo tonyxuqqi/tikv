@@ -829,7 +829,7 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
         }
     }
 
-    pub fn collect_ready(&mut self, proposals: &mut Vec<RegionProposal>) {
+    pub fn collect_ready(&mut self, offset: usize, proposals: &mut Vec<RegionProposal>) {
         let has_ready = self.fsm.has_ready;
         self.fsm.has_ready = false;
         if !has_ready || self.fsm.stopped {
@@ -844,7 +844,7 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
         if let Some(mut r) = res {
             // This bases on an assumption that fsm array passed in `end` method will have
             // the same order of processing.
-            r.batch_offset = self.ctx.processed_fsm_count;
+            r.batch_offset = offset;
             self.on_role_changed(&r.ready);
             if !r.ready.entries().is_empty() {
                 self.register_raft_gc_log_tick();

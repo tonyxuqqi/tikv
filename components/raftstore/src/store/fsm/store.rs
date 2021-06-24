@@ -1,6 +1,8 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
-use batch_system::{BasicMailbox, BatchRouter, BatchSystem, Fsm, HandlerBuilder, PollHandler};
+use batch_system::{
+    BasicMailbox, BatchRouter, BatchSystem, Fsm, HandlerBuilder, PollHandler, TrackedFsm,
+};
 use crossbeam::channel::{TryRecvError, TrySendError};
 use engine::rocks;
 use engine::DB;
@@ -234,8 +236,6 @@ impl Clone for PeerTickBatch {
 }
 
 pub struct PollContext<T, C: 'static> {
-    /// The count of processed normal Fsm.
-    pub processed_fsm_count: usize,
     pub cfg: Config,
     pub store: metapb::Store,
     pub pd_scheduler: FutureScheduler<PdTask>,
@@ -538,7 +538,7 @@ pub struct RaftPoller<T: 'static, C: 'static> {
 }
 
 impl<T: Transport, C: PdClient> RaftPoller<T, C> {
-    fn handle_raft_ready(&mut self, peers: &mut [Box<PeerFsm<RocksEngine>>]) {
+    fn handle_raft_ready(&mut self, peers: &mut [impl TrackedFsm<Target = PeerFsm<RocksEngine>>]) {
         // Only enable the fail point when the store id is equal to 3, which is
         // the id of slow store in tests.
         fail_point!("on_raft_ready", self.poll_ctx.store_id() == 3, |_| {});
@@ -682,7 +682,6 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
 impl<T: Transport, C: PdClient> PollHandler<PeerFsm<RocksEngine>, StoreFsm> for RaftPoller<T, C> {
     fn begin(&mut self, batch_size: usize) {
         self.previous_metrics = self.poll_ctx.raft_metrics.clone();
-        self.poll_ctx.processed_fsm_count = 0;
         self.poll_ctx.pending_count = 0;
         self.poll_ctx.sync_log = false;
         self.poll_ctx.has_ready = false;
@@ -738,7 +737,10 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm<RocksEngine>, StoreFsm> for 
         expected_msg_count
     }
 
-    fn handle_normal(&mut self, peer: &mut PeerFsm<RocksEngine>) -> Option<usize> {
+    fn handle_normal(
+        &mut self,
+        peer: &mut impl TrackedFsm<Target = PeerFsm<RocksEngine>>,
+    ) -> Option<usize> {
         let mut expected_msg_count = None;
 
         fail_point!(
@@ -781,14 +783,14 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm<RocksEngine>, StoreFsm> for 
                 }
             }
         }
+        let offset = peer.offset();
         let mut delegate = PeerFsmDelegate::new(peer, &mut self.poll_ctx);
         delegate.handle_msgs(&mut self.peer_msg_buf);
-        delegate.collect_ready(&mut self.pending_proposals);
-        self.poll_ctx.processed_fsm_count += 1;
+        delegate.collect_ready(offset, &mut self.pending_proposals);
         expected_msg_count
     }
 
-    fn end(&mut self, peers: &mut [Box<PeerFsm<RocksEngine>>]) {
+    fn end(&mut self, peers: &mut [impl TrackedFsm<Target = PeerFsm<RocksEngine>>]) {
         self.flush_ticks();
         if self.poll_ctx.has_ready {
             self.handle_raft_ready(peers);
@@ -1008,7 +1010,6 @@ where
 
     fn build(&mut self) -> RaftPoller<T, C> {
         let mut ctx = PollContext {
-            processed_fsm_count: 0,
             cfg: self.cfg.value().clone(),
             store: self.store.clone(),
             pd_scheduler: self.pd_scheduler.clone(),

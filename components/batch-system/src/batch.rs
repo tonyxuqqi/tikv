@@ -11,6 +11,7 @@ use crate::mailbox::BasicMailbox;
 use crate::router::Router;
 use crossbeam::channel::{self, SendError};
 use std::borrow::Cow;
+use std::ops::{Deref, DerefMut};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tikv_util::mpsc;
@@ -70,11 +71,53 @@ macro_rules! impl_sched {
 impl_sched!(NormalScheduler, FsmTypes::Normal, Fsm = N);
 impl_sched!(ControlScheduler, FsmTypes::Control, Fsm = C);
 
+pub trait TrackedFsm: Deref + DerefMut {
+    fn offset(&self) -> usize;
+}
+
+pub struct NormalFsm<N> {
+    fsm: Box<N>,
+    timer: Instant,
+    offset: usize,
+}
+
+impl<N> NormalFsm<N> {
+    #[inline]
+    fn new(fsm: Box<N>) -> NormalFsm<N> {
+        NormalFsm {
+            fsm,
+            timer: Instant::now_coarse(),
+            offset: 0,
+        }
+    }
+}
+
+impl<N> Deref for NormalFsm<N> {
+    type Target = N;
+    #[inline]
+    fn deref(&self) -> &N {
+        &self.fsm
+    }
+}
+
+impl<N> DerefMut for NormalFsm<N> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut N {
+        &mut self.fsm
+    }
+}
+
+impl<N> TrackedFsm for NormalFsm<N> {
+    #[inline]
+    fn offset(&self) -> usize {
+        self.offset
+    }
+}
+
 /// A basic struct for a round of polling.
 #[allow(clippy::vec_box)]
 pub struct Batch<N, C> {
-    normals: Vec<Box<N>>,
-    timers: Vec<Instant>,
+    normals: Vec<NormalFsm<N>>,
     control: Option<Box<C>>,
 }
 
@@ -83,7 +126,6 @@ impl<N: Fsm, C: Fsm> Batch<N, C> {
     pub fn with_capacity(cap: usize) -> Batch<N, C> {
         Batch {
             normals: Vec::with_capacity(cap),
-            timers: Vec::with_capacity(cap),
             control: None,
         }
     }
@@ -91,8 +133,7 @@ impl<N: Fsm, C: Fsm> Batch<N, C> {
     fn push(&mut self, fsm: FsmTypes<N, C>) -> bool {
         match fsm {
             FsmTypes::Normal(n) => {
-                self.normals.push(n);
-                self.timers.push(Instant::now_coarse());
+                self.normals.push(NormalFsm::new(n));
             }
             FsmTypes::Control(c) => {
                 assert!(self.control.is_none());
@@ -109,7 +150,6 @@ impl<N: Fsm, C: Fsm> Batch<N, C> {
 
     fn clear(&mut self) {
         self.normals.clear();
-        self.timers.clear();
         self.control.take();
     }
 
@@ -120,17 +160,16 @@ impl<N: Fsm, C: Fsm> Batch<N, C> {
     /// larger than the given value before FSM is released.
     pub fn release(&mut self, index: usize, checked_len: usize) {
         let mut fsm = self.normals.swap_remove(index);
-        let mailbox = fsm.take_mailbox().unwrap();
-        mailbox.release(fsm);
-        if mailbox.len() == checked_len {
-            self.timers.swap_remove(index);
-        } else {
+        let mailbox = fsm.fsm.take_mailbox().unwrap();
+        mailbox.release(fsm.fsm);
+        if mailbox.len() != checked_len {
             match mailbox.take_fsm() {
                 None => (),
                 Some(mut s) => {
                     s.set_mailbox(Cow::Owned(mailbox));
                     let last_index = self.normals.len();
-                    self.normals.push(s);
+                    fsm.fsm = s;
+                    self.normals.push(fsm);
                     self.normals.swap(index, last_index);
                 }
             }
@@ -144,12 +183,11 @@ impl<N: Fsm, C: Fsm> Batch<N, C> {
     /// the function will return false to let caller to keep polling.
     pub fn remove(&mut self, index: usize) {
         let mut fsm = self.normals.swap_remove(index);
-        let mailbox = fsm.take_mailbox().unwrap();
+        let mailbox = fsm.fsm.take_mailbox().unwrap();
         if mailbox.is_empty() {
-            mailbox.release(fsm);
-            self.timers.swap_remove(index);
+            mailbox.release(fsm.fsm);
         } else {
-            fsm.set_mailbox(Cow::Owned(mailbox));
+            fsm.fsm.set_mailbox(Cow::Owned(mailbox));
             let last_index = self.normals.len();
             self.normals.push(fsm);
             self.normals.swap(index, last_index);
@@ -159,8 +197,7 @@ impl<N: Fsm, C: Fsm> Batch<N, C> {
     /// Schedule the normal FSM located at `index`.
     pub fn reschedule(&mut self, router: &BatchRouter<N, C>, index: usize) {
         let fsm = self.normals.swap_remove(index);
-        self.timers.swap_remove(index);
-        router.normal_scheduler.schedule(fsm);
+        router.normal_scheduler.schedule(fsm.fsm);
     }
 
     /// Same as `release`, but working on control FSM.
@@ -221,10 +258,10 @@ pub trait PollHandler<N, C> {
     /// This function is called when handling readiness for normal FSM.
     ///
     /// The returned value is handled in the same way as `handle_control`.
-    fn handle_normal(&mut self, normal: &mut N) -> Option<usize>;
+    fn handle_normal(&mut self, normal: &mut impl TrackedFsm<Target = N>) -> Option<usize>;
 
     /// This function is called at the end of every round.
-    fn end(&mut self, batch: &mut [Box<N>]);
+    fn end(&mut self, batch: &mut [impl TrackedFsm<Target = N>]);
 
     /// This function is called when batch system is going to sleep.
     fn pause(&mut self) {}
@@ -291,11 +328,12 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
 
             let mut hot_fsm_count = 0;
             for (i, p) in batch.normals.iter_mut().enumerate() {
+                p.offset = i;
                 let len = self.handler.handle_normal(p);
                 if p.is_stopped() {
                     reschedule_fsms.push((i, ReschedulePolicy::Remove));
                 } else {
-                    if batch.timers[i].elapsed() >= self.reschedule_duration {
+                    if p.timer.elapsed() >= self.reschedule_duration {
                         hot_fsm_count += 1;
                         // We should only reschedule a half of the hot regions, otherwise,
                         // it's possible all the hot regions are fetched in a batch the
@@ -321,6 +359,7 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
                 if !run || fsm_cnt >= batch.normals.len() {
                     break;
                 }
+                batch.normals[fsm_cnt].offset = fsm_cnt;
                 let len = self.handler.handle_normal(&mut batch.normals[fsm_cnt]);
                 if batch.normals[fsm_cnt].is_stopped() {
                     reschedule_fsms.push((fsm_cnt, ReschedulePolicy::Remove));

@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{cmp, usize};
 
-use batch_system::{BasicMailbox, BatchRouter, BatchSystem, Fsm, HandlerBuilder, PollHandler};
+use batch_system::{
+    BasicMailbox, BatchRouter, BatchSystem, Fsm, HandlerBuilder, PollHandler, TrackedFsm,
+};
 use crossbeam::channel::{TryRecvError, TrySendError};
 use engine_rocks::{PerfContext, PerfLevel};
 use engine_rocks::{RocksEngine, RocksSnapshot};
@@ -3055,7 +3057,7 @@ impl<W: WriteBatch + WriteBatchVecExt<RocksEngine>> PollHandler<ApplyFsm, Contro
         unimplemented!()
     }
 
-    fn handle_normal(&mut self, normal: &mut ApplyFsm) -> Option<usize> {
+    fn handle_normal(&mut self, normal: &mut impl TrackedFsm<Target = ApplyFsm>) -> Option<usize> {
         let mut expected_msg_count = None;
         normal.delegate.handle_start = Some(Instant::now_coarse());
         if normal.delegate.yield_state.is_some() {
@@ -3107,7 +3109,7 @@ impl<W: WriteBatch + WriteBatchVecExt<RocksEngine>> PollHandler<ApplyFsm, Contro
         expected_msg_count
     }
 
-    fn end(&mut self, fsms: &mut [Box<ApplyFsm>]) {
+    fn end(&mut self, fsms: &mut [impl TrackedFsm<Target = ApplyFsm>]) {
         let is_synced = self.apply_ctx.flush();
         if is_synced {
             for fsm in fsms {
