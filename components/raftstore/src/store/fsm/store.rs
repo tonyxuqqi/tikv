@@ -1,7 +1,8 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
 use batch_system::{
-    BasicMailbox, BatchRouter, BatchSystem, Fsm, HandlerBuilder, PollHandler, TrackedFsm,
+    BasicMailbox, BatchRouter, BatchSystem, Fsm, HandleResult, HandlerBuilder, PollHandler,
+    TrackedFsm,
 };
 use crossbeam::channel::{TryRecvError, TrySendError};
 use engine::rocks;
@@ -768,7 +769,7 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm<RocksEngine>, StoreFsm> for 
     fn handle_normal(
         &mut self,
         peer: &mut impl TrackedFsm<Target = PeerFsm<RocksEngine>>,
-    ) -> Option<usize> {
+    ) -> HandleResult {
         let mut expected_msg_count = None;
 
         fail_point!(
@@ -815,7 +816,7 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm<RocksEngine>, StoreFsm> for 
         let mut delegate = PeerFsmDelegate::new(peer, &mut self.poll_ctx);
         delegate.handle_msgs(&mut self.peer_msg_buf);
         delegate.collect_ready(offset, &mut self.pending_proposals);
-        expected_msg_count
+        expected_msg_count.into()
     }
 
     fn light_end(

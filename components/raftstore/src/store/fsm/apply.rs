@@ -15,7 +15,8 @@ use std::time::Duration;
 use std::{cmp, usize};
 
 use batch_system::{
-    BasicMailbox, BatchRouter, BatchSystem, Fsm, HandlerBuilder, PollHandler, TrackedFsm,
+    BasicMailbox, BatchRouter, BatchSystem, Fsm, HandleResult, HandlerBuilder, PollHandler,
+    TrackedFsm,
 };
 use crossbeam::channel::{TryRecvError, TrySendError};
 use engine_rocks::{PerfContext, PerfLevel};
@@ -3057,7 +3058,7 @@ impl<W: WriteBatch + WriteBatchVecExt<RocksEngine>> PollHandler<ApplyFsm, Contro
         unimplemented!()
     }
 
-    fn handle_normal(&mut self, normal: &mut impl TrackedFsm<Target = ApplyFsm>) -> Option<usize> {
+    fn handle_normal(&mut self, normal: &mut impl TrackedFsm<Target = ApplyFsm>) -> HandleResult {
         let mut expected_msg_count = None;
         normal.delegate.handle_start = Some(Instant::now_coarse());
         if normal.delegate.yield_state.is_some() {
@@ -3072,17 +3073,17 @@ impl<W: WriteBatch + WriteBatchVecExt<RocksEngine>> PollHandler<ApplyFsm, Contro
                 // Yield due to applying CommitMerge, this fsm can be released if its
                 // channel msg count equals to expected_msg_count because it will receive
                 // a new message if its source region has applied all needed logs.
-                return expected_msg_count;
+                return expected_msg_count.into();
             } else if normal.delegate.yield_state.is_some() {
                 // Yield due to other reasons, this fsm must not be released because
                 // it's possible that no new message will be sent to itself.
                 // The remaining messages will be handled in next rounds.
-                return None;
+                return HandleResult::KeepProcessing;
             }
             expected_msg_count = None;
         }
         fail_point!("before_handle_normal_3", normal.delegate.id() == 3, |_| {
-            None
+            HandleResult::KeepProcessing
         });
         while self.msg_buf.len() < self.messages_per_tick {
             match normal.receiver.try_recv() {
@@ -3106,7 +3107,7 @@ impl<W: WriteBatch + WriteBatchVecExt<RocksEngine>> PollHandler<ApplyFsm, Contro
             // Let it continue to run next time.
             expected_msg_count = None;
         }
-        expected_msg_count
+        expected_msg_count.into()
     }
 
     fn end(&mut self, fsms: &mut [Option<impl TrackedFsm<Target = ApplyFsm>>]) {

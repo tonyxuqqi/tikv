@@ -97,9 +97,9 @@ impl PollHandler<Runner, Runner> for Handler {
         self.handle(control)
     }
 
-    fn handle_normal(&mut self, normal: &mut impl TrackedFsm<Target = Runner>) -> Option<usize> {
+    fn handle_normal(&mut self, normal: &mut impl TrackedFsm<Target = Runner>) -> HandleResult {
         self.local.normal += 1;
-        self.handle(normal)
+        self.handle(normal).into()
     }
 
     fn end(&mut self, _normals: &mut [Option<impl TrackedFsm<Target = Runner>>]) {

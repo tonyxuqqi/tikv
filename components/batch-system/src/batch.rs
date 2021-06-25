@@ -250,6 +250,24 @@ impl<N: Fsm, C: Fsm> Batch<N, C> {
     }
 }
 
+pub enum HandleResult {
+    KeepProcessing,
+    StopAt { progress: usize, abort: bool },
+}
+
+impl From<Option<usize>> for HandleResult {
+    #[inline]
+    fn from(u: Option<usize>) -> HandleResult {
+        match u {
+            Some(progress) => HandleResult::StopAt {
+                progress,
+                abort: false,
+            },
+            None => HandleResult::KeepProcessing,
+        }
+    }
+}
+
 /// A handler that poll all FSM in ready.
 ///
 /// A General process works like following:
@@ -282,7 +300,7 @@ pub trait PollHandler<N, C> {
     /// This function is called when handling readiness for normal FSM.
     ///
     /// The returned value is handled in the same way as `handle_control`.
-    fn handle_normal(&mut self, normal: &mut impl TrackedFsm<Target = N>) -> Option<usize>;
+    fn handle_normal(&mut self, normal: &mut impl TrackedFsm<Target = N>) -> HandleResult;
 
     fn light_end(
         &mut self,
@@ -378,9 +396,12 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
                             continue;
                         }
                     }
-                    if let Some(l) = len {
-                        p.policy = Some(ReschedulePolicy::Release(l));
+                    if let HandleResult::StopAt { progress, abort } = len {
+                        p.policy = Some(ReschedulePolicy::Release(progress));
                         reschedule_fsms.push(i);
+                        if abort {
+                            to_released.push(i);
+                        }
                     }
                 }
             }
@@ -402,9 +423,12 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
                     p.policy = Some(ReschedulePolicy::Remove);
                     reschedule_fsms.push(fsm_cnt);
                 } else {
-                    if let Some(l) = len {
-                        p.policy = Some(ReschedulePolicy::Release(l));
+                    if let HandleResult::StopAt { progress, abort } = len {
+                        p.policy = Some(ReschedulePolicy::Release(progress));
                         reschedule_fsms.push(fsm_cnt);
+                        if abort {
+                            to_released.push(fsm_cnt);
+                        }
                     }
                 }
                 fsm_cnt += 1;
