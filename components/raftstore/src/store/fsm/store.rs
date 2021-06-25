@@ -265,6 +265,7 @@ pub struct PollContext<T, C: 'static> {
     pub sync_log: bool,
     pub has_ready: bool,
     pub ready_res: Vec<CollectedReady>,
+    pub readonly_ready_res: Vec<CollectedReady>,
     pub need_flush_trans: bool,
     pub current_time: Option<Timespec>,
     pub perf_context_statistics: PerfContextStatistics,
@@ -541,6 +542,7 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
     fn handle_raft_ready(
         &mut self,
         peers: &mut [Option<impl TrackedFsm<Target = PeerFsm<RocksEngine>>>],
+        to_released: &mut Vec<usize>,
     ) {
         // Only enable the fail point when the store id is equal to 3, which is
         // the id of slow store in tests.
@@ -558,7 +560,7 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
             self.poll_ctx.trans.flush();
             self.poll_ctx.need_flush_trans = false;
         }
-        let ready_cnt = self.poll_ctx.ready_res.len();
+        let ready_cnt = self.poll_ctx.ready_res.len() + self.poll_ctx.readonly_ready_res.len();
         if ready_cnt != 0 && self.poll_ctx.cfg.early_apply {
             let mut ready_res = mem::take(&mut self.poll_ctx.ready_res);
             for ready in &mut ready_res {
@@ -569,8 +571,25 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
                 .handle_raft_ready_apply(ready);
             }
             self.poll_ctx.ready_res = ready_res;
+            let mut readonly_ready_res = mem::take(&mut self.poll_ctx.readonly_ready_res);
+            for ready in readonly_ready_res.drain(..) {
+                to_released.push(ready.batch_offset);
+                PeerFsmDelegate::new(
+                    peers[ready.batch_offset].as_mut().unwrap(),
+                    &mut self.poll_ctx,
+                )
+                .post_raft_ready_append(ready);
+            }
+            self.poll_ctx.readonly_ready_res = readonly_ready_res;
         }
         self.poll_ctx.raft_metrics.ready.has_ready_region += ready_cnt as u64;
+    }
+
+    fn handle_raft_ready_write(
+        &mut self,
+        peers: &mut [Option<impl TrackedFsm<Target = PeerFsm<RocksEngine>>>],
+    ) {
+        let ready_cnt = self.poll_ctx.ready_res.len();
         fail_point!("raft_before_save");
         if !self.poll_ctx.kv_wb.is_empty() {
             let mut write_opts = WriteOptions::new();
@@ -799,10 +818,20 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm<RocksEngine>, StoreFsm> for 
         expected_msg_count
     }
 
-    fn end(&mut self, peers: &mut [Option<impl TrackedFsm<Target = PeerFsm<RocksEngine>>>]) {
+    fn light_end(
+        &mut self,
+        peers: &mut [Option<impl TrackedFsm<Target = PeerFsm<RocksEngine>>>],
+        to_released: &mut Vec<usize>,
+    ) {
         self.flush_ticks();
         if self.poll_ctx.has_ready {
-            self.handle_raft_ready(peers);
+            self.handle_raft_ready(peers, to_released);
+        }
+    }
+
+    fn end(&mut self, peers: &mut [Option<impl TrackedFsm<Target = PeerFsm<RocksEngine>>>]) {
+        if self.poll_ctx.has_ready {
+            self.handle_raft_ready_write(peers);
         }
         self.poll_ctx.current_time = None;
         self.poll_ctx
@@ -1047,6 +1076,7 @@ where
             sync_log: false,
             has_ready: false,
             ready_res: Vec::new(),
+            readonly_ready_res: Vec::new(),
             need_flush_trans: false,
             current_time: None,
             perf_context_statistics: PerfContextStatistics::new(self.cfg.value().perf_level),

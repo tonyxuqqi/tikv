@@ -5,6 +5,7 @@
 #![feature(shrink_to)]
 #![feature(div_duration)]
 #![feature(specialization)]
+#![feature(drain_filter)]
 
 #[macro_use]
 extern crate bitflags;
