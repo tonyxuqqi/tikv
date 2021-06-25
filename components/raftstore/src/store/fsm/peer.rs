@@ -917,6 +917,7 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
             // After applying a snapshot, merge is rollbacked implicitly.
             self.on_ready_rollback_merge(0, None);
         }
+        self.fsm.early_apply = false;
     }
 
     #[inline]
