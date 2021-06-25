@@ -815,8 +815,17 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm<RocksEngine>, StoreFsm> for 
         let offset = peer.offset();
         let mut delegate = PeerFsmDelegate::new(peer, &mut self.poll_ctx);
         delegate.handle_msgs(&mut self.peer_msg_buf);
-        delegate.collect_ready(offset, &mut self.pending_proposals);
-        expected_msg_count.into()
+        if delegate.collect_ready(offset, &mut self.pending_proposals) {
+            expected_msg_count.into()
+        } else {
+            match expected_msg_count {
+                None => HandleResult::KeepProcessing,
+                Some(progress) => HandleResult::StopAt {
+                    progress,
+                    abort: true,
+                },
+            }
+        }
     }
 
     fn light_end(

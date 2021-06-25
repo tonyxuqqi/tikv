@@ -12,8 +12,7 @@ use std::{cmp, u64};
 use batch_system::{BasicMailbox, Fsm};
 use engine::Engines;
 use engine_rocks::{Compat, RocksEngine, RocksSnapshot, WRITE_BATCH_MAX_KEYS};
-use engine_traits::CF_RAFT;
-use engine_traits::{KvEngine, Peekable};
+use engine_traits::{KvEngine, Peekable, WriteBatch, CF_RAFT};
 use error_code::ErrorCodeExt;
 use kvproto::errorpb;
 use kvproto::import_sstpb::SstMeta;
@@ -829,17 +828,18 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
         }
     }
 
-    pub fn collect_ready(&mut self, offset: usize, proposals: &mut Vec<RegionProposal>) {
+    pub fn collect_ready(&mut self, offset: usize, proposals: &mut Vec<RegionProposal>) -> bool {
         let has_ready = self.fsm.has_ready;
         self.fsm.has_ready = false;
         if !has_ready || self.fsm.stopped {
-            return;
+            return false;
         }
         self.ctx.pending_count += 1;
         self.ctx.has_ready = true;
         if let Some(p) = self.fsm.peer.take_apply_proposals() {
             proposals.push(p);
         }
+        let progress = self.ctx.kv_wb.data_size() + self.ctx.raft_wb.data_size();
         let res = self.fsm.peer.handle_raft_ready_append(self.ctx);
         if let Some(mut r) = res {
             // This bases on an assumption that fsm array passed in `end` method will have
@@ -850,8 +850,14 @@ impl<'a, T: Transport, C: PdClient> PeerFsmDelegate<'a, T, C> {
                 self.register_raft_gc_log_tick();
                 self.register_split_region_check_tick();
             }
-            self.ctx.ready_res.push(r);
+            if self.ctx.kv_wb.data_size() + self.ctx.raft_wb.data_size() == progress {
+                self.ctx.readonly_ready_res.push(r);
+            } else {
+                self.ctx.ready_res.push(r);
+            }
+            return true;
         }
+        false
     }
 
     #[inline]
