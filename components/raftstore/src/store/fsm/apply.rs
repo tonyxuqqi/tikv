@@ -3109,11 +3109,13 @@ impl<W: WriteBatch + WriteBatchVecExt<RocksEngine>> PollHandler<ApplyFsm, Contro
         expected_msg_count
     }
 
-    fn end(&mut self, fsms: &mut [impl TrackedFsm<Target = ApplyFsm>]) {
+    fn end(&mut self, fsms: &mut [Option<impl TrackedFsm<Target = ApplyFsm>>]) {
         let is_synced = self.apply_ctx.flush();
         if is_synced {
             for fsm in fsms {
-                fsm.delegate.last_sync_apply_index = fsm.delegate.apply_state.get_applied_index();
+                if let Some(f) = fsm {
+                    f.delegate.last_sync_apply_index = f.delegate.apply_state.get_applied_index();
+                }
             }
         }
     }

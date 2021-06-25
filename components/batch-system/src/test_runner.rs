@@ -102,7 +102,7 @@ impl PollHandler<Runner, Runner> for Handler {
         self.handle(normal)
     }
 
-    fn end(&mut self, _normals: &mut [impl TrackedFsm<Target = Runner>]) {
+    fn end(&mut self, _normals: &mut [Option<impl TrackedFsm<Target = Runner>>]) {
         let mut c = self.metrics.lock().unwrap();
         *c += self.local;
         self.local = HandleMetrics::default();

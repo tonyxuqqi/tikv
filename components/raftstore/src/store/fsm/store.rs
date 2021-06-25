@@ -538,7 +538,10 @@ pub struct RaftPoller<T: 'static, C: 'static> {
 }
 
 impl<T: Transport, C: PdClient> RaftPoller<T, C> {
-    fn handle_raft_ready(&mut self, peers: &mut [impl TrackedFsm<Target = PeerFsm<RocksEngine>>]) {
+    fn handle_raft_ready(
+        &mut self,
+        peers: &mut [Option<impl TrackedFsm<Target = PeerFsm<RocksEngine>>>],
+    ) {
         // Only enable the fail point when the store id is equal to 3, which is
         // the id of slow store in tests.
         fail_point!("on_raft_ready", self.poll_ctx.store_id() == 3, |_| {});
@@ -559,8 +562,11 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
         if ready_cnt != 0 && self.poll_ctx.cfg.early_apply {
             let mut ready_res = mem::take(&mut self.poll_ctx.ready_res);
             for ready in &mut ready_res {
-                PeerFsmDelegate::new(&mut peers[ready.batch_offset], &mut self.poll_ctx)
-                    .handle_raft_ready_apply(ready);
+                PeerFsmDelegate::new(
+                    peers[ready.batch_offset].as_mut().unwrap(),
+                    &mut self.poll_ctx,
+                )
+                .handle_raft_ready_apply(ready);
             }
             self.poll_ctx.ready_res = ready_res;
         }
@@ -622,8 +628,11 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
         if ready_cnt != 0 {
             let mut ready_res = mem::take(&mut self.poll_ctx.ready_res);
             for ready in ready_res.drain(..) {
-                PeerFsmDelegate::new(&mut peers[ready.batch_offset], &mut self.poll_ctx)
-                    .post_raft_ready_append(ready);
+                PeerFsmDelegate::new(
+                    peers[ready.batch_offset].as_mut().unwrap(),
+                    &mut self.poll_ctx,
+                )
+                .post_raft_ready_append(ready);
             }
         }
         let dur = self.timer.elapsed();
@@ -790,7 +799,7 @@ impl<T: Transport, C: PdClient> PollHandler<PeerFsm<RocksEngine>, StoreFsm> for 
         expected_msg_count
     }
 
-    fn end(&mut self, peers: &mut [impl TrackedFsm<Target = PeerFsm<RocksEngine>>]) {
+    fn end(&mut self, peers: &mut [Option<impl TrackedFsm<Target = PeerFsm<RocksEngine>>>]) {
         self.flush_ticks();
         if self.poll_ctx.has_ready {
             self.handle_raft_ready(peers);
