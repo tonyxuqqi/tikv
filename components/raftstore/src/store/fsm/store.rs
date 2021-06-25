@@ -562,7 +562,7 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
             self.poll_ctx.need_flush_trans = false;
         }
         let ready_cnt = self.poll_ctx.ready_res.len() + self.poll_ctx.readonly_ready_res.len();
-        if ready_cnt != 0 && self.poll_ctx.cfg.early_apply {
+        if !self.poll_ctx.ready_res.is_empty() && self.poll_ctx.cfg.early_apply {
             let mut ready_res = mem::take(&mut self.poll_ctx.ready_res);
             for ready in &mut ready_res {
                 PeerFsmDelegate::new(
@@ -572,6 +572,8 @@ impl<T: Transport, C: PdClient> RaftPoller<T, C> {
                 .handle_raft_ready_apply(ready);
             }
             self.poll_ctx.ready_res = ready_res;
+        }
+        if !self.poll_ctx.readonly_ready_res.is_empty() {
             let mut readonly_ready_res = mem::take(&mut self.poll_ctx.readonly_ready_res);
             for ready in readonly_ready_res.drain(..) {
                 to_released.push(ready.batch_offset);
