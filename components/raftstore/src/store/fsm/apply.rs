@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::cmp::{Ord, Ordering as CmpOrdering};
-use std::collections::VecDeque;
+use std::collections::{vec_deque, VecDeque};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
@@ -16,8 +16,8 @@ use std::vec::Drain;
 use std::{cmp, usize};
 
 use batch_system::{
-    BasicMailbox, BatchRouter, BatchSystem, Fsm, HandleResult, HandlerBuilder, PollHandler,
-    TrackedFsm,
+    BasicMailbox, BatchRouter, BatchSystem, CheckPointType, Fsm, HandleResult, HandlerBuilder,
+    PollHandler, TrackedFsm,
 };
 use collections::{HashMap, HashMapEntry, HashSet};
 use crossbeam::channel::{TryRecvError, TrySendError};
@@ -320,7 +320,7 @@ where
 }
 
 pub trait Notifier<EK: KvEngine>: Send {
-    fn notify(&self, apply_res: Vec<ApplyRes<EK::Snapshot>>);
+    fn notify(&self, apply_res: vec_deque::Drain<ApplyRes<EK::Snapshot>>);
     fn notify_one(&self, region_id: u64, msg: PeerMsg<EK>);
     fn clone_box(&self) -> Box<dyn Notifier<EK>>;
 }
@@ -339,7 +339,7 @@ where
     notifier: Box<dyn Notifier<EK>>,
     engine: EK,
     cbs: MustConsumeVec<ApplyCallback<EK>>,
-    apply_res: Vec<ApplyRes<EK::Snapshot>>,
+    apply_res: VecDeque<ApplyRes<EK::Snapshot>>,
     exec_ctx: Option<ExecContext>,
 
     kv_wb: W,
@@ -371,6 +371,7 @@ where
     /// happened before `WriteBatch::write` and after `SSTImporter::delete`. We shall make sure that
     /// this entry will never apply again at first, then we can delete the ssts files.
     delete_ssts: Vec<SSTMetaInfo>,
+    write_times: usize,
 }
 
 impl<EK, W> ApplyContext<EK, W>
@@ -405,7 +406,7 @@ where
             notifier,
             kv_wb,
             cbs: MustConsumeVec::new("callback of apply context"),
-            apply_res: vec![],
+            apply_res: VecDeque::with_capacity(1024),
             kv_wb_last_bytes: 0,
             kv_wb_last_keys: 0,
             last_applied_index: 0,
@@ -419,6 +420,7 @@ where
             delete_ssts: vec![],
             store_id,
             pending_create_peers,
+            write_times: 0,
         }
     }
 
@@ -494,11 +496,18 @@ where
                 });
             }
         }
+        self.write_times += 1;
         // Call it before invoking callback for preventing Commit is executed before Prewrite is observed.
         self.host.on_flush_apply(self.engine.clone());
 
         for cbs in self.cbs.drain(..) {
             cbs.invoke_all(&self.host);
+        }
+        if !self.apply_res.is_empty() {
+            self.notifier.notify(self.apply_res.drain(..));
+            if self.apply_res.capacity() > 8192 {
+                self.apply_res = VecDeque::new();
+            }
         }
         need_sync
     }
@@ -513,7 +522,7 @@ where
             delegate.write_apply_state(self.kv_wb_mut());
         }
         self.commit_opt(delegate, false);
-        self.apply_res.push(ApplyRes {
+        self.apply_res.push_back(ApplyRes {
             region_id: delegate.region_id(),
             apply_state: delegate.apply_state.clone(),
             exec_res: results,
@@ -555,11 +564,6 @@ where
         // if power failure happen, raft WAL may synced to disk, but kv WAL may not.
         // so we use sync-log flag here.
         let is_synced = self.write_to_db();
-
-        if !self.apply_res.is_empty() {
-            let apply_res = std::mem::replace(&mut self.apply_res, vec![]);
-            self.notifier.notify(apply_res);
-        }
 
         let elapsed = t.elapsed();
         STORE_APPLY_LOG_HISTOGRAM.observe(duration_to_sec(elapsed) as f64);
@@ -785,6 +789,7 @@ where
     applied_index_term: u64,
     /// The latest synced apply index.
     last_sync_apply_index: u64,
+    engine: Option<EK>,
 
     /// Info about cmd observer.
     observe_cmd: Option<ObserveCmd>,
@@ -816,6 +821,7 @@ where
             pending_cmds: PendingCmdQueue::new(),
             metrics: Default::default(),
             last_merge_version: 0,
+            engine: None,
             pending_request_snapshot_count: reg.pending_request_snapshot_count,
             observe_cmd: None,
         }
@@ -3303,6 +3309,9 @@ where
         apply_ctx: &mut ApplyContext<EK, W>,
         msgs: &mut Vec<Msg<EK>>,
     ) {
+        if self.delegate.engine.is_none() {
+            self.delegate.engine = Some(apply_ctx.engine.clone());
+        }
         let mut drainer = msgs.drain(..);
         loop {
             match drainer.next() {
@@ -3427,6 +3436,7 @@ where
         &mut self,
         normal: &mut impl TrackedFsm<Target = ApplyFsm<EK>>,
     ) -> HandleResult {
+        let last_write_times = self.apply_ctx.write_times;
         let mut expected_msg_count = None;
         normal.delegate.handle_start = Some(Instant::now_coarse());
         if normal.delegate.yield_state.is_some() {
@@ -3480,7 +3490,18 @@ where
             // Let it continue to run next time.
             expected_msg_count = None;
         }
-        expected_msg_count.into()
+        match expected_msg_count {
+            Some(progress) => HandleResult::StopAt {
+                progress,
+                check_point: if self.apply_ctx.write_times == last_write_times {
+                    CheckPointType::None
+                } else {
+                    // TODO: make also check if current peer has flushed.
+                    CheckPointType::ExcludeCurrent
+                },
+            },
+            None => HandleResult::KeepProcessing,
+        }
     }
 
     fn end(&mut self, fsms: &mut [Option<impl TrackedFsm<Target = ApplyFsm<EK>>>]) {
@@ -3770,7 +3791,7 @@ mod tests {
     }
 
     impl<EK: KvEngine> Notifier<EK> for TestNotifier<EK> {
-        fn notify(&self, apply_res: Vec<ApplyRes<EK::Snapshot>>) {
+        fn notify(&self, apply_res: vec_deque::Drain<ApplyRes<EK::Snapshot>>) {
             for r in apply_res {
                 let res = TaskRes::Apply(r);
                 let _ = self.tx.send(PeerMsg::ApplyRes { res });

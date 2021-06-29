@@ -251,9 +251,20 @@ impl<N: Fsm, C: Fsm> Batch<N, C> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CheckPointType {
+    None,
+    OnlyCurrent,
+    ExcludeCurrent,
+    IncludeCurrent,
+}
+
 pub enum HandleResult {
     KeepProcessing,
-    StopAt { progress: usize, abort: bool },
+    StopAt {
+        progress: usize,
+        check_point: CheckPointType,
+    },
 }
 
 impl From<Option<usize>> for HandleResult {
@@ -262,7 +273,7 @@ impl From<Option<usize>> for HandleResult {
         match u {
             Some(progress) => HandleResult::StopAt {
                 progress,
-                abort: false,
+                check_point: CheckPointType::None,
             },
             None => HandleResult::KeepProcessing,
         }
@@ -385,8 +396,9 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
             }
 
             let mut hot_fsm_count = 0;
-            for (i, p) in batch.normals.iter_mut().enumerate() {
-                let p = p.as_mut().unwrap();
+            let mut last_check_point = 0;
+            for i in 0..batch.normals.len() {
+                let p = batch.normals[i].as_mut().unwrap();
                 p.offset = i;
                 let len = self.handler.handle_normal(p);
                 if p.is_stopped() {
@@ -404,11 +416,25 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
                             continue;
                         }
                     }
-                    if let HandleResult::StopAt { progress, abort } = len {
+                    if let HandleResult::StopAt {
+                        progress,
+                        check_point,
+                    } = len
+                    {
                         p.policy = Some(ReschedulePolicy::Release(progress));
                         reschedule_fsms.push(i);
-                        if abort {
+                        if check_point == CheckPointType::OnlyCurrent {
                             to_released.push(i);
+                        } else if check_point != CheckPointType::None {
+                            let end = if check_point == CheckPointType::IncludeCurrent {
+                                reschedule_fsms.len()
+                            } else {
+                                reschedule_fsms.len() - 1
+                            };
+                            for offset in &reschedule_fsms[last_check_point..end] {
+                                batch.schedule(&self.router, *offset, true);
+                            }
+                            last_check_point = end;
                         }
                     }
                 }
@@ -430,11 +456,25 @@ impl<N: Fsm, C: Fsm, Handler: PollHandler<N, C>> Poller<N, C, Handler> {
                 if p.is_stopped() {
                     p.policy = Some(ReschedulePolicy::Remove);
                     reschedule_fsms.push(fsm_cnt);
-                } else if let HandleResult::StopAt { progress, abort } = len {
+                } else if let HandleResult::StopAt {
+                    progress,
+                    check_point,
+                } = len
+                {
                     p.policy = Some(ReschedulePolicy::Release(progress));
                     reschedule_fsms.push(fsm_cnt);
-                    if abort {
+                    if check_point == CheckPointType::OnlyCurrent {
                         to_released.push(fsm_cnt);
+                    } else if check_point != CheckPointType::None {
+                        let end = if check_point == CheckPointType::IncludeCurrent {
+                            reschedule_fsms.len()
+                        } else {
+                            reschedule_fsms.len() - 1
+                        };
+                        for offset in &reschedule_fsms[last_check_point..end] {
+                            batch.schedule(&self.router, *offset, true);
+                        }
+                        last_check_point = end;
                     }
                 }
                 fsm_cnt += 1;
