@@ -116,7 +116,7 @@ impl PollHandler<Runner, Runner> for Handler {
     fn handle_normal(&mut self, normal: &mut impl TrackedFsm<Target = Runner>) -> HandleResult {
         self.local.normal += 1;
         self.handle(normal);
-        HandleResult::stop_at(0, false)
+        HandleResult::stop_at(0, CheckPointType::None)
     }
 
     fn end(&mut self, _normals: &mut [Option<impl TrackedFsm<Target = Runner>>]) {

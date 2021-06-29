@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::cmp::{Ord, Ordering as CmpOrdering};
-use std::collections::VecDeque;
+use std::collections::{vec_deque, VecDeque};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::mem;
@@ -17,8 +17,8 @@ use std::vec::Drain;
 use std::{cmp, usize};
 
 use batch_system::{
-    BasicMailbox, BatchRouter, BatchSystem, Fsm, HandleResult, HandlerBuilder, PollHandler,
-    Priority, TrackedFsm,
+    BasicMailbox, BatchRouter, BatchSystem, CheckPointType, Fsm, HandleResult, HandlerBuilder,
+    PollHandler, Priority, TrackedFsm,
 };
 use collections::{HashMap, HashMapEntry, HashSet};
 use crossbeam::channel::{TryRecvError, TrySendError};
@@ -348,7 +348,7 @@ impl<S: Snapshot> ApplyCallbackBatch<S> {
 }
 
 pub trait Notifier<EK: KvEngine>: Send {
-    fn notify(&self, apply_res: Vec<ApplyRes<EK::Snapshot>>);
+    fn notify(&self, apply_res: vec_deque::Drain<ApplyRes<EK::Snapshot>>);
     fn notify_one(&self, region_id: u64, msg: PeerMsg<EK>);
     fn clone_box(&self) -> Box<dyn Notifier<EK>>;
 }
@@ -367,7 +367,7 @@ where
     notifier: Box<dyn Notifier<EK>>,
     engine: EK,
     applied_batch: ApplyCallbackBatch<EK::Snapshot>,
-    apply_res: Vec<ApplyRes<EK::Snapshot>>,
+    apply_res: VecDeque<ApplyRes<EK::Snapshot>>,
     exec_ctx: Option<ExecContext>,
 
     kv_wb: W,
@@ -406,6 +406,7 @@ where
 
     /// The ssts waiting to be ingested in `write_to_db`.
     pending_ssts: Vec<SstMeta>,
+    write_times: usize,
 }
 
 impl<EK, W> ApplyContext<EK, W>
@@ -441,7 +442,7 @@ where
             notifier,
             kv_wb,
             applied_batch: ApplyCallbackBatch::new(),
-            apply_res: vec![],
+            apply_res: VecDeque::with_capacity(1024),
             kv_wb_last_bytes: 0,
             kv_wb_last_keys: 0,
             committed_count: 0,
@@ -457,6 +458,7 @@ where
             priority,
             yield_high_latency_operation: cfg.apply_batch_system.low_priority_pool_size > 0,
             pending_ssts: vec![],
+            write_times: 0,
         }
     }
 
@@ -546,12 +548,19 @@ where
             batch_max_level,
             mut cb_batch,
         } = mem::replace(&mut self.applied_batch, ApplyCallbackBatch::new());
+        self.write_times += 1;
         // Call it before invoking callback for preventing Commit is executed before Prewrite is observed.
         self.host
             .on_flush_applied_cmd_batch(batch_max_level, cmd_batch, &self.engine);
         // Invoke callbacks
         for (cb, resp) in cb_batch.drain(..) {
             cb.invoke_with_response(resp)
+        }
+        if !self.apply_res.is_empty() {
+            self.notifier.notify(self.apply_res.drain(..));
+            if self.apply_res.capacity() > 8192 {
+                self.apply_res = VecDeque::new();
+            }
         }
         need_sync
     }
@@ -566,7 +575,7 @@ where
             delegate.write_apply_state(self.kv_wb_mut());
         }
         self.commit_opt(delegate, false);
-        self.apply_res.push(ApplyRes {
+        self.apply_res.push_back(ApplyRes {
             region_id: delegate.region_id(),
             apply_state: delegate.apply_state.clone(),
             exec_res: results,
@@ -608,11 +617,6 @@ where
         // if power failure happen, raft WAL may synced to disk, but kv WAL may not.
         // so we use sync-log flag here.
         let is_synced = self.write_to_db();
-
-        if !self.apply_res.is_empty() {
-            let apply_res = mem::take(&mut self.apply_res);
-            self.notifier.notify(apply_res);
-        }
 
         let elapsed = t.saturating_elapsed();
         STORE_APPLY_LOG_HISTOGRAM.observe(duration_to_sec(elapsed) as f64);
@@ -861,6 +865,7 @@ where
     applied_index_term: u64,
     /// The latest flushed applied index.
     last_flush_applied_index: u64,
+    engine: Option<EK>,
 
     /// Info about cmd observer.
     observe_info: CmdObserveInfo,
@@ -902,6 +907,7 @@ where
             pending_cmds: PendingCmdQueue::new(),
             metrics: Default::default(),
             last_merge_version: 0,
+            engine: None,
             pending_request_snapshot_count: reg.pending_request_snapshot_count,
             // use a default `CmdObserveInfo` because observing is disable by default
             observe_info: CmdObserveInfo::default(),
@@ -3474,6 +3480,9 @@ where
         apply_ctx: &mut ApplyContext<EK, W>,
         msgs: &mut Vec<Msg<EK>>,
     ) {
+        if self.delegate.engine.is_none() {
+            self.delegate.engine = Some(apply_ctx.engine.clone());
+        }
         let mut drainer = msgs.drain(..);
         loop {
             match drainer.next() {
@@ -3617,13 +3626,14 @@ where
         normal: &mut impl TrackedFsm<Target = ApplyFsm<EK>>,
     ) -> HandleResult {
         let mut handle_result = HandleResult::KeepProcessing;
+        let last_write_times = self.apply_ctx.write_times;
         normal.delegate.handle_start = Some(Instant::now_coarse());
         if normal.delegate.yield_state.is_some() {
             if normal.delegate.wait_merge_state.is_some() {
                 // We need to query the length first, otherwise there is a race
                 // condition that new messages are queued after resuming and before
                 // query the length.
-                handle_result = HandleResult::stop_at(normal.receiver.len(), false);
+                handle_result = HandleResult::stop_at(normal.receiver.len(), CheckPointType::None);
             }
             normal.resume_pending(&mut self.apply_ctx);
             if normal.delegate.wait_merge_state.is_some() {
@@ -3651,12 +3661,12 @@ where
             match normal.receiver.try_recv() {
                 Ok(msg) => self.msg_buf.push(msg),
                 Err(TryRecvError::Empty) => {
-                    handle_result = HandleResult::stop_at(0, false);
+                    handle_result = HandleResult::stop_at(0, CheckPointType::None);
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
                     normal.delegate.stopped = true;
-                    handle_result = HandleResult::stop_at(0, false);
+                    handle_result = HandleResult::stop_at(0, CheckPointType::None);
                     break;
                 }
             }
@@ -3666,10 +3676,16 @@ where
 
         if normal.delegate.wait_merge_state.is_some() {
             // Check it again immediately as catching up logs can be very fast.
-            handle_result = HandleResult::stop_at(0, false);
+            handle_result = HandleResult::stop_at(0, CheckPointType::None);
         } else if normal.delegate.yield_state.is_some() {
             // Let it continue to run next time.
             handle_result = HandleResult::KeepProcessing;
+        }
+        if let HandleResult::StopAt { skip_end, .. } = &mut handle_result {
+            if self.apply_ctx.write_times != last_write_times {
+                // TODO: make also check if current peer has flushed.
+                *skip_end = CheckPointType::ExcludeCurrent;
+            }
         }
         handle_result
     }
@@ -4086,7 +4102,7 @@ mod tests {
     }
 
     impl<EK: KvEngine> Notifier<EK> for TestNotifier<EK> {
-        fn notify(&self, apply_res: Vec<ApplyRes<EK::Snapshot>>) {
+        fn notify(&self, apply_res: vec_deque::Drain<ApplyRes<EK::Snapshot>>) {
             for r in apply_res {
                 let res = TaskRes::Apply(r);
                 let _ = self.tx.send(PeerMsg::ApplyRes { res });

@@ -1,8 +1,8 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::cmp::{Ord, Ordering as CmpOrdering};
-use std::collections::BTreeMap;
 use std::collections::Bound::{Excluded, Included, Unbounded};
+use std::collections::{vec_deque, BTreeMap};
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use std::{mem, u64};
 
 use batch_system::{
-    BasicMailbox, BatchRouter, BatchSystem, Fsm, HandleResult, HandlerBuilder, PollHandler,
-    Priority, TrackedFsm,
+    BasicMailbox, BatchRouter, BatchSystem, CheckPointType, Fsm, HandleResult, HandlerBuilder,
+    PollHandler, Priority, TrackedFsm,
 };
 use crossbeam::channel::{TryRecvError, TrySendError};
 use engine_traits::PerfContext;
@@ -200,7 +200,7 @@ where
     EK: KvEngine,
     ER: RaftEngine,
 {
-    fn notify(&self, apply_res: Vec<ApplyRes<EK::Snapshot>>) {
+    fn notify(&self, apply_res: vec_deque::Drain<ApplyRes<EK::Snapshot>>) {
         for r in apply_res {
             self.router.try_send(
                 r.region_id,
@@ -869,12 +869,12 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport> PollHandler<PeerFsm<EK, ER>, St
                     self.peer_msg_buf.push(msg);
                 }
                 Err(TryRecvError::Empty) => {
-                    handle_result = HandleResult::stop_at(0, false);
+                    handle_result = HandleResult::stop_at(0, CheckPointType::None);
                     break;
                 }
                 Err(TryRecvError::Disconnected) => {
                     peer.stop();
-                    handle_result = HandleResult::stop_at(0, false);
+                    handle_result = HandleResult::stop_at(0, CheckPointType::None);
                     break;
                 }
             }
@@ -885,7 +885,7 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport> PollHandler<PeerFsm<EK, ER>, St
         // No readiness is generated, skipping calling ready and release early.
         if !delegate.collect_ready(offset) {
             if let HandleResult::StopAt { skip_end, .. } = &mut handle_result {
-                *skip_end = true;
+                *skip_end = CheckPointType::OnlyCurrent;
             }
         }
         handle_result
