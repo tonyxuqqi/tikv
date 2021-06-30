@@ -69,7 +69,6 @@ use crate::{Error, Result};
 use super::metrics::*;
 
 const DEFAULT_APPLY_WB_SIZE: usize = 4 * 1024;
-const APPLY_WB_SHRINK_SIZE: usize = 1024 * 1024;
 const SHRINK_PENDING_CMD_QUEUE_CAP: usize = 64;
 
 pub struct PendingCmd<S>
@@ -342,7 +341,7 @@ where
     apply_res: VecDeque<ApplyRes<EK::Snapshot>>,
     exec_ctx: Option<ExecContext>,
 
-    kv_wb: W,
+    kv_wb: Option<W>,
     kv_wb_last_bytes: u64,
     kv_wb_last_keys: u64,
 
@@ -391,10 +390,6 @@ where
         store_id: u64,
         pending_create_peers: Arc<Mutex<HashMap<u64, (u64, bool)>>>,
     ) -> ApplyContext<EK, W> {
-        // If `enable_multi_batch_write` was set true, we create `RocksWriteBatchVec`.
-        // Otherwise create `RocksWriteBatch`.
-        let kv_wb = W::with_capacity(&engine, DEFAULT_APPLY_WB_SIZE);
-
         ApplyContext {
             tag,
             timer: None,
@@ -404,7 +399,7 @@ where
             engine: engine.clone(),
             router,
             notifier,
-            kv_wb,
+            kv_wb: None,
             cbs: MustConsumeVec::new("callback of apply context"),
             apply_res: VecDeque::with_capacity(1024),
             kv_wb_last_bytes: 0,
@@ -446,7 +441,7 @@ where
     /// This call is valid only when it's between a `prepare_for` and `finish_for`.
     pub fn commit(&mut self, delegate: &mut ApplyDelegate<EK>) {
         if self.last_applied_index < delegate.apply_state.get_applied_index() {
-            delegate.write_apply_state(self.kv_wb_mut());
+            delegate.write_apply_state(self.kv_wb_mut(delegate));
         }
         // last_applied_index doesn't need to be updated, set persistent to true will
         // force it call `prepare_for` automatically.
@@ -456,35 +451,30 @@ where
     fn commit_opt(&mut self, delegate: &mut ApplyDelegate<EK>, persistent: bool) {
         delegate.update_metrics(self);
         if persistent {
-            self.write_to_db();
+            self.write_to_db(delegate);
             self.prepare_for(delegate);
         }
-        self.kv_wb_last_bytes = self.kv_wb().data_size() as u64;
-        self.kv_wb_last_keys = self.kv_wb().count() as u64;
+        self.kv_wb_last_bytes = self.kv_wb_mut(delegate).data_size() as u64;
+        self.kv_wb_last_keys = self.kv_wb_mut(delegate).count() as u64;
     }
 
     /// Writes all the changes into RocksDB.
     /// If it returns true, all pending writes are persisted in engines.
-    pub fn write_to_db(&mut self) -> bool {
+    pub fn write_to_db(&mut self, delegate: &ApplyDelegate<EK>) -> bool {
         let need_sync = self.sync_log_hint;
-        if !self.kv_wb_mut().is_empty() {
+        let disable_kv_wal = self.disable_kv_wal;
+        let wb = self.kv_wb_mut(delegate);
+        if !wb.is_empty() {
             let mut write_opts = engine_traits::WriteOptions::new();
             write_opts.set_sync(need_sync);
-            write_opts.set_disable_wal(self.disable_kv_wal);
-            self.kv_wb().write_opt(&write_opts).unwrap_or_else(|e| {
+            write_opts.set_disable_wal(disable_kv_wal);
+            wb.write_opt(&write_opts).unwrap_or_else(|e| {
                 panic!("failed to write to engine: {:?}", e);
             });
+            // Clear data, reuse the WriteBatch, this can reduce memory allocations and deallocations.
+            wb.clear();
             self.perf_context.report_metrics();
             self.sync_log_hint = false;
-            let data_size = self.kv_wb().data_size();
-            if data_size > APPLY_WB_SHRINK_SIZE {
-                // Control the memory usage for the WriteBatch. Whether it's `RocksWriteBatch` or
-                // `RocksWriteBatchVec` depends on the `enable_multi_batch_write` configuration.
-                self.kv_wb = W::with_capacity(&self.engine, DEFAULT_APPLY_WB_SIZE);
-            } else {
-                // Clear data, reuse the WriteBatch, this can reduce memory allocations and deallocations.
-                self.kv_wb_mut().clear();
-            }
             self.kv_wb_last_bytes = 0;
             self.kv_wb_last_keys = 0;
         }
@@ -498,7 +488,7 @@ where
         }
         self.write_times += 1;
         // Call it before invoking callback for preventing Commit is executed before Prewrite is observed.
-        self.host.on_flush_apply(self.engine.clone());
+        self.host.on_flush_apply(delegate.engine.clone().unwrap());
 
         for cbs in self.cbs.drain(..) {
             cbs.invoke_all(&self.host);
@@ -519,7 +509,7 @@ where
         results: VecDeque<ExecResult<EK::Snapshot>>,
     ) {
         if !delegate.pending_remove {
-            delegate.write_apply_state(self.kv_wb_mut());
+            delegate.write_apply_state(self.kv_wb_mut(delegate));
         }
         self.commit_opt(delegate, false);
         self.apply_res.push_back(ApplyRes {
@@ -532,26 +522,26 @@ where
     }
 
     pub fn delta_bytes(&self) -> u64 {
-        self.kv_wb().data_size() as u64 - self.kv_wb_last_bytes
+        self.kv_wb.as_ref().map_or(0, |w| w.data_size()) as u64 - self.kv_wb_last_bytes
     }
 
     pub fn delta_keys(&self) -> u64 {
-        self.kv_wb().count() as u64 - self.kv_wb_last_keys
+        self.kv_wb.as_ref().map_or(0, |w| w.count()) as u64 - self.kv_wb_last_keys
     }
 
     #[inline]
-    pub fn kv_wb(&self) -> &W {
-        &self.kv_wb
-    }
-
-    #[inline]
-    pub fn kv_wb_mut(&mut self) -> &mut W {
-        &mut self.kv_wb
+    pub fn kv_wb_mut(&mut self, delegate: &ApplyDelegate<EK>) -> &mut W {
+        if self.kv_wb.is_none() {
+            // If `enable_multi_batch_write` was set true, we create `RocksWriteBatchVec`.
+            // Otherwise create `RocksWriteBatch`.
+            self.kv_wb = Some(W::with_capacity(delegate.engine(), DEFAULT_APPLY_WB_SIZE));
+        }
+        self.kv_wb.as_mut().unwrap()
     }
 
     /// Flush all pending writes to engines.
     /// If it returns true, all pending writes are persisted in engines.
-    pub fn flush(&mut self) -> bool {
+    pub fn flush(&mut self, delegate: &ApplyDelegate<EK>) -> bool {
         // TODO: this check is too hacky, need to be more verbose and less buggy.
         let t = match self.timer.take() {
             Some(t) => t,
@@ -563,7 +553,7 @@ where
         // take raft log gc for example, we write kv WAL first, then write raft WAL,
         // if power failure happen, raft WAL may synced to disk, but kv WAL may not.
         // so we use sync-log flag here.
-        let is_synced = self.write_to_db();
+        let is_synced = self.write_to_db(delegate);
 
         let elapsed = t.elapsed();
         STORE_APPLY_LOG_HISTOGRAM.observe(duration_to_sec(elapsed) as f64);
@@ -926,6 +916,11 @@ where
         });
     }
 
+    #[inline]
+    fn engine(&self) -> &EK {
+        self.engine.as_ref().unwrap()
+    }
+
     fn handle_raft_entry_normal<W: WriteBatch<EK>>(
         &mut self,
         apply_ctx: &mut ApplyContext<EK, W>,
@@ -942,7 +937,12 @@ where
         if !data.is_empty() {
             let cmd = util::parse_data_at(data, index, &self.tag);
 
-            if should_write_to_engine(&cmd) || apply_ctx.kv_wb().should_write_to_engine() {
+            if should_write_to_engine(&cmd)
+                || apply_ctx
+                    .kv_wb
+                    .as_ref()
+                    .map_or(false, |wb| wb.should_write_to_engine())
+            {
                 apply_ctx.commit(self);
                 if let Some(start) = self.handle_start.as_ref() {
                     if start.elapsed() >= apply_ctx.yield_duration {
@@ -1118,11 +1118,11 @@ where
         assert!(!self.pending_remove);
 
         ctx.exec_ctx = Some(self.new_ctx(index, term));
-        ctx.kv_wb_mut().set_save_point();
+        ctx.kv_wb_mut(self).set_save_point();
         let mut origin_epoch = None;
         let (resp, exec_result) = match self.exec_raft_cmd(ctx, &req) {
             Ok(a) => {
-                ctx.kv_wb_mut().pop_save_point().unwrap();
+                ctx.kv_wb_mut(self).pop_save_point().unwrap();
                 if req.has_admin_request() {
                     origin_epoch = Some(self.region.get_region_epoch().clone());
                 }
@@ -1130,7 +1130,7 @@ where
             }
             Err(e) => {
                 // clear dirty values.
-                ctx.kv_wb_mut().rollback_to_save_point().unwrap();
+                ctx.kv_wb_mut(self).rollback_to_save_point().unwrap();
                 match e {
                     Error::EpochNotMatch(..) => debug!(
                         "epoch not match";
@@ -1315,15 +1315,15 @@ where
         for req in requests {
             let cmd_type = req.get_cmd_type();
             let mut resp = match cmd_type {
-                CmdType::Put => self.handle_put(ctx.kv_wb_mut(), req),
-                CmdType::Delete => self.handle_delete(ctx.kv_wb_mut(), req),
+                CmdType::Put => self.handle_put(ctx.kv_wb_mut(self), req),
+                CmdType::Delete => self.handle_delete(ctx.kv_wb_mut(self), req),
                 CmdType::DeleteRange => {
-                    assert!(ctx.kv_wb.is_empty());
-                    self.handle_delete_range(&ctx.engine, req, &mut ranges, ctx.use_delete_range)
+                    assert!(ctx.kv_wb.as_ref().map_or(true, |wb| wb.is_empty()));
+                    self.handle_delete_range(req, &mut ranges, ctx.use_delete_range)
                 }
                 CmdType::IngestSst => {
-                    assert!(ctx.kv_wb.is_empty());
-                    self.handle_ingest_sst(&ctx.importer, &ctx.engine, req, &mut ssts)
+                    assert!(ctx.kv_wb.as_ref().map_or(true, |wb| wb.is_empty()));
+                    self.handle_ingest_sst(&ctx.importer, req, &mut ssts)
                 }
                 // Readonly commands are handled in raftstore directly.
                 // Don't panic here in case there are old entries need to be applied.
@@ -1465,7 +1465,6 @@ where
 
     fn handle_delete_range(
         &mut self,
-        engine: &EK,
         req: &Request,
         ranges: &mut Vec<Range>,
         use_delete_range: bool,
@@ -1512,6 +1511,7 @@ where
                     e
                 )
             };
+            let engine = self.engine();
             engine
                 .delete_ranges_cf(cf, DeleteStrategy::DeleteFiles, &range)
                 .unwrap_or_else(|e| fail_f(e, DeleteStrategy::DeleteFiles));
@@ -1539,7 +1539,6 @@ where
     fn handle_ingest_sst(
         &mut self,
         importer: &Arc<SSTImporter>,
-        engine: &EK,
         req: &Request,
         ssts: &mut Vec<SSTMetaInfo>,
     ) -> Result<Response> {
@@ -1558,7 +1557,7 @@ where
             return Err(e);
         }
 
-        match importer.ingest(sst, engine) {
+        match importer.ingest(sst, self.engine()) {
             Ok(meta_info) => ssts.push(meta_info),
             Err(e) => {
                 // If this failed, it means that the file is corrupted or something
@@ -1780,7 +1779,7 @@ where
         } else {
             PeerState::Normal
         };
-        if let Err(e) = write_peer_state(ctx.kv_wb_mut(), &region, state, None) {
+        if let Err(e) = write_peer_state(ctx.kv_wb_mut(self), &region, state, None) {
             panic!("{} failed to update region state: {:?}", self.tag, e);
         }
 
@@ -1825,7 +1824,7 @@ where
             PeerState::Normal
         };
 
-        if let Err(e) = write_peer_state(ctx.kv_wb_mut(), &region, state, None) {
+        if let Err(e) = write_peer_state(ctx.kv_wb_mut(self), &region, state, None) {
             panic!("{} failed to update region state: {:?}", self.tag, e);
         }
 
@@ -2170,8 +2169,8 @@ where
         let mut already_exist_regions = Vec::new();
         for (region_id, new_split_peer) in new_split_regions.iter_mut() {
             let region_state_key = keys::region_state_key(*region_id);
-            match ctx
-                .engine
+            match self
+                .engine()
                 .get_msg_cf::<RegionLocalState>(CF_RAFT, &region_state_key)
             {
                 Ok(None) => (),
@@ -2202,7 +2201,7 @@ where
             }
         }
 
-        let kv_wb_mut = ctx.kv_wb_mut();
+        let kv_wb_mut = ctx.kv_wb_mut(self);
         for new_region in &regions {
             if new_region.get_id() == derived.get_id() {
                 continue;
@@ -2287,7 +2286,7 @@ where
         merging_state.set_target(prepare_merge.get_target().to_owned());
         merging_state.set_commit(exec_ctx.index);
         write_peer_state(
-            ctx.kv_wb_mut(),
+            ctx.kv_wb_mut(self),
             &region,
             PeerState::Merging,
             Some(merging_state.clone()),
@@ -2391,7 +2390,7 @@ where
         self.ready_source_region_id = 0;
 
         let region_state_key = keys::region_state_key(source_region_id);
-        let state: RegionLocalState = match ctx.engine.get_msg_cf(CF_RAFT, &region_state_key) {
+        let state: RegionLocalState = match self.engine().get_msg_cf(CF_RAFT, &region_state_key) {
             Ok(Some(s)) => s,
             e => panic!(
                 "{} failed to get regions state of {:?}: {:?}",
@@ -2423,7 +2422,7 @@ where
         } else {
             region.set_start_key(source_region.get_start_key().to_vec());
         }
-        let kv_wb_mut = ctx.kv_wb_mut();
+        let kv_wb_mut = ctx.kv_wb_mut(self);
         write_peer_state(kv_wb_mut, &region, PeerState::Normal, None)
             .and_then(|_| {
                 // TODO: maybe all information needs to be filled?
@@ -2464,7 +2463,7 @@ where
 
         PEER_ADMIN_CMD_COUNTER.rollback_merge.all.inc();
         let region_state_key = keys::region_state_key(self.region_id());
-        let state: RegionLocalState = match ctx.engine.get_msg_cf(CF_RAFT, &region_state_key) {
+        let state: RegionLocalState = match self.engine().get_msg_cf(CF_RAFT, &region_state_key) {
             Ok(Some(s)) => s,
             e => panic!("{} failed to get regions state: {:?}", self.tag, e),
         };
@@ -2480,12 +2479,14 @@ where
         let version = region.get_region_epoch().get_version();
         // Update version to avoid duplicated rollback requests.
         region.mut_region_epoch().set_version(version + 1);
-        write_peer_state(ctx.kv_wb_mut(), &region, PeerState::Normal, None).unwrap_or_else(|e| {
-            panic!(
-                "{} failed to rollback merge {:?}: {:?}",
-                self.tag, rollback, e
-            )
-        });
+        write_peer_state(ctx.kv_wb_mut(self), &region, PeerState::Normal, None).unwrap_or_else(
+            |e| {
+                panic!(
+                    "{} failed to rollback merge {:?}: {:?}",
+                    self.tag, rollback, e
+                )
+            },
+        );
 
         PEER_ADMIN_CMD_COUNTER.rollback_merge.success.inc();
         let resp = AdminResponse::default();
@@ -2574,7 +2575,7 @@ where
                 // open files in rocksdb.
                 // TODO: figure out another way to do consistency check without snapshot
                 // or short life snapshot.
-                snap: ctx.engine.snapshot(),
+                snap: self.engine().snapshot(),
             }),
         ))
     }
@@ -3091,7 +3092,7 @@ where
         let region_id = self.delegate.region_id();
         if ctx.apply_res.iter().any(|res| res.region_id == region_id) {
             // Flush before destroying to avoid reordering messages.
-            ctx.flush();
+            ctx.flush(&self.delegate);
         }
         fail_point!(
             "before_peer_destroy_1003",
@@ -3217,14 +3218,15 @@ where
             if apply_ctx.timer.is_none() {
                 apply_ctx.timer = Some(Instant::now_coarse());
             }
-            self.delegate.write_apply_state(apply_ctx.kv_wb_mut());
+            self.delegate
+                .write_apply_state(apply_ctx.kv_wb_mut(&self.delegate));
             fail_point!(
                 "apply_on_handle_snapshot_1_1",
                 self.delegate.id == 1 && self.delegate.region_id() == 1,
                 |_| unimplemented!()
             );
 
-            apply_ctx.flush();
+            apply_ctx.flush(&self.delegate);
             // For now, it's more like last_flush_apply_index.
             // TODO: Update it only when `flush()` returns true.
             self.delegate.last_sync_apply_index = applied_index;
@@ -3276,13 +3278,13 @@ where
         ) {
             Ok(()) => {
                 // Commit the writebatch for ensuring the following snapshot can get all previous writes.
-                if apply_ctx.kv_wb().count() > 0 {
+                if apply_ctx.kv_wb_mut(&self.delegate).count() > 0 {
                     apply_ctx.commit(&mut self.delegate);
                 }
                 ReadResponse {
                     response: Default::default(),
                     snapshot: Some(RegionSnapshot::from_snapshot(
-                        Arc::new(apply_ctx.engine.snapshot()),
+                        Arc::new(self.delegate.engine().snapshot()),
                         Arc::new(self.delegate.region.clone()),
                     )),
                     txn_extra_op: TxnExtraOp::Noop,
@@ -3405,6 +3407,20 @@ where
     cfg_tracker: Tracker<Config>,
 }
 
+impl<EK, W> ApplyPoller<EK, W>
+where
+    EK: KvEngine,
+    W: WriteBatch<EK>,
+{
+    #[inline]
+    fn before_returning(&mut self, f: &mut impl TrackedFsm<Target = ApplyFsm<EK>>) {
+        let is_synced = self.apply_ctx.flush(&f.delegate);
+        if is_synced {
+            f.delegate.last_sync_apply_index = f.delegate.apply_state.get_applied_index();
+        }
+    }
+}
+
 impl<EK, W> PollHandler<ApplyFsm<EK>, ControlFsm> for ApplyPoller<EK, W>
 where
     EK: KvEngine,
@@ -3451,11 +3467,13 @@ where
                 // Yield due to applying CommitMerge, this fsm can be released if its
                 // channel msg count equals to expected_msg_count because it will receive
                 // a new message if its source region has applied all needed logs.
+                self.before_returning(normal);
                 return expected_msg_count.into();
             } else if normal.delegate.yield_state.is_some() {
                 // Yield due to other reasons, this fsm must not be released because
                 // it's possible that no new message will be sent to itself.
                 // The remaining messages will be handled in next rounds.
+                self.before_returning(normal);
                 return HandleResult::KeepProcessing;
             }
             expected_msg_count = None;
@@ -3490,6 +3508,7 @@ where
             // Let it continue to run next time.
             expected_msg_count = None;
         }
+        self.before_returning(normal);
         match expected_msg_count {
             Some(progress) => HandleResult::StopAt {
                 progress,
@@ -3504,16 +3523,7 @@ where
         }
     }
 
-    fn end(&mut self, fsms: &mut [Option<impl TrackedFsm<Target = ApplyFsm<EK>>>]) {
-        let is_synced = self.apply_ctx.flush();
-        if is_synced {
-            for fsm in fsms {
-                if let Some(f) = fsm {
-                    f.delegate.last_sync_apply_index = f.delegate.apply_state.get_applied_index();
-                }
-            }
-        }
-    }
+    fn end(&mut self, _fsms: &mut [Option<impl TrackedFsm<Target = ApplyFsm<EK>>>]) {}
 }
 
 pub struct Builder<EK: KvEngine, W: WriteBatch<EK>> {
