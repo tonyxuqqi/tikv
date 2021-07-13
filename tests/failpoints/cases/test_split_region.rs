@@ -316,7 +316,7 @@ fn test_split_not_to_split_existing_region() {
     fail::remove(on_handle_apply_1003_fp);
 
     // If peer_c_3 is created, `must_get_none` will fail.
-    must_get_none_in(cluster.engine(3), regon_d.get_id(), b"k0");
+    must_get_none_in(cluster.engine(3), region_d.get_id(), b"k0");
 }
 
 // Test if a peer is created from splitting when another initialized peer with the same
@@ -350,12 +350,12 @@ fn test_split_not_to_split_existing_tombstone_region() {
     cluster.must_split(&region, b"k2");
     cluster.must_put(b"k22", b"v22");
 
-    must_get_equal_in(&cluster.get_engine(2), b"k1", b"v1");
-
     let left = pd_client.get_region(b"k1").unwrap();
+    must_get_equal_in(cluster.engine(2), left.get_id(), b"k1", b"v1");
+
     let left_peer_2 = find_peer(&left, 2).cloned().unwrap();
     pd_client.must_remove_peer(left.get_id(), left_peer_2);
-    must_get_none_in(&cluster.get_engine(2), b"k1");
+    must_get_none_in(cluster.engine(2), left.get_id(), b"k1");
 
     let on_handle_apply_2_fp = "on_handle_apply_2";
     fail::cfg("on_handle_apply_2", "pause").unwrap();
@@ -374,7 +374,7 @@ fn test_split_not_to_split_existing_tombstone_region() {
     fail::remove(on_handle_apply_2_fp);
 
     // If value of `k22` is equal to `v22`, the previous split log must be applied.
-    must_get_equal_in(&cluster.get_engine(2), b"k22", b"v22");
+    must_get_equal_in(cluster.engine(2), region.get_id(), b"k22", b"v22");
 
     // If left_peer_2 is created, `must_get_none` will fail.
     must_get_none(&cluster.get_engine(2), b"k1");

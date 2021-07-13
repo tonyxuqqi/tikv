@@ -2242,8 +2242,10 @@ where
                     "err" => %e,
                 );
             }
+            let tablet = self.fsm.peer.get_store().tablet();
             if let Err(e) = self.ctx.split_check_scheduler.schedule(
                 SplitCheckTask::GetRegionApproximateSizeAndKeys {
+                    tablet,
                     region: self.fsm.peer.region().clone(),
                     pending_tasks: Arc::new(AtomicU64::new(1)),
                     cb: Box::new(move |_, _| {}),
@@ -2376,6 +2378,7 @@ where
                 // check again after split.
                 new_peer.peer.size_diff_hint = self.ctx.cfg.region_split_check_diff.0;
             }
+            let new_tablet = new_peer.peer.get_store().tablet();
             let mailbox = BasicMailbox::new(sender, new_peer);
             self.ctx.router.register(new_region_id, mailbox);
             self.ctx
@@ -2403,6 +2406,7 @@ where
                 // So we let split checker to update it immediately.
                 if let Err(e) = self.ctx.split_check_scheduler.schedule(
                     SplitCheckTask::GetRegionApproximateSizeAndKeys {
+                        tablet: new_tablet,
                         region: new_region,
                         pending_tasks: Arc::new(AtomicU64::new(1)),
                         cb: Box::new(move |_, _| {}),
@@ -3576,8 +3580,13 @@ where
         }
         self.fsm.skip_split_count = 0;
 
-        let task =
-            SplitCheckTask::split_check(self.fsm.peer.region().clone(), true, CheckPolicy::Scan);
+        let tablet = self.fsm.peer.get_store().tablet();
+        let task = SplitCheckTask::split_check(
+            tablet,
+            self.region().clone(),
+            true,
+            CheckPolicy::Approximate,
+        );
         if let Err(e) = self.ctx.split_check_scheduler.schedule(task) {
             error!(
                 "failed to schedule split check";
@@ -3752,7 +3761,8 @@ where
             return;
         }
 
-        let task = SplitCheckTask::split_check(region.clone(), false, policy);
+        let tablet = self.fsm.peer.get_store().tablet();
+        let task = SplitCheckTask::split_check(tablet, region.clone(), false, policy);
         if let Err(e) = self.ctx.split_check_scheduler.schedule(task) {
             error!(
                 "failed to schedule split check";

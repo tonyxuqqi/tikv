@@ -94,9 +94,9 @@ impl Config {
     }
 }
 
-pub struct SplitCheckConfigManager(pub Scheduler<SplitCheckTask>);
+pub struct SplitCheckConfigManager<EK: Send + 'static>(pub Scheduler<SplitCheckTask<EK>>);
 
-impl ConfigManager for SplitCheckConfigManager {
+impl<EK: Send> ConfigManager for SplitCheckConfigManager<EK> {
     fn dispatch(
         &mut self,
         change: ConfigChange,
@@ -106,8 +106,8 @@ impl ConfigManager for SplitCheckConfigManager {
     }
 }
 
-impl std::ops::Deref for SplitCheckConfigManager {
-    type Target = Scheduler<SplitCheckTask>;
+impl<EK: Send> std::ops::Deref for SplitCheckConfigManager<EK> {
+    type Target = Scheduler<SplitCheckTask<EK>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0

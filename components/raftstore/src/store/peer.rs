@@ -3364,7 +3364,9 @@ where
         let region_id = self.region_id;
         let peer_id = self.peer.get_id();
         let scheduler = ctx.pd_scheduler.clone();
+        let tablet = self.get_store().tablet();
         let split_check_task = SplitCheckTask::GetRegionApproximateSizeAndKeys {
+            tablet,
             region: self.region().clone(),
             pending_tasks: self.pending_pd_heartbeat_tasks.clone(),
             cb: Box::new(move |size: u64, keys: u64| {

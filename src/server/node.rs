@@ -396,7 +396,7 @@ where
         store_meta: Arc<Mutex<StoreMeta<RocksEngine>>>,
         coprocessor_host: CoprocessorHost<RocksEngine>,
         importer: Arc<SSTImporter>,
-        split_check_scheduler: Scheduler<SplitCheckTask>,
+        split_check_scheduler: Scheduler<SplitCheckTask<RocksEngine>>,
         auto_split_controller: AutoSplitController,
         concurrency_manager: ConcurrencyManager,
     ) -> Result<()>
@@ -642,7 +642,7 @@ where
         store_meta: Arc<Mutex<StoreMeta<RocksEngine>>>,
         coprocessor_host: CoprocessorHost<RocksEngine>,
         importer: Arc<SSTImporter>,
-        split_check_scheduler: Scheduler<SplitCheckTask>,
+        split_check_scheduler: Scheduler<SplitCheckTask<RocksEngine>>,
         auto_split_controller: AutoSplitController,
         concurrency_manager: ConcurrencyManager,
     ) -> Result<()>

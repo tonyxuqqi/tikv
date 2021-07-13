@@ -202,6 +202,7 @@ mod tests {
             engine.flush_cf(CF_DEFAULT, true).unwrap();
         }
         runnable.run(SplitCheckTask::split_check(
+            engine.clone(),
             region.clone(),
             false,
             CheckPolicy::Scan,
@@ -209,6 +210,7 @@ mod tests {
         let split_key = Key::from_raw(b"0005");
         must_split_at(&rx, &region, vec![split_key.clone().into_encoded()]);
         runnable.run(SplitCheckTask::split_check(
+            engine,
             region.clone(),
             false,
             CheckPolicy::Approximate,
