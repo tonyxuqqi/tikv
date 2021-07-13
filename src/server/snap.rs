@@ -78,10 +78,12 @@ async fn send_snap_files(
         let mut buffer = Vec::with_capacity(SNAP_CHUNK_LEN);
         buffer.push(name.len() as u8);
         buffer.extend_from_slice(name.as_bytes());
-        let mut f = File::open(path)?;
+        let mut f = File::open(&path)?;
+        let file_size = f.metadata()?.len();
+        let mut size = 0;
         let mut off = buffer.len();
-        unsafe { buffer.set_len(SNAP_CHUNK_LEN) };
         loop {
+            unsafe { buffer.set_len(SNAP_CHUNK_LEN) };
             let new_len = f.read(&mut buffer[off..])? + off;
             total_sent += new_len as u64;
             unsafe {
@@ -92,12 +94,14 @@ async fn send_snap_files(
             sender
                 .feed((chunk, WriteFlags::default().buffer_hint(true)))
                 .await?;
+            size += new_len - off;
             if new_len < SNAP_CHUNK_LEN {
                 break;
             }
             buffer = Vec::with_capacity(SNAP_CHUNK_LEN);
             off = 0;
         }
+        info!("sent snap file"; "file" => %path.display(), "size" => file_size, "sent" => size);
     }
     sender.close().await?;
     Ok(total_sent)
@@ -219,9 +223,11 @@ fn recv_snap<R: RaftStoreRouter<RocksEngine> + 'static>(
             };
             let len = chunk[0] as usize;
             let file_name = box_try!(std::str::from_utf8(&chunk[1..len + 1]));
-            debug!("receiving snap file"; "file" => %file_name);
-            let mut f = File::create(path.join(file_name))?;
+            let p = path.join(file_name);
+            debug!("receiving snap file"; "file" => %p.display());
+            let mut f = File::create(&p)?;
             f.write_all(&chunk[len + 1..])?;
+            let mut size = chunk.len() - len - 1;
             while chunk.len() >= SNAP_CHUNK_LEN {
                 chunk = match stream.try_next().await? {
                     Some(mut c) if !c.has_message() => c.take_data(),
@@ -229,7 +235,9 @@ fn recv_snap<R: RaftStoreRouter<RocksEngine> + 'static>(
                     None => return Err(box_err!("missing chunk")),
                 };
                 f.write_all(&chunk)?;
+                size += chunk.len();
             }
+            info!("received snap file"; "file" => %p.display(), "size" => size);
             f.sync_data()?;
         }
         // TODO: should sync directory.

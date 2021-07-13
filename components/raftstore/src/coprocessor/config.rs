@@ -57,7 +57,7 @@ pub const DEFAULT_SPLIT_SIZE: ReadableSize = ReadableSize::gb(32);
 /// Default region split keys.
 pub const SPLIT_KEYS: u64 = 960000;
 /// Default batch split limit.
-pub const BATCH_SPLIT_LIMIT: u64 = 10;
+pub const BATCH_SPLIT_LIMIT: u64 = 3;
 
 impl Default for Config {
     fn default() -> Config {

@@ -1038,12 +1038,20 @@ where
     }
 
     #[inline]
-    fn send<T, I>(&mut self, trans: &mut T, msgs: I, metrics: &mut RaftSendMessageMetrics)
-    where
+    fn send<T>(
+        &mut self,
+        trans: &mut T,
+        mut msgs: Vec<eraftpb::Message>,
+        metrics: &mut RaftSendMessageMetrics,
+    ) where
         T: Transport,
-        I: IntoIterator<Item = eraftpb::Message>,
     {
-        for msg in msgs {
+        let resp_count = msgs
+            .iter()
+            .take_while(|m| m.get_msg_type() == MessageType::MsgAppendResponse)
+            .count();
+        let start = cmp::max(1, resp_count) - 1;
+        for msg in msgs.drain(start..) {
             let msg_type = msg.get_msg_type();
             let snapshot_index = msg.get_request_snapshot();
             let i = self.send_raft_message(msg, trans) as usize;

@@ -1358,12 +1358,22 @@ where
     }
 
     /// Delete all extra split data from the `start_key` to `end_key`.
-    pub fn clear_extra_split_data(&self, start_key: Vec<u8>, end_key: Vec<u8>) -> Result<()> {
-        box_try!(self.region_sched.schedule(RegionTask::destroy(
-            self.get_region_id(),
-            start_key,
-            end_key
-        )));
+    pub fn clear_extra_split_data(&self) -> Result<()> {
+        let (start_key, end_key) = (enc_start_key(&self.region), enc_end_key(&self.region));
+        if keys::DATA_MIN_KEY < start_key.as_slice() {
+            box_try!(self.region_sched.schedule(RegionTask::destroy(
+                self.get_region_id(),
+                keys::DATA_MIN_KEY.to_vec(),
+                start_key,
+            )));
+        }
+        if keys::DATA_MAX_KEY > end_key.as_slice() {
+            box_try!(self.region_sched.schedule(RegionTask::destroy(
+                self.get_region_id(),
+                end_key,
+                keys::DATA_MAX_KEY.to_vec(),
+            )));
+        }
         Ok(())
     }
 

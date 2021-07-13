@@ -2280,17 +2280,6 @@ where
             // Check if this new region should be splitted
             let new_split_peer = new_split_regions.get(&new_region.get_id()).unwrap();
             if new_split_peer.result.is_some() {
-                if let Err(e) = self
-                    .fsm
-                    .peer
-                    .mut_store()
-                    .clear_extra_split_data(enc_start_key(&new_region), enc_end_key(&new_region))
-                {
-                    error!(?e;
-                        "failed to cleanup extra split data, may leave some dirty data";
-                        "region_id" => new_region.get_id(),
-                    );
-                }
                 continue;
             }
 
@@ -2419,6 +2408,13 @@ where
                     );
                 }
             }
+        }
+
+        if let Err(e) = self.fsm.peer.mut_store().clear_extra_split_data() {
+            error!(?e;
+                "failed to cleanup extra split data, may leave some dirty data";
+                "region_id" => self.fsm.peer_id(),
+            );
         }
         fail_point!("after_split", self.ctx.store_id() == 3, |_| {});
     }
