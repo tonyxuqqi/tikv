@@ -171,6 +171,8 @@ pub struct Config {
     pub apply_yield_duration: ReadableDuration,
     #[config(skip)]
     pub disable_kv_wal: bool,
+    #[config(skip)]
+    pub skip_commit_index: bool,
 
     // Deprecated! These configuration has been moved to Coprocessor.
     // They are preserved for compatibility check.
@@ -256,6 +258,7 @@ impl Default for Config {
             dev_assert: false,
             apply_yield_duration: ReadableDuration::millis(500),
             disable_kv_wal: false,
+            skip_commit_index: false,
 
             // They are preserved for compatibility check.
             region_max_size: ReadableSize(0),
