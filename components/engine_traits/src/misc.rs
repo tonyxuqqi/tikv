@@ -8,6 +8,7 @@
 use crate::cf_names::CFNamesExt;
 use crate::errors::Result;
 use crate::range::Range;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub enum DeleteStrategy {
@@ -82,4 +83,6 @@ pub trait MiscExt: CFNamesExt {
     ) -> Result<Option<(u64, u64)>>;
 
     fn get_cf_num_files_at_level(&self, cf: &str, level: usize) -> Result<Option<u64>>;
+
+    fn checkpoint_to(&self, path: &[PathBuf], size_to_flush: u64) -> Result<()>;
 }

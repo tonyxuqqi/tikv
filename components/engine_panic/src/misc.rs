@@ -2,6 +2,7 @@
 
 use crate::engine::PanicEngine;
 use engine_traits::{DeleteStrategy, MiscExt, Range, Result};
+use std::path::PathBuf;
 
 impl MiscExt for PanicEngine {
     fn flush(&self, sync: bool) -> Result<()> {
@@ -70,6 +71,10 @@ impl MiscExt for PanicEngine {
     }
 
     fn get_cf_num_files_at_level(&self, cf: &str, level: usize) -> Result<Option<u64>> {
+        panic!()
+    }
+
+    fn checkpoint_to(&self, path: &[PathBuf], size_to_flush: u64) -> Result<()> {
         panic!()
     }
 }

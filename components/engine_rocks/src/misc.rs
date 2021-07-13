@@ -10,6 +10,7 @@ use engine_traits::{
     WriteBatchExt, ALL_CFS,
 };
 use rocksdb::Range as RocksRange;
+use std::path::PathBuf;
 use tikv_util::keybuilder::KeyBuilder;
 
 pub const MAX_DELETE_COUNT_BY_KEY: usize = 2048;
@@ -326,6 +327,18 @@ impl MiscExt for RocksEngine {
             &handle,
             level,
         ))
+    }
+
+    fn checkpoint_to(&self, path: &[PathBuf], size_to_flush: u64) -> Result<()> {
+        if path.is_empty() {
+            return Ok(());
+        }
+        let mut checkpoint = self.as_inner().checkpoint()?;
+        checkpoint.create_at(&path[0], size_to_flush)?;
+        for p in &path[1..] {
+            checkpoint.create_at(p, u64::MAX)?;
+        }
+        Ok(())
     }
 }
 

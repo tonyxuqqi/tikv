@@ -53,7 +53,7 @@ pub trait Simulator {
         node_id: u64,
         cfg: TiKvConfig,
         engines: Engines<RocksEngine, RocksEngine>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<RocksEngine>>>,
         key_manager: Option<Arc<DataKeyManager>>,
         router: RaftRouter<RocksEngine, RocksEngine>,
         system: RaftBatchSystem<RocksEngine, RocksEngine>,
@@ -128,7 +128,7 @@ pub struct Cluster<T: Simulator> {
 
     pub paths: Vec<TempDir>,
     pub dbs: Vec<Engines<RocksEngine, RocksEngine>>,
-    pub store_metas: HashMap<u64, Arc<Mutex<StoreMeta>>>,
+    pub store_metas: HashMap<u64, Arc<Mutex<StoreMeta<RocksEngine>>>>,
     key_managers: Vec<Option<Arc<DataKeyManager>>>,
     pub engines: HashMap<u64, Engines<RocksEngine, RocksEngine>>,
     key_managers_map: HashMap<u64, Option<Arc<DataKeyManager>>>,
@@ -310,6 +310,10 @@ impl<T: Simulator> Cluster<T> {
 
     pub fn get_engine(&self, node_id: u64) -> Arc<DB> {
         Arc::clone(&self.engines[&node_id].kv.as_inner())
+    }
+
+    pub fn engine(&self, node_id: u64) -> &Engines<RocksEngine, RocksEngine> {
+        &self.engines[&node_id]
     }
 
     pub fn get_raft_engine(&self, node_id: u64) -> Arc<DB> {

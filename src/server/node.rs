@@ -1,35 +1,287 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use super::RaftKv;
 use super::Result;
+use crate::config::{DbConfig, TiKvConfig, DEFAULT_ROCKSDB_SUB_DIR};
 use crate::import::SSTImporter;
 use crate::read_pool::ReadPoolHandle;
 use crate::server::lock_manager::LockManager;
 use crate::server::Config as ServerConfig;
 use crate::storage::{config::Config as StorageConfig, Storage};
+use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
-use engine_rocks::RocksEngine;
-use engine_traits::{Engines, Peekable, RaftEngine};
+use engine_rocks::raw::{Cache, Env};
+use engine_rocks::{CompactionListener, RocksCompactedEvent, RocksCompactionJobInfo, RocksEngine};
+use engine_traits::{
+    CompactionJobInfo, Engines, Peekable, RaftEngine, TabletFactory, CF_DEFAULT, CF_WRITE,
+};
 use kvproto::metapb;
 use kvproto::raft_serverpb::StoreIdent;
 use kvproto::replication_modepb::ReplicationStatus;
 use pd_client::{Error as PdError, PdClient, INVALID_ID};
 use raftstore::coprocessor::dispatcher::CoprocessorHost;
+use raftstore::coprocessor::RegionInfoAccessor;
 use raftstore::router::{LocalReadRouter, RaftStoreRouter};
 use raftstore::store::fsm::store::StoreMeta;
 use raftstore::store::fsm::{ApplyRouter, RaftBatchSystem, RaftRouter};
-use raftstore::store::AutoSplitController;
 use raftstore::store::{self, initial_region, Config as StoreConfig, SnapManager, Transport};
+use raftstore::store::{AutoSplitController, StoreMsg, RAFT_INIT_LOG_INDEX};
 use raftstore::store::{GlobalReplicationState, PdTask, SplitCheckTask};
 use tikv_util::config::VersionTrack;
 use tikv_util::worker::{FutureWorker, Scheduler, Worker};
 
 const MAX_CHECK_CLUSTER_BOOTSTRAPPED_RETRY_COUNT: u64 = 60;
 const CHECK_CLUSTER_BOOTSTRAPPED_RETRY_SECONDS: u64 = 3;
+
+// todo: Cache should be `Send` and `Sync`.
+struct CacheWrap(Option<Cache>);
+unsafe impl Send for CacheWrap {}
+unsafe impl Sync for CacheWrap {}
+
+struct FactoryInner {
+    env: Option<Arc<Env>>,
+    region_info_accessor: Option<RegionInfoAccessor>,
+    block_cache: CacheWrap,
+    rocksdb_config: Arc<DbConfig>,
+    store_path: PathBuf,
+    enable_ttl: bool,
+    registry: Mutex<HashMap<(u64, u64), RocksEngine>>,
+}
+
+#[derive(Clone)]
+pub struct KvEngineFactory<ER: RaftEngine> {
+    inner: Arc<FactoryInner>,
+    router: Option<RaftRouter<RocksEngine, ER>>,
+}
+
+impl<ER: RaftEngine> KvEngineFactory<ER> {
+    #[inline]
+    pub fn new(
+        env: Option<Arc<Env>>,
+        config: &TiKvConfig,
+        region_info_accessor: Option<RegionInfoAccessor>,
+        block_cache: Option<Cache>,
+        store_path: PathBuf,
+        router: Option<RaftRouter<RocksEngine, ER>>,
+    ) -> KvEngineFactory<ER> {
+        KvEngineFactory {
+            inner: Arc::new(FactoryInner {
+                env,
+                region_info_accessor,
+                block_cache: CacheWrap(block_cache),
+                rocksdb_config: Arc::new(config.rocksdb.clone()),
+                store_path,
+                enable_ttl: config.storage.enable_ttl,
+                registry: Mutex::new(HashMap::default()),
+            }),
+            router,
+        }
+    }
+
+    fn create_raftstore_compaction_listener(&self) -> Option<CompactionListener> {
+        let ch = match &self.router {
+            Some(r) => Mutex::new(r.clone()),
+            None => return None,
+        };
+        fn size_change_filter(info: &RocksCompactionJobInfo) -> bool {
+            // When calculating region size, we only consider write and default
+            // column families.
+            let cf = info.cf_name();
+            if cf != CF_WRITE && cf != CF_DEFAULT {
+                return false;
+            }
+            // Compactions in level 0 and level 1 are very frequently.
+            if info.output_level() < 2 {
+                return false;
+            }
+
+            true
+        }
+
+        let compacted_handler = Box::new(move |compacted_event: RocksCompactedEvent| {
+            let ch = ch.lock().unwrap();
+            let event = StoreMsg::CompactedEvent(compacted_event);
+            if let Err(e) = ch.send_control(event) {
+                error_unknown!(?e; "send compaction finished event to raftstore failed");
+            }
+        });
+        Some(CompactionListener::new(
+            compacted_handler,
+            Some(size_change_filter),
+        ))
+    }
+
+    fn create_tablet(&self, tablet_path: &Path, readonly: bool) -> RocksEngine {
+        // Create kv engine.
+        let mut kv_db_opts = self.inner.rocksdb_config.build_opt();
+        if let Some(env) = &self.inner.env {
+            kv_db_opts.set_env(env.clone());
+        }
+        if let Some(filter) = self.create_raftstore_compaction_listener() {
+            kv_db_opts.add_event_listener(filter);
+        }
+        let kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
+            &self.inner.block_cache.0,
+            self.inner.region_info_accessor.as_ref(),
+            self.inner.enable_ttl,
+        );
+        let kv_engine = if !readonly {
+            engine_rocks::raw_util::new_engine_opt(
+                tablet_path.to_str().unwrap(),
+                kv_db_opts,
+                kv_cfs_opts,
+            )
+            .unwrap_or_else(|s| panic!("failed to create kv engine: {}", s))
+        } else {
+            engine_rocks::raw_util::new_engine_readonly_opt(
+                tablet_path.to_str().unwrap(),
+                kv_db_opts,
+                kv_cfs_opts,
+            )
+            .unwrap_or_else(|s| panic!("failed to open kv engine: {}", s))
+        };
+        let mut kv_engine = RocksEngine::from_db(Arc::new(kv_engine));
+        let shared_block_cache = self.inner.block_cache.0.is_some();
+        kv_engine.set_shared_block_cache(shared_block_cache);
+        kv_engine
+    }
+
+    fn destroy_tablet(&self, tablet_path: &Path) -> engine_traits::Result<()> {
+        // Create kv engine.
+        let mut kv_db_opts = self.inner.rocksdb_config.build_opt();
+        if let Some(env) = &self.inner.env {
+            kv_db_opts.set_env(env.clone());
+        }
+        if let Some(filter) = self.create_raftstore_compaction_listener() {
+            kv_db_opts.add_event_listener(filter);
+        }
+        let kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
+            &self.inner.block_cache.0,
+            self.inner.region_info_accessor.as_ref(),
+            self.inner.enable_ttl,
+        );
+        engine_rocks::raw_util::destroy_engine(
+            tablet_path.to_str().unwrap(),
+            kv_db_opts,
+            kv_cfs_opts,
+        )
+    }
+
+    #[inline]
+    fn root_db_path(&self) -> PathBuf {
+        self.inner.store_path.join(DEFAULT_ROCKSDB_SUB_DIR)
+    }
+
+    #[inline]
+    fn tablet_path(&self, id: u64, suffix: u64) -> PathBuf {
+        self.inner
+            .store_path
+            .join(format!("tablets/{}_{}", id, suffix))
+    }
+}
+
+impl<ER: RaftEngine> TabletFactory<RocksEngine> for KvEngineFactory<ER> {
+    fn create_tablet(&self, id: u64, suffix: u64) -> RocksEngine {
+        let mut reg = self.inner.registry.lock().unwrap();
+        if let Some(db) = reg.get(&(id, suffix)) {
+            panic!("region {} {} already exists", id, db.as_inner().path());
+        }
+
+        let db_path = self.tablet_path(id, suffix);
+        let kv_engine = self.create_tablet(&db_path, false);
+        debug!("inserting tablet"; "key" => ?(id, suffix));
+        reg.insert((id, suffix), kv_engine.clone());
+        kv_engine
+    }
+
+    fn open_tablet(&self, id: u64, suffix: u64) -> RocksEngine {
+        let mut reg = self.inner.registry.lock().unwrap();
+        if let Some(db) = reg.get(&(id, suffix)) {
+            return db.clone();
+        }
+
+        let db_path = self.tablet_path(id, suffix);
+        let db = self.open_tablet_raw(db_path.as_path(), false);
+        debug!("open tablet"; "key" => ?(id, suffix));
+        reg.insert((id, suffix), db.clone());
+        db
+    }
+
+    fn open_tablet_cache(&self, id: u64, suffix: u64) -> Option<RocksEngine> {
+        let reg = self.inner.registry.lock().unwrap();
+        if let Some(db) = reg.get(&(id, suffix)) {
+            return Some(db.clone());
+        }
+        None
+    }
+
+    fn open_tablet_cache_any(&self, id: u64) -> Option<RocksEngine> {
+        let reg = self.inner.registry.lock().unwrap();
+        if let Some(k) = reg.keys().find(|k| k.0 == id) {
+            debug!("choose a random tablet"; "key" => ?k);
+            return reg.get(k).cloned();
+        }
+        None
+    }
+
+    fn open_tablet_raw(&self, path: &Path, readonly: bool) -> RocksEngine {
+        if !RocksEngine::exists(&path) {
+            panic!("tablet {} doesn't exist", path.display());
+        }
+        self.create_tablet(path, readonly)
+    }
+
+    #[inline]
+    fn create_root_db(&self) -> RocksEngine {
+        let root_path = self.root_db_path();
+        self.create_tablet(&root_path, false)
+    }
+
+    #[inline]
+    fn exists_raw(&self, path: &Path) -> bool {
+        RocksEngine::exists(&path)
+    }
+
+    #[inline]
+    fn tablets_path(&self) -> PathBuf {
+        self.inner.store_path.join("tablets")
+    }
+
+    #[inline]
+    fn tablet_path(&self, id: u64, suffix: u64) -> PathBuf {
+        KvEngineFactory::tablet_path(self, id, suffix)
+    }
+
+    #[inline]
+    fn clone(&self) -> Box<dyn TabletFactory<RocksEngine> + Send> {
+        Box::new(std::clone::Clone::clone(self))
+    }
+
+    #[inline]
+    fn forget_tablet(&self, id: u64, suffix: u64) {
+        debug!("forget tablet"; "key" => ?(id, suffix));
+        self.inner.registry.lock().unwrap().remove(&(id, suffix));
+    }
+
+    #[inline]
+    fn destroy_tablet(&self, id: u64, suffix: u64) -> engine_traits::Result<()> {
+        let path = self.tablet_path(id, suffix);
+        self.destroy_tablet(&path)
+    }
+
+    #[inline]
+    fn loop_tablet_cache(&self, mut f: Box<dyn FnMut(u64, u64, &RocksEngine) + '_>) {
+        let reg = self.inner.registry.lock().unwrap();
+        for ((id, suffix), tablet) in &*reg {
+            f(*id, *suffix, tablet)
+        }
+    }
+}
 
 /// Creates a new storage engine which is backed by the Raft consensus
 /// protocol.
@@ -141,7 +393,7 @@ where
         trans: T,
         snap_mgr: SnapManager,
         pd_worker: FutureWorker<PdTask<RocksEngine>>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<RocksEngine>>>,
         coprocessor_host: CoprocessorHost<RocksEngine>,
         importer: Arc<SSTImporter>,
         split_check_scheduler: Scheduler<SplitCheckTask>,
@@ -318,7 +570,7 @@ where
     ) -> Result<()> {
         let region_id = first_region.get_id();
         let mut retry = 0;
-        while retry < MAX_CHECK_CLUSTER_BOOTSTRAPPED_RETRY_COUNT {
+        loop {
             match self
                 .pd_client
                 .bootstrap_cluster(self.store.clone(), first_region.clone())
@@ -328,14 +580,12 @@ where
                     fail_point!("node_after_bootstrap_cluster", |_| Err(box_err!(
                         "injected error: node_after_bootstrap_cluster"
                     )));
-                    store::clear_prepare_bootstrap_key(&engines)?;
-                    return Ok(());
+                    break;
                 }
                 Err(PdError::ClusterBootstrapped(_)) => match self.pd_client.get_region(b"") {
                     Ok(region) => {
                         if region == first_region {
-                            store::clear_prepare_bootstrap_key(&engines)?;
-                            return Ok(());
+                            break;
                         } else {
                             info!("cluster is already bootstrapped"; "cluster_id" => self.cluster_id);
                             store::clear_prepare_bootstrap_cluster(&engines, region_id)?;
@@ -350,11 +600,20 @@ where
                 Err(e) => error!(?e; "bootstrap cluster"; "cluster_id" => self.cluster_id,),
             }
             retry += 1;
+            if retry >= MAX_CHECK_CLUSTER_BOOTSTRAPPED_RETRY_COUNT {
+                return Err(box_err!("bootstrapped cluster failed"));
+            }
             thread::sleep(Duration::from_secs(
                 CHECK_CLUSTER_BOOTSTRAPPED_RETRY_SECONDS,
             ));
         }
-        Err(box_err!("bootstrapped cluster failed"))
+
+        let tablet = engines
+            .tablets
+            .create_tablet(region_id, RAFT_INIT_LOG_INDEX);
+        store::init_first_tablet(&tablet, &first_region)?;
+        store::clear_prepare_bootstrap_key(&engines)?;
+        Ok(())
     }
 
     fn check_cluster_bootstrapped(&self) -> Result<bool> {
@@ -380,7 +639,7 @@ where
         trans: T,
         snap_mgr: SnapManager,
         pd_worker: FutureWorker<PdTask<RocksEngine>>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<RocksEngine>>>,
         coprocessor_host: CoprocessorHost<RocksEngine>,
         importer: Arc<SSTImporter>,
         split_check_scheduler: Scheduler<SplitCheckTask>,

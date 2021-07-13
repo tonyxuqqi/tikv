@@ -1225,6 +1225,25 @@ impl SnapManager {
         Ok(v)
     }
 
+    pub fn get_temp_path_for_build(&self, region_id: u64) -> PathBuf {
+        let sst_id = self.core.temp_sst_id.fetch_add(1, Ordering::SeqCst);
+        let filename = format!(
+            "{}_{}_{}{}",
+            SNAP_GEN_PREFIX, region_id, sst_id, TMP_FILE_SUFFIX
+        );
+        PathBuf::from(&self.core.base).join(&filename)
+    }
+
+    pub fn get_final_name_for_build(&self, key: &SnapKey) -> PathBuf {
+        let prefix = format!("{}_{}", SNAP_GEN_PREFIX, key);
+        PathBuf::from(&self.core.base).join(&prefix)
+    }
+
+    pub fn get_final_name_for_recv(&self, key: &SnapKey) -> PathBuf {
+        let prefix = format!("{}_{}", SNAP_REV_PREFIX, key);
+        PathBuf::from(&self.core.base).join(&prefix)
+    }
+
     pub fn get_temp_path_for_ingest(&self) -> String {
         let sst_id = self.core.temp_sst_id.fetch_add(1, Ordering::SeqCst);
         let filename = format!(
@@ -1679,7 +1698,7 @@ pub mod tests {
             region_state.set_region(region);
             kv.put_msg_cf(CF_RAFT, &keys::region_state_key(region_id), &region_state)?;
         }
-        Ok(Engines { kv, raft })
+        Ok(Engines::new(kv, raft))
     }
 
     pub fn get_kv_count(snap: &impl EngineSnapshot) -> usize {

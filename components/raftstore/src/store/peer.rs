@@ -792,6 +792,8 @@ where
             &region,
             PeerState::Tombstone,
             self.pending_merge_state.clone(),
+            u64::MAX,
+            self.get_store().tablet_suffix(),
         )?;
         // write kv rocksdb first in case of restart happen between two write
         let mut write_opts = WriteOptions::new();
@@ -943,7 +945,7 @@ where
     pub fn set_region(
         &mut self,
         host: &CoprocessorHost<impl KvEngine>,
-        reader: &mut ReadDelegate,
+        reader: &mut ReadDelegate<EK>,
         region: metapb::Region,
     ) {
         if self.region().get_region_epoch().get_version() < region.get_region_epoch().get_version()
@@ -1028,6 +1030,11 @@ where
         self.region().get_peers().iter().any(|p| {
             p.get_role() == PeerRole::IncomingVoter || p.get_role() == PeerRole::DemotingVoter
         })
+    }
+
+    #[inline]
+    pub fn tablet(&self) -> EK {
+        self.get_store().tablet()
     }
 
     #[inline]
@@ -1604,6 +1611,7 @@ where
                 if self.last_unpersisted_number != 0 {
                     // Because we only handle raft ready when not applying snapshot, so following
                     // line won't be called twice for the same snapshot.
+                    debug!("advance apply"; "apply_index" => self.last_applying_idx, "region_id" => self.region_id, "peer_id" => self.peer_id());
                     self.raft_group.advance_apply_to(self.last_applying_idx);
                     self.cmd_epoch_checker.advance_apply(
                         self.last_applying_idx,
@@ -1611,6 +1619,15 @@ where
                         self.raft_group.store().region(),
                     );
                 }
+                write_peer_state(
+                    &mut ctx.kv_wb,
+                    self.region(),
+                    PeerState::Normal,
+                    None,
+                    self.get_store().applied_index(),
+                    self.get_store().tablet_suffix(),
+                )
+                .unwrap();
                 self.post_pending_read_index_on_replica(ctx);
             }
             CheckApplyingSnapStatus::Idle => {}
@@ -1760,7 +1777,7 @@ where
             self.raft_log_size_hint = 0;
         }
 
-        let apply_snap_result = self.mut_store().post_ready(invoke_ctx);
+        let apply_snap_result = self.mut_store().post_ready(invoke_ctx, &ctx.snap_mgr);
         if apply_snap_result.is_some() {
             // The peer may change from learner to voter after snapshot applied.
             let peer = self
@@ -1889,6 +1906,7 @@ where
         if !ready.snapshot().is_empty() {
             // Snapshot's metadata has been applied.
             self.last_applying_idx = self.get_store().truncated_index();
+            debug!("setting apply index"; "apply_index" => self.last_applying_idx, "region_id" => self.region_id, "peer_id" => self.peer_id());
             self.raft_group.advance_append_async(ready);
             // The ready is persisted, but we don't want to handle following light
             // ready immediately to avoid flow out of control, so use
@@ -2200,7 +2218,7 @@ where
         }
     }
 
-    fn maybe_update_read_progress(&self, reader: &mut ReadDelegate, progress: ReadProgress) {
+    fn maybe_update_read_progress(&self, reader: &mut ReadDelegate<EK>, progress: ReadProgress) {
         if self.pending_remove {
             return;
         }
@@ -3696,7 +3714,7 @@ where
         &self.engines.kv
     }
 
-    fn get_snapshot(&mut self, _: Option<ThreadReadId>) -> Arc<EK::Snapshot> {
+    fn get_snapshot(&self, _: Option<ThreadReadId>) -> Arc<EK::Snapshot> {
         Arc::new(self.engines.kv.snapshot())
     }
 }

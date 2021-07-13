@@ -48,8 +48,8 @@ impl RocksEngine {
         self.db.clone()
     }
 
-    pub fn exists(path: &str) -> bool {
-        let path = Path::new(path);
+    pub fn exists(path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref();
         if !path.exists() || !path.is_dir() {
             return false;
         }

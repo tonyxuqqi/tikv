@@ -2,20 +2,21 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Instant;
-use std::{cmp, error, u64};
+use std::{cmp, error, fs, slice, u64};
 
 use engine_traits::CF_RAFT;
-use engine_traits::{Engines, KvEngine, Mutable, Peekable};
+use engine_traits::{DeleteStrategy, Engines, KvEngine, Mutable, Range};
 use keys::{self, enc_end_key, enc_start_key};
 use kvproto::metapb::{self, Region};
 use kvproto::raft_serverpb::{
     MergeState, PeerState, RaftApplyState, RaftLocalState, RaftSnapshotData, RegionLocalState,
 };
-use protobuf::Message;
+use protobuf::{CodedInputStream, Message};
 use raft::eraftpb::{ConfState, Entry, HardState, Snapshot};
 use raft::{self, Error as RaftError, RaftState, Ready, Storage, StorageError};
 
@@ -29,7 +30,7 @@ use tikv_util::worker::Scheduler;
 
 use super::metrics::*;
 use super::worker::RegionTask;
-use super::{SnapEntry, SnapKey, SnapManager, SnapshotStatistics};
+use super::{SnapEntry, SnapKey, SnapManager};
 
 // When we create a region peer, we should initialize its log term/index > 0,
 // so that we can force the follower peer to sync the snapshot first.
@@ -489,25 +490,45 @@ fn init_raft_state<EK: KvEngine, ER: RaftEngine>(
 fn init_apply_state<EK: KvEngine, ER: RaftEngine>(
     engines: &Engines<EK, ER>,
     region: &Region,
-) -> Result<RaftApplyState> {
-    Ok(
-        match engines
-            .kv
-            .get_msg_cf(CF_RAFT, &keys::apply_state_key(region.get_id()))?
-        {
-            Some(s) => s,
-            None => {
-                let mut apply_state = RaftApplyState::default();
-                if util::is_region_initialized(region) {
-                    apply_state.set_applied_index(RAFT_INIT_LOG_INDEX);
-                    let state = apply_state.mut_truncated_state();
-                    state.set_index(RAFT_INIT_LOG_INDEX);
-                    state.set_term(RAFT_INIT_LOG_TERM);
-                }
-                apply_state
+) -> Result<(EK, u64, RaftApplyState)> {
+    let state_key = keys::region_state_key(region.get_id());
+    let kv_state: Option<RegionLocalState> = engines.kv.get_msg_cf(CF_RAFT, &state_key)?;
+    let suffix = match kv_state {
+        Some(s) => {
+            if s.get_state() == PeerState::Tombstone {
+                0
+            } else if s.get_state() == PeerState::Applying {
+                let tablet = engines.tablets.create_tablet(region.get_id(), 0);
+                let apply_state = engines
+                    .kv
+                    .get_msg_cf(CF_RAFT, &keys::apply_state_key(region.get_id()))?
+                    .unwrap();
+                return Ok((tablet, 0, apply_state));
+            } else {
+                s.get_tablet_suffix()
             }
-        },
-    )
+        }
+        None => 0,
+    };
+    if suffix == 0 {
+        engines.tablets.create_tablet(region.get_id(), 0);
+    }
+    let tablet = engines.tablets.open_tablet(region.get_id(), suffix);
+
+    let apply_state = match tablet.get_msg_cf(CF_RAFT, &keys::apply_state_key(region.get_id()))? {
+        Some(s) => s,
+        None => {
+            let mut apply_state = RaftApplyState::default();
+            if util::is_region_initialized(region) {
+                apply_state.set_applied_index(RAFT_INIT_LOG_INDEX);
+                let state = apply_state.mut_truncated_state();
+                state.set_index(RAFT_INIT_LOG_INDEX);
+                state.set_term(RAFT_INIT_LOG_TERM);
+            }
+            apply_state
+        }
+    };
+    Ok((tablet, suffix, apply_state))
 }
 
 fn init_last_term<EK: KvEngine, ER: RaftEngine>(
@@ -595,11 +616,96 @@ fn validate_states<EK: KvEngine, ER: RaftEngine>(
     Ok(())
 }
 
+pub fn resume_applying_result<EK: KvEngine, ER: RaftEngine>(
+    engines: &Engines<EK, ER>,
+    region_id: u64,
+    region_state: &RegionLocalState,
+    wb: &mut EK::WriteBatch,
+) {
+    if !engines
+        .tablets
+        .exists(region_id, region_state.get_tablet_suffix())
+        && region_state.get_state() == PeerState::Applying
+    {
+        return;
+    }
+    let tablet = engines
+        .tablets
+        .open_tablet(region_id, region_state.get_tablet_suffix());
+    let key = keys::region_state_key(region_id);
+    let mut state: RegionLocalState = tablet.get_msg_cf(CF_RAFT, &key).unwrap().unwrap();
+    if state.get_index() == region_state.get_index() {
+        if region_state.get_state() == PeerState::Applying {
+            write_peer_state(
+                wb,
+                state.get_region(),
+                PeerState::Normal,
+                None,
+                region_state.get_index(),
+                region_state.get_tablet_suffix(),
+            )
+            .unwrap();
+        }
+        return;
+    }
+    if state.get_region().get_region_epoch().get_version()
+        == region_state.get_region().get_region_epoch().get_version()
+    {
+        state.set_tablet_suffix(region_state.get_tablet_suffix());
+        wb.put_msg_cf(CF_RAFT, &key, &state).unwrap();
+        return;
+    }
+    let start_key = keys::region_apply_result_key(region_id, region_state.get_index() + 1);
+    let end_key = keys::region_apply_result_key(region_id, state.get_index() + 1);
+    let mut to_cloned = Vec::new();
+    tablet
+        .scan_cf(CF_RAFT, &start_key, &end_key, false, |key, value| {
+            let (_, index) = keys::decode_region_apply_result_key(&key).unwrap();
+            let result_type = value[0];
+            match result_type {
+                // split
+                0x01 => {
+                    let mut is = CodedInputStream::from_bytes(&value[1..]);
+                    while !is.eof().unwrap() {
+                        let region: Region = is.read_message().unwrap();
+                        let i = if region.get_id() == region_id {
+                            index
+                        } else {
+                            RAFT_INIT_LOG_INDEX
+                        };
+                        let suffix = if region.get_id() == region_id {
+                            state.get_tablet_suffix()
+                        } else {
+                            RAFT_INIT_LOG_INDEX
+                        };
+                        write_peer_state(wb, &region, PeerState::Normal, None, i, suffix).unwrap();
+                        let path = engines
+                            .tablets
+                            .tablet_path(region.get_id(), RAFT_INIT_LOG_INDEX);
+                        if engines.tablets.exists(region.get_id(), RAFT_INIT_LOG_INDEX) {
+                            fs::remove_dir_all(&path).unwrap();
+                        }
+                        to_cloned.push(path);
+                    }
+                }
+                _ => panic!(
+                    "unknown result type {} for region {}",
+                    result_type, region_id
+                ),
+            }
+            Ok(true)
+        })
+        .unwrap();
+    tablet.checkpoint_to(&to_cloned, 0).unwrap();
+}
+
 pub struct PeerStorage<EK, ER>
 where
     EK: KvEngine,
 {
     pub engines: Engines<EK, ER>,
+    tablet: EK,
+    tablet_suffix: u64,
 
     peer_id: u64,
     region: metapb::Region,
@@ -670,10 +776,11 @@ where
             "creating storage on specified path";
             "region_id" => region.get_id(),
             "peer_id" => peer_id,
+            "region" => ?region,
             "path" => ?engines.kv.path(),
         );
         let mut raft_state = init_raft_state(&engines, region)?;
-        let apply_state = init_apply_state(&engines, region)?;
+        let (tablet, suffix, apply_state) = init_apply_state(&engines, region)?;
         if let Err(e) = validate_states(region.get_id(), &engines, &mut raft_state, &apply_state) {
             return Err(box_err!("{} validate state fail: {:?}", tag, e));
         }
@@ -686,7 +793,9 @@ where
             Some(EntryCache::default())
         };
 
-        Ok(PeerStorage {
+        let storage = PeerStorage {
+            tablet,
+            tablet_suffix: suffix,
             engines,
             peer_id,
             region: region.clone(),
@@ -700,7 +809,9 @@ where
             applied_index_term,
             last_term,
             cache,
-        })
+        };
+        storage.clear_extra_data();
+        Ok(storage)
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -883,7 +994,17 @@ where
     }
 
     pub fn raw_snapshot(&self) -> EK::Snapshot {
-        self.engines.kv.snapshot()
+        self.tablet.snapshot()
+    }
+
+    #[inline]
+    pub fn tablet(&self) -> EK {
+        self.tablet.clone()
+    }
+
+    #[inline]
+    pub fn tablet_suffix(&self) -> u64 {
+        self.tablet_suffix
     }
 
     fn validate_snap(&self, snap: &Snapshot, request_index: u64) -> bool {
@@ -993,7 +1114,7 @@ where
         let (tx, rx) = mpsc::sync_channel(1);
         *snap_state = SnapState::Generating(rx);
 
-        let task = GenSnapTask::new(self.region.get_id(), tx);
+        let task = GenSnapTask::new(self.region.get_id(), self.tablet_suffix, tx);
         let mut gen_snap_task = self.gen_snap_task.borrow_mut();
         assert!(gen_snap_task.is_none());
         *gen_snap_task = Some(task);
@@ -1151,13 +1272,19 @@ where
             // we can only delete the old data when the peer is initialized.
             self.clear_meta(kv_wb, raft_wb)?;
         }
+        let last_index = snap.get_metadata().get_index();
         // Write its source peers' `RegionLocalState` together with itself for atomicity
         for r in destroy_regions {
-            write_peer_state(kv_wb, r, PeerState::Tombstone, None)?;
+            write_peer_state(kv_wb, r, PeerState::Tombstone, None, u64::MAX, 0)?;
         }
-        write_peer_state(kv_wb, &region, PeerState::Applying, None)?;
-
-        let last_index = snap.get_metadata().get_index();
+        write_peer_state(
+            kv_wb,
+            &region,
+            PeerState::Applying,
+            None,
+            last_index,
+            last_index,
+        )?;
 
         ctx.raft_state.set_last_index(last_index);
         ctx.last_term = snap.get_metadata().get_term();
@@ -1208,28 +1335,23 @@ where
     }
 
     /// Delete all data that is not covered by `new_region`.
-    fn clear_extra_data(
-        &self,
-        old_region: &metapb::Region,
-        new_region: &metapb::Region,
-    ) -> Result<()> {
-        let (old_start_key, old_end_key) = (enc_start_key(old_region), enc_end_key(old_region));
-        let (new_start_key, new_end_key) = (enc_start_key(new_region), enc_end_key(new_region));
-        if old_start_key < new_start_key {
-            box_try!(self.region_sched.schedule(RegionTask::destroy(
-                old_region.get_id(),
-                old_start_key,
-                new_start_key
-            )));
+    fn clear_extra_data(&self) {
+        if self.is_initialized() {
+            let (start_key, end_key) = (enc_start_key(&self.region), enc_end_key(&self.region));
+            let mut ranges = Vec::with_capacity(2);
+            if keys::DATA_MIN_KEY < start_key.as_slice() {
+                ranges.push(Range::new(keys::DATA_MIN_KEY, &start_key));
+            }
+            if keys::DATA_MAX_KEY > end_key.as_slice() {
+                ranges.push(Range::new(&end_key, keys::DATA_MAX_KEY));
+            }
+            if let Err(e) = self
+                .tablet
+                .delete_all_in_range(DeleteStrategy::DeleteFiles, &ranges)
+            {
+                panic!("{} clear ranges failed: {:?}", self.tag, e);
+            }
         }
-        if new_end_key < old_end_key {
-            box_try!(self.region_sched.schedule(RegionTask::destroy(
-                old_region.get_id(),
-                new_end_key,
-                old_end_key
-            )));
-        }
-        Ok(())
     }
 
     /// Delete all extra split data from the `start_key` to `end_key`.
@@ -1346,26 +1468,41 @@ where
         self.region().get_id()
     }
 
-    pub fn schedule_applying_snapshot(&mut self) {
+    pub fn schedule_applying_snapshot(&mut self, mgr: &SnapManager) {
         let status = Arc::new(AtomicUsize::new(JOB_STATUS_PENDING));
         self.set_snap_state(SnapState::Applying(Arc::clone(&status)));
-        let task = RegionTask::Apply {
-            region_id: self.get_region_id(),
-            status,
-        };
 
         // Don't schedule the snapshot to region worker.
         fail_point!("skip_schedule_applying_snapshot", |_| {});
 
-        // TODO: gracefully remove region instead.
-        if let Err(e) = self.region_sched.schedule(task) {
-            info!(
-                "failed to to schedule apply job, are we shutting down?";
-                "region_id" => self.region.get_id(),
-                "peer_id" => self.peer_id,
-                "err" => ?e,
-            );
-        }
+        let index = self.truncated_index();
+        let term = self.truncated_term();
+        let final_path = self
+            .engines
+            .tablets
+            .tablet_path(self.region.get_id(), index);
+        let snap_key = SnapKey::new(self.region.get_id(), term, index);
+        let snap_path = mgr.get_final_name_for_recv(&snap_key);
+        fs::rename(snap_path, final_path).unwrap();
+        status.store(JOB_STATUS_FINISHED, Ordering::SeqCst);
+        self.refresh_tablet();
+    }
+
+    pub fn release_tablet(&mut self) {
+        let region_id = self.get_region_id();
+        self.engines
+            .tablets
+            .forget_tablet(region_id, self.tablet_suffix);
+    }
+
+    // Should only be called right after applying snapshot.
+    pub fn refresh_tablet(&mut self) {
+        self.release_tablet();
+        self.tablet_suffix = self.applied_index();
+        self.tablet = self
+            .engines
+            .tablets
+            .open_tablet(self.get_region_id(), self.tablet_suffix);
     }
 
     /// Save memory states to disk.
@@ -1427,7 +1564,7 @@ where
     }
 
     /// Update the memory state after ready changes are flushed to disk successfully.
-    pub fn post_ready(&mut self, ctx: InvokeContext) -> Option<ApplySnapResult> {
+    pub fn post_ready(&mut self, ctx: InvokeContext, mgr: &SnapManager) -> Option<ApplySnapResult> {
         self.raft_state = ctx.raft_state;
         self.apply_state = ctx.apply_state;
         self.last_term = ctx.last_term;
@@ -1437,39 +1574,8 @@ where
             None => return None,
         };
         self.set_applied_term(self.apply_state.get_truncated_state().get_term());
-        // cleanup data before scheduling apply task
-        if self.is_initialized() {
-            if let Err(e) = self.clear_extra_data(self.region(), &snap_region) {
-                // No need panic here, when applying snapshot, the deletion will be tried
-                // again. But if the region range changes, like [a, c) -> [a, b) and [b, c),
-                // [b, c) will be kept in rocksdb until a covered snapshot is applied or
-                // store is restarted.
-                error!(?e;
-                    "failed to cleanup data, may leave some dirty data";
-                    "region_id" => self.get_region_id(),
-                    "peer_id" => self.peer_id,
-                );
-            }
-        }
 
-        // Note that the correctness depends on the fact that these source regions MUST NOT
-        // serve read request otherwise a corrupt data may be returned.
-        // For now, it is ensured by
-        // 1. After `PrepareMerge` log is committed, the source region leader's lease will be
-        //    suspected immediately which makes the local reader not serve read request.
-        // 2. No read request can be responsed in peer fsm during merging.
-        // These conditions are used to prevent reading **stale** data in the past.
-        // At present, they are also used to prevent reading **corrupt** data.
-        for r in &ctx.destroyed_regions {
-            if let Err(e) = self.clear_extra_data(r, &snap_region) {
-                error!(?e;
-                    "failed to cleanup data, may leave some dirty data";
-                    "region_id" => r.get_id(),
-                );
-            }
-        }
-
-        self.schedule_applying_snapshot();
+        self.schedule_applying_snapshot(mgr);
         let prev_region = self.region().clone();
         self.set_region(snap_region);
 
@@ -1529,6 +1635,7 @@ where
 pub fn do_snapshot<EK, ER>(
     mgr: SnapManager,
     engines: &Engines<EK, ER>,
+    tablet_suffix: u64,
     region_id: u64,
     for_balance: bool,
 ) -> raft::Result<Snapshot>
@@ -1540,10 +1647,25 @@ where
         "begin to generate a snapshot";
         "region_id" => region_id,
     );
+    let path = mgr.get_temp_path_for_build(region_id);
+    defer!({
+        if path.exists() {
+            fs::remove_dir_all(&path).unwrap();
+        }
+    });
+    match engines.tablets.open_tablet_cache(region_id, tablet_suffix) {
+        // TODO: flush is not necessary if atomic flush is enabled.
+        Some(tablet) => tablet.checkpoint_to(slice::from_ref(&path), 0).unwrap(),
+        None => {
+            return Err(storage_error(format!(
+                "{} {} don't exist anymore",
+                region_id, tablet_suffix
+            )))
+        }
+    }
+    let mut tablet = engines.tablets.open_tablet_raw(Path::new(&path), true);
 
-    let kv_snap = engines.kv.snapshot();
-
-    let msg = kv_snap
+    let msg = tablet
         .get_msg_cf(CF_RAFT, &keys::apply_state_key(region_id))
         .map_err(into_other::<_, raft::Error>)?;
     let apply_state: RaftApplyState = match msg {
@@ -1573,11 +1695,18 @@ where
     };
 
     let key = SnapKey::new(region_id, apply_term, apply_index);
+    let final_path = mgr.get_final_name_for_build(&key);
+    // TODO: perhaps should check if exists before creating checkpoint.
+    let reused = engines.tablets.exists_raw(&final_path);
+    if reused {
+        drop(tablet);
+        tablet = engines.tablets.open_tablet_raw(&final_path, true);
+    }
 
     mgr.register(key.clone(), SnapEntry::Generating);
     defer!(mgr.deregister(&key, &SnapEntry::Generating));
 
-    let state: RegionLocalState = kv_snap
+    let state: RegionLocalState = tablet
         .get_msg_cf(CF_RAFT, &keys::region_state_key(key.region_id))
         .and_then(|res| match res {
             None => Err(box_err!("region {} could not find region info", region_id)),
@@ -1601,24 +1730,18 @@ where
     let conf_state = util::conf_state_from_region(state.get_region());
     snapshot.mut_metadata().set_conf_state(conf_state);
 
-    let mut s = mgr.get_snapshot_for_building(&key)?;
     // Set snapshot data.
     let mut snap_data = RaftSnapshotData::default();
     snap_data.set_region(state.get_region().clone());
-    let mut stat = SnapshotStatistics::new();
-    s.build(
-        &engines.kv,
-        &kv_snap,
-        state.get_region(),
-        &mut snap_data,
-        &mut stat,
-    )?;
     snap_data.mut_meta().set_for_balance(for_balance);
     let v = snap_data.write_to_bytes()?;
     snapshot.set_data(v);
 
-    SNAPSHOT_KV_COUNT_HISTOGRAM.observe(stat.kv_count as f64);
-    SNAPSHOT_SIZE_HISTOGRAM.observe(stat.size as f64);
+    SNAPSHOT_SIZE_HISTOGRAM.observe(tablet.get_engine_used_size().unwrap() as f64);
+    drop(tablet);
+    if !reused {
+        fs::rename(&path, &final_path).unwrap();
+    }
 
     Ok(snapshot)
 }
@@ -1656,6 +1779,8 @@ pub fn write_peer_state<T: Mutable>(
     region: &metapb::Region,
     state: PeerState,
     merge_state: Option<MergeState>,
+    index: u64,
+    suffix: u64,
 ) -> Result<()> {
     let region_id = region.get_id();
     let mut region_state = RegionLocalState::default();
@@ -1664,6 +1789,8 @@ pub fn write_peer_state<T: Mutable>(
     if let Some(state) = merge_state {
         region_state.set_merge_state(state);
     }
+    region_state.set_index(index);
+    region_state.set_tablet_suffix(suffix);
 
     debug!(
         "writing merge state";
@@ -1684,7 +1811,7 @@ mod tests {
     use engine_test::kv::{KvTestEngine, KvTestWriteBatch};
     use engine_test::raft::{RaftTestEngine, RaftTestWriteBatch};
     use engine_traits::Engines;
-    use engine_traits::{Iterable, SyncMutable, WriteBatch, WriteBatchExt};
+    use engine_traits::{Iterable, Peekable, SyncMutable, WriteBatch, WriteBatchExt};
     use engine_traits::{ALL_CFS, CF_DEFAULT};
     use kvproto::raft_serverpb::RaftSnapshotData;
     use raft::eraftpb::HardState;

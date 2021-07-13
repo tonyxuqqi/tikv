@@ -7,13 +7,14 @@ use std::iter::Iterator;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Instant;
-use std::{cmp, u64};
+use std::{cmp, fs, u64};
 
 use batch_system::{BasicMailbox, Fsm};
 use collections::HashMap;
 use engine_traits::CF_RAFT;
 use engine_traits::{
-    Engines, KvEngine, Mutable, RaftEngine, RaftLogBatch, SSTMetaInfo, WriteBatchExt,
+    Engines, KvEngine, Mutable, RaftEngine, RaftLogBatch, SSTMetaInfo, WriteBatch, WriteBatchExt,
+    WriteOptions,
 };
 use error_code::ErrorCodeExt;
 use kvproto::errorpb;
@@ -49,7 +50,7 @@ use crate::store::local_metrics::RaftProposeMetrics;
 use crate::store::metrics::*;
 use crate::store::msg::{Callback, ExtCallback};
 use crate::store::peer::{ConsistencyState, Peer, StaleState};
-use crate::store::peer_storage::{ApplySnapResult, InvokeContext};
+use crate::store::peer_storage::{ApplySnapResult, InvokeContext, RAFT_INIT_LOG_INDEX};
 use crate::store::transport::Transport;
 use crate::store::util::{is_learner, KeysInfoFormatter};
 use crate::store::worker::{
@@ -57,8 +58,8 @@ use crate::store::worker::{
 };
 use crate::store::PdTask;
 use crate::store::{
-    util, AbstractPeer, CasualMessage, Config, MergeResultKind, PeerMsg, PeerTicks, RaftCommand,
-    SignificantMsg, SnapKey, StoreMsg,
+    util, write_peer_state, AbstractPeer, CasualMessage, Config, MergeResultKind, PeerMsg,
+    PeerTicks, RaftCommand, SignificantMsg, SnapKey, SnapManager, StoreMsg,
 };
 use crate::{Error, Result};
 use keys::{self, enc_end_key, enc_start_key};
@@ -278,8 +279,8 @@ where
         self.peer.pending_merge_state = Some(state);
     }
 
-    pub fn schedule_applying_snapshot(&mut self) {
-        self.peer.mut_store().schedule_applying_snapshot();
+    pub fn schedule_applying_snapshot(&mut self, mgr: &SnapManager) {
+        self.peer.mut_store().schedule_applying_snapshot(mgr);
     }
 }
 
@@ -682,19 +683,8 @@ where
         let compacted_term = s.truncated_term();
         let is_applying_snap = s.is_applying_snapshot();
         for (key, is_sending) in snaps {
+            let p = self.ctx.snap_mgr.get_final_name_for_build(&key);
             if is_sending {
-                let s = match self.ctx.snap_mgr.get_snapshot_for_gc(&key, is_sending) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!(%e;
-                            "failed to load snapshot";
-                            "region_id" => self.fsm.region_id(),
-                            "peer_id" => self.fsm.peer_id(),
-                            "snapshot" => ?key,
-                        );
-                        continue;
-                    }
-                };
                 if key.term < compacted_term || key.idx < compacted_idx {
                     info!(
                         "deleting compacted snap file";
@@ -702,8 +692,9 @@ where
                         "peer_id" => self.fsm.peer_id(),
                         "snap_file" => %key,
                     );
-                    self.ctx.snap_mgr.delete_snapshot(&key, s.as_ref(), false);
-                } else if let Ok(meta) = s.meta() {
+
+                    let _ = std::fs::remove_dir_all(&p);
+                } else if let Ok(meta) = p.metadata() {
                     let modified = match meta.modified() {
                         Ok(m) => m,
                         Err(e) => {
@@ -725,7 +716,7 @@ where
                                 "peer_id" => self.fsm.peer_id(),
                                 "snap_file" => %key,
                             );
-                            self.ctx.snap_mgr.delete_snapshot(&key, s.as_ref(), false);
+                            let _ = std::fs::remove_dir_all(&p);
                         }
                     }
                 }
@@ -738,19 +729,7 @@ where
                     "peer_id" => self.fsm.peer_id(),
                     "snap_file" => %key,
                 );
-                let a = match self.ctx.snap_mgr.get_snapshot_for_gc(&key, is_sending) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        error!(%e;
-                            "failed to load snapshot";
-                            "region_id" => self.fsm.region_id(),
-                            "peer_id" => self.fsm.peer_id(),
-                            "snap_file" => %key,
-                        );
-                        continue;
-                    }
-                };
-                self.ctx.snap_mgr.delete_snapshot(&key, a.as_ref(), false);
+                let _ = std::fs::remove_dir_all(&p);
             }
         }
     }
@@ -941,6 +920,13 @@ where
         }
         let is_merging = self.fsm.peer.pending_merge_state.is_some();
         let res = self.fsm.peer.post_raft_ready_append(self.ctx, ready.ctx);
+        if res.is_some() {
+            let _ = self
+                .ctx
+                .router
+                .force_send(self.fsm.region_id(), PeerMsg::Noop);
+            self.fsm.has_ready = true;
+        }
         self.fsm
             .peer
             .handle_raft_ready_advance(self.ctx, ready.ready);
@@ -1209,8 +1195,8 @@ where
                 // delete them here. If the snapshot file will be reused when
                 // receiving, then it will fail to pass the check again, so
                 // missing snapshot files should not be noticed.
-                let s = self.ctx.snap_mgr.get_snapshot_for_applying(&key)?;
-                self.ctx.snap_mgr.delete_snapshot(&key, s.as_ref(), false);
+                let s = self.ctx.snap_mgr.get_final_name_for_recv(&key);
+                fs::remove_dir_all(&s).unwrap();
                 return Ok(());
             }
             Either::Right(v) => v,
@@ -1766,7 +1752,10 @@ where
         }
 
         // Check if snapshot file exists.
-        self.ctx.snap_mgr.get_snapshot_for_applying(&key)?;
+        let p = self.ctx.snap_mgr.get_final_name_for_recv(&key);
+        if !p.exists() {
+            return Err(box_err!("files at {} are deleted", p.display()));
+        }
 
         // WARNING: The checking code must be above this line.
         // Now all checking passed.
@@ -1933,6 +1922,7 @@ where
         // So in here, it's necessary to held the StoreMeta lock when closing the router.
         self.ctx.router.close(region_id);
         self.fsm.stop();
+        self.fsm.peer.mut_store().release_tablet();
 
         if is_initialized
             && !merged_by_target
@@ -2174,11 +2164,48 @@ where
         derived: metapb::Region,
         regions: Vec<metapb::Region>,
         new_split_regions: HashMap<u64, apply::NewSplitPeer>,
+        split_index: u64,
     ) {
         fail_point!("on_split", self.ctx.store_id() == 3, |_| {});
         self.register_split_region_check_tick();
-        let mut meta = self.ctx.store_meta.lock().unwrap();
         let region_id = derived.get_id();
+        let mut kv_wb = self.ctx.engines.kv.write_batch();
+        for new_region in &regions {
+            let new_region_id = new_region.get_id();
+
+            if new_region_id == region_id {
+                write_peer_state(
+                    &mut kv_wb,
+                    &derived,
+                    PeerState::Normal,
+                    None,
+                    split_index,
+                    self.fsm.peer.get_store().tablet_suffix(),
+                )
+                .unwrap();
+                continue;
+            }
+
+            // Check if this new region should be splitted
+            let new_split_peer = new_split_regions.get(&new_region.get_id()).unwrap();
+            if new_split_peer.result.is_some() {
+                continue;
+            }
+            write_peer_state(
+                &mut kv_wb,
+                &new_region,
+                PeerState::Normal,
+                None,
+                RAFT_INIT_LOG_INDEX,
+                RAFT_INIT_LOG_INDEX,
+            )
+            .unwrap();
+        }
+        let mut write_opts = WriteOptions::new();
+        write_opts.set_sync(true);
+        write_opts.set_disable_wal(self.ctx.cfg.disable_kv_wal);
+        kv_wb.write_opt(&write_opts).unwrap();
+        let mut meta = self.ctx.store_meta.lock().unwrap();
         meta.set_region(&self.ctx.coprocessor_host, derived, &mut self.fsm.peer);
         self.fsm.peer.post_split();
 
@@ -3083,7 +3110,8 @@ where
                     derived,
                     regions,
                     new_split_regions,
-                } => self.on_ready_split_region(derived, regions, new_split_regions),
+                    split_index,
+                } => self.on_ready_split_region(derived, regions, new_split_regions, split_index),
                 ExecResult::PrepareMerge { region, state } => {
                     self.on_ready_prepare_merge(region, state)
                 }
@@ -4003,8 +4031,8 @@ where
 /// Region's log falls behind and then receive a snapshot with epoch version after merge.
 ///
 /// `merge_to_this_peer` is true when `can_destroy` is true and the source peer is merged to this target peer.
-pub fn maybe_destroy_source(
-    meta: &StoreMeta,
+pub fn maybe_destroy_source<EK: KvEngine>(
+    meta: &StoreMeta<EK>,
     target_region_id: u64,
     target_peer_id: u64,
     source_region_id: u64,

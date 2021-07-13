@@ -28,7 +28,7 @@ fn test_overlap_cleanup() {
     pd_client.must_add_peer(region_id, new_peer(2, 2));
 
     cluster.must_put(b"k1", b"v1");
-    must_get_equal(&cluster.get_engine(2), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(2), 1, b"k1", b"v1");
 
     cluster.must_transfer_leader(region_id, new_peer(2, 2));
     // This will only pause the bootstrapped region, so the split region
@@ -40,7 +40,7 @@ fn test_overlap_cleanup() {
     let region1 = cluster.get_region(b"k1");
     cluster.must_split(&region1, b"k2");
     // Wait till the snapshot of split region is applied, whose range is ["", "k2").
-    must_get_equal(&cluster.get_engine(3), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(3), 1000, b"k1", b"v1");
     // Resume the fail point and pause it again. So only the paused snapshot is generated.
     // And the paused snapshot's range is ["", ""), hence overlap.
     fail::cfg(gen_snapshot_fp, "pause").unwrap();
@@ -87,8 +87,7 @@ fn test_server_snapshot_on_resolve_failure() {
     ready_notify.store(true, Ordering::SeqCst);
     notify_rx.recv_timeout(Duration::from_secs(3)).unwrap();
 
-    let engine2 = cluster.get_engine(2);
-    must_get_none(&engine2, b"k1");
+    must_get_none_in(cluster.engine(2), 1, b"k1");
 
     // If snapshot status is reported correctly, sending snapshot should be retried.
     notify_rx.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -115,7 +114,7 @@ fn test_generate_snapshot() {
 
     // Let store 4 inform leader to generate a snapshot.
     cluster.run_node(4).unwrap();
-    must_get_equal(&cluster.get_engine(4), b"k2", b"v2");
+    must_get_equal_in(cluster.engine(4), 1, b"k2", b"v2");
 
     fail::cfg("snapshot_enter_do_build", "pause").unwrap();
     cluster.run_node(5).unwrap();
@@ -126,10 +125,10 @@ fn test_generate_snapshot() {
 
     // The task is droped so that we can't get the snapshot on store 5.
     fail::cfg("snapshot_enter_do_build", "pause").unwrap();
-    must_get_none(&cluster.get_engine(5), b"k2");
+    must_get_none_in(cluster.engine(5), 1, b"k2");
 
     fail::cfg("snapshot_enter_do_build", "off").unwrap();
-    must_get_equal(&cluster.get_engine(5), b"k2", b"v2");
+    must_get_equal_in(cluster.engine(5), 1, b"k2", b"v2");
 
     fail::remove("snapshot_enter_do_build");
     fail::remove("snapshot_delete_after_send");
@@ -259,7 +258,7 @@ fn test_destroy_peer_on_pending_snapshot() {
 
     cluster.must_put(b"k1", b"v1");
     // Ensure peer 3 is initialized.
-    must_get_equal(&cluster.get_engine(3), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(3), 1, b"k1", b"v1");
 
     cluster.must_transfer_leader(1, new_peer(1, 1));
 
@@ -298,7 +297,7 @@ fn test_destroy_peer_on_pending_snapshot() {
 
     cluster.must_put(b"k120", b"v1");
     // After peer 4 has applied snapshot, data should be got.
-    must_get_equal(&cluster.get_engine(3), b"k120", b"v1");
+    must_get_equal_in(cluster.engine(3), 1, b"k120", b"v1");
 }
 
 #[test]
@@ -367,7 +366,7 @@ fn test_receive_old_snapshot() {
 
     cluster.must_put(b"k00", b"v1");
     // Ensure peer 2 is initialized.
-    must_get_equal(&cluster.get_engine(2), b"k00", b"v1");
+    must_get_equal_in(cluster.engine(2), 1, b"k00", b"v1");
 
     cluster.add_send_filter(IsolationFilterFactory::new(2));
 
@@ -408,7 +407,7 @@ fn test_receive_old_snapshot() {
     for i in 20..40 {
         cluster.must_put(format!("k{}", i).as_bytes(), b"v1");
     }
-    must_get_equal(&cluster.get_engine(2), b"k39", b"v1");
+    must_get_equal_in(cluster.engine(2), 1, b"k39", b"v1");
 
     let router = cluster.sim.wl().get_router(2).unwrap();
     // Send the old snapshot
@@ -417,11 +416,11 @@ fn test_receive_old_snapshot() {
     }
 
     cluster.must_put(b"k40", b"v1");
-    must_get_equal(&cluster.get_engine(2), b"k40", b"v1");
+    must_get_equal_in(cluster.engine(2), 1, b"k40", b"v1");
 
     pd_client.must_remove_peer(r1, new_peer(2, 2));
 
-    must_get_none(&cluster.get_engine(2), b"k40");
+    must_get_none_in(cluster.engine(2), 1, b"k40");
 
     let region = cluster.get_region(b"k1");
     cluster.must_split(&region, b"k5");
@@ -432,7 +431,7 @@ fn test_receive_old_snapshot() {
     cluster.must_put(b"k11", b"v1");
     // If peer 2 handles previous old snapshot properly and does not leave over metadata
     // in `pending_snapshot_regions`, peer 4 should be created normally.
-    must_get_equal(&cluster.get_engine(2), b"k11", b"v1");
+    must_get_equal_in(cluster.engine(2), 1000, b"k11", b"v1");
 
     fail::remove(peer_2_handle_snap_mgr_gc_fp);
 }
@@ -468,5 +467,5 @@ fn test_gen_snapshot_with_no_committed_entries_ready() {
     cluster.clear_send_filters();
     // Snapshot should be generated and sent after leader 1 receives the heartbeat
     // response from peer 3.
-    must_get_equal(&cluster.get_engine(3), b"k9", b"v1");
+    must_get_equal_in(cluster.engine(3), 1, b"k9", b"v1");
 }

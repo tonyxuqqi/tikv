@@ -34,7 +34,7 @@ use crate::store::fsm::store::StoreMeta;
 
 pub trait ReadExecutor<E: KvEngine> {
     fn get_engine(&self) -> &E;
-    fn get_snapshot(&mut self, ts: Option<ThreadReadId>) -> Arc<E::Snapshot>;
+    fn get_snapshot(&self, ts: Option<ThreadReadId>) -> Arc<E::Snapshot>;
     fn get_value(&self, req: &Request, region: &metapb::Region) -> Result<Response> {
         let key = req.get_get().get_key();
         // region key range has no data prefix, so we must use origin key to check.
@@ -73,7 +73,7 @@ pub trait ReadExecutor<E: KvEngine> {
     }
 
     fn execute(
-        &mut self,
+        &self,
         msg: &RaftCmdRequest,
         region: &Arc<metapb::Region>,
         read_index: Option<u64>,
@@ -134,13 +134,14 @@ pub trait ReadExecutor<E: KvEngine> {
 
 /// A read only delegate of `Peer`.
 #[derive(Clone, Debug)]
-pub struct ReadDelegate {
+pub struct ReadDelegate<E: KvEngine> {
     region: Arc<metapb::Region>,
     peer_id: u64,
     term: u64,
     applied_index_term: u64,
     leader_lease: Option<RemoteLease>,
     last_valid_ts: Timespec,
+    tablet: E,
 
     tag: String,
     pub txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
@@ -151,7 +152,7 @@ pub struct ReadDelegate {
     track_ver: TrackVer,
 }
 
-impl Drop for ReadDelegate {
+impl<E: KvEngine> Drop for ReadDelegate<E> {
     fn drop(&mut self) {
         // call `inc` to notify the source `ReadDelegate` is dropped
         self.track_ver.inc();
@@ -201,8 +202,8 @@ impl Clone for TrackVer {
     }
 }
 
-impl ReadDelegate {
-    pub fn from_peer<EK: KvEngine, ER: RaftEngine>(peer: &Peer<EK, ER>) -> ReadDelegate {
+impl<E: KvEngine> ReadDelegate<E> {
+    pub fn from_peer<ER: RaftEngine>(peer: &Peer<E, ER>) -> ReadDelegate<E> {
         let region = peer.region().clone();
         let region_id = region.get_id();
         let peer_id = peer.peer.get_id();
@@ -217,6 +218,7 @@ impl ReadDelegate {
             txn_extra_op: peer.txn_extra_op.clone(),
             max_ts_sync_status: peer.max_ts_sync_status.clone(),
             track_ver: TrackVer::new(),
+            tablet: peer.tablet(),
         }
     }
 
@@ -263,7 +265,7 @@ impl ReadDelegate {
     }
 }
 
-impl Display for ReadDelegate {
+impl<E: KvEngine> Display for ReadDelegate<E> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -275,6 +277,19 @@ impl Display for ReadDelegate {
             self.applied_index_term,
             self.leader_lease.is_some(),
         )
+    }
+}
+
+impl<E> ReadExecutor<E> for ReadDelegate<E>
+where
+    E: KvEngine,
+{
+    fn get_engine(&self) -> &E {
+        &self.tablet
+    }
+
+    fn get_snapshot(&self, _create_time: Option<ThreadReadId>) -> Arc<E::Snapshot> {
+        Arc::new(self.tablet.snapshot())
     }
 }
 
@@ -304,49 +319,15 @@ impl Progress {
     }
 }
 
-pub struct LocalReader<C, E>
-where
-    C: ProposalRouter<E::Snapshot>,
-    E: KvEngine,
-{
+pub struct LocalReader<C, E: KvEngine> {
     store_id: Cell<Option<u64>>,
-    store_meta: Arc<Mutex<StoreMeta>>,
-    kv_engine: E,
+    store_meta: Arc<Mutex<StoreMeta<E>>>,
     metrics: ReadMetrics,
     // region id -> ReadDelegate
     // The use of `Arc` here is a workaround, see the comment at `get_delegate`
-    delegates: LruCache<u64, Arc<ReadDelegate>>,
-    snap_cache: Option<Arc<E::Snapshot>>,
-    cache_read_id: ThreadReadId,
+    delegates: LruCache<u64, Arc<ReadDelegate<E>>>,
     // A channel to raftstore.
     router: C,
-}
-
-impl<C, E> ReadExecutor<E> for LocalReader<C, E>
-where
-    C: ProposalRouter<E::Snapshot>,
-    E: KvEngine,
-{
-    fn get_engine(&self) -> &E {
-        &self.kv_engine
-    }
-
-    fn get_snapshot(&mut self, create_time: Option<ThreadReadId>) -> Arc<E::Snapshot> {
-        self.metrics.local_executed_requests += 1;
-        if let Some(ts) = create_time {
-            if ts == self.cache_read_id {
-                if let Some(snap) = self.snap_cache.as_ref() {
-                    self.metrics.local_executed_snapshot_cache_hit += 1;
-                    return snap.clone();
-                }
-            }
-            let snap = Arc::new(self.kv_engine.snapshot());
-            self.cache_read_id = ts;
-            self.snap_cache = Some(snap.clone());
-            return snap;
-        }
-        Arc::new(self.kv_engine.snapshot())
-    }
 }
 
 impl<C, E> LocalReader<C, E>
@@ -354,14 +335,10 @@ where
     C: ProposalRouter<E::Snapshot>,
     E: KvEngine,
 {
-    pub fn new(kv_engine: E, store_meta: Arc<Mutex<StoreMeta>>, router: C) -> Self {
-        let cache_read_id = ThreadReadId::new();
+    pub fn new(store_meta: Arc<Mutex<StoreMeta<E>>>, router: C) -> Self {
         LocalReader {
             store_meta,
-            kv_engine,
             router,
-            snap_cache: None,
-            cache_read_id,
             store_id: Cell::new(None),
             metrics: Default::default(),
             delegates: LruCache::with_capacity_and_sample(0, 7),
@@ -405,7 +382,7 @@ where
     // while the `&ReadDelegate` is alive, a better choice is use `Rc` but `LocalReader: Send` will be
     // violated, which is required by `LocalReadRouter: Send`, use `Arc` will introduce extra cost but
     // make the logic clear
-    fn get_delegate(&mut self, region_id: u64) -> Option<Arc<ReadDelegate>> {
+    fn get_delegate(&mut self, region_id: u64) -> Option<Arc<ReadDelegate<E>>> {
         match self.delegates.get(&region_id) {
             // The local `ReadDelegate` is up to date
             Some(d) if !d.track_ver.any_new() => Some(Arc::clone(d)),
@@ -438,7 +415,7 @@ where
     fn pre_propose_raft_command(
         &mut self,
         req: &RaftCmdRequest,
-    ) -> Result<Option<Arc<ReadDelegate>>> {
+    ) -> Result<Option<Arc<ReadDelegate<E>>>> {
         // Check store id.
         if self.store_id.get().is_none() {
             let store_id = self.store_meta.lock().unwrap().store_id;
@@ -524,7 +501,8 @@ where
                 // Leader can read local if and only if it is in lease.
                 if delegate.is_in_leader_lease(snapshot_ts, &mut self.metrics) {
                     // Cache snapshot_time for remaining requests in the same batch.
-                    let mut response = self.execute(&req, &delegate.region, None, read_id);
+                    self.metrics.local_executed_requests += 1;
+                    let mut response = delegate.execute(&req, &delegate.region, None, read_id);
                     cmd_resp::bind_term(&mut response.response, delegate.term);
                     if let Some(snap) = response.snapshot.as_mut() {
                         snap.max_ts_sync_status = Some(delegate.max_ts_sync_status.clone());
@@ -568,9 +546,7 @@ where
         self.metrics.maybe_flush();
     }
 
-    pub fn release_snapshot_cache(&mut self) {
-        self.snap_cache.take();
-    }
+    pub fn release_snapshot_cache(&mut self) {}
 }
 
 impl<C, E> Clone for LocalReader<C, E>
@@ -581,23 +557,20 @@ where
     fn clone(&self) -> Self {
         LocalReader {
             store_meta: self.store_meta.clone(),
-            kv_engine: self.kv_engine.clone(),
             router: self.router.clone(),
             store_id: self.store_id.clone(),
             metrics: Default::default(),
             delegates: LruCache::with_capacity_and_sample(0, 7),
-            snap_cache: self.snap_cache.clone(),
-            cache_read_id: self.cache_read_id.clone(),
         }
     }
 }
 
-struct Inspector<'r, 'm> {
-    delegate: &'r ReadDelegate,
+struct Inspector<'r, 'm, E: KvEngine> {
+    delegate: &'r ReadDelegate<E>,
     metrics: &'m mut ReadMetrics,
 }
 
-impl<'r, 'm> RequestInspector for Inspector<'r, 'm> {
+impl<'r, 'm, E: KvEngine> RequestInspector for Inspector<'r, 'm, E> {
     fn has_applied_to_current_term(&mut self) -> bool {
         if self.delegate.applied_index_term == self.delegate.term {
             true
@@ -760,9 +733,10 @@ mod tests {
     fn new_reader(
         path: &str,
         store_id: u64,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<KvTestEngine>>>,
     ) -> (
         TempDir,
+        KvTestEngine,
         LocalReader<SyncSender<RaftCommand<KvTestSnapshot>>, KvTestEngine>,
         Receiver<RaftCommand<KvTestSnapshot>>,
     ) {
@@ -770,9 +744,9 @@ mod tests {
         let db = engine_test::kv::new_engine(path.path().to_str().unwrap(), None, ALL_CFS, None)
             .unwrap();
         let (ch, rx) = sync_channel(1);
-        let mut reader = LocalReader::new(db, store_meta, ch);
+        let mut reader = LocalReader::new(store_meta, ch);
         reader.store_id = Cell::new(Some(store_id));
-        (path, reader, rx)
+        (path, db, reader, rx)
     }
 
     fn new_peers(store_id: u64, pr_ids: Vec<u64>) -> Vec<metapb::Peer> {
@@ -820,7 +794,8 @@ mod tests {
     fn test_read() {
         let store_id = 2;
         let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
-        let (_tmp, mut reader, rx) = new_reader("test-local-reader", store_id, store_meta.clone());
+        let (_tmp, db, mut reader, rx) =
+            new_reader("test-local-reader", store_id, store_meta.clone());
 
         // region: 1,
         // peers: 2, 3, 4,
@@ -877,6 +852,7 @@ mod tests {
                 txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::default())),
                 max_ts_sync_status: Arc::new(AtomicU64::new(0)),
                 track_ver: TrackVer::new(),
+                tablet: db,
             };
             meta.readers.insert(1, read_delegate);
         }
@@ -1069,7 +1045,8 @@ mod tests {
     fn test_read_delegate_cache_update() {
         let store_id = 2;
         let store_meta = Arc::new(Mutex::new(StoreMeta::new(0)));
-        let (_tmp, mut reader, _) = new_reader("test-local-reader", store_id, store_meta.clone());
+        let (_tmp, db, mut reader, _) =
+            new_reader("test-local-reader", store_id, store_meta.clone());
         let mut region = metapb::Region::default();
         region.set_id(1);
         {
@@ -1085,6 +1062,7 @@ mod tests {
                 txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::default())),
                 max_ts_sync_status: Arc::new(AtomicU64::new(0)),
                 track_ver: TrackVer::new(),
+                tablet: db,
             };
             meta.readers.insert(1, read_delegate);
         }

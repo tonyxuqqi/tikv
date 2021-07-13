@@ -267,9 +267,9 @@ fn test_split_not_to_split_existing_region() {
     cluster.must_split(&region_a, b"k2");
 
     cluster.put(b"k0", b"v0").unwrap();
-    must_get_equal(&cluster.get_engine(3), b"k0", b"v0");
-
     let region_b = pd_client.get_region(b"k0").unwrap();
+    must_get_equal_in(cluster.engine(3), region_b.get_id(), b"k0", b"v0");
+
     let peer_b_1 = find_peer(&region_b, 1).cloned().unwrap();
     cluster.must_transfer_leader(region_b.get_id(), peer_b_1);
 
@@ -310,12 +310,13 @@ fn test_split_not_to_split_existing_region() {
     pd_client.must_add_peer(region_c.get_id(), new_peer(3, 7));
 
     cluster.put(b"k2", b"v2").unwrap();
-    must_get_equal(&cluster.get_engine(3), b"k2", b"v2");
+    let region_d = pd_client.get_region(b"k2").unwrap();
+    must_get_equal_in(cluster.engine(3), region_d.get_id(), b"k2", b"v2");
 
     fail::remove(on_handle_apply_1003_fp);
 
     // If peer_c_3 is created, `must_get_none` will fail.
-    must_get_none(&cluster.get_engine(3), b"k0");
+    must_get_none_in(cluster.engine(3), regon_d.get_id(), b"k0");
 }
 
 // Test if a peer is created from splitting when another initialized peer with the same
@@ -349,12 +350,12 @@ fn test_split_not_to_split_existing_tombstone_region() {
     cluster.must_split(&region, b"k2");
     cluster.must_put(b"k22", b"v22");
 
-    must_get_equal(&cluster.get_engine(2), b"k1", b"v1");
+    must_get_equal_in(&cluster.get_engine(2), b"k1", b"v1");
 
     let left = pd_client.get_region(b"k1").unwrap();
     let left_peer_2 = find_peer(&left, 2).cloned().unwrap();
     pd_client.must_remove_peer(left.get_id(), left_peer_2);
-    must_get_none(&cluster.get_engine(2), b"k1");
+    must_get_none_in(&cluster.get_engine(2), b"k1");
 
     let on_handle_apply_2_fp = "on_handle_apply_2";
     fail::cfg("on_handle_apply_2", "pause").unwrap();
@@ -373,7 +374,7 @@ fn test_split_not_to_split_existing_tombstone_region() {
     fail::remove(on_handle_apply_2_fp);
 
     // If value of `k22` is equal to `v22`, the previous split log must be applied.
-    must_get_equal(&cluster.get_engine(2), b"k22", b"v22");
+    must_get_equal_in(&cluster.get_engine(2), b"k22", b"v22");
 
     // If left_peer_2 is created, `must_get_none` will fail.
     must_get_none(&cluster.get_engine(2), b"k1");

@@ -71,15 +71,17 @@ impl Transport for ChannelTransport {
             let from = match self.core.lock().unwrap().snap_paths.get(&from_store) {
                 Some(p) => {
                     p.0.register(key.clone(), SnapEntry::Sending);
-                    p.0.get_snapshot_for_sending(&key).unwrap()
+                    p.0.get_final_name_for_build(&key)
                 }
                 None => return Err(box_err!("missing temp dir for store {}", from_store)),
             };
-            let to = match self.core.lock().unwrap().snap_paths.get(&to_store) {
+            let (tmp, to) = match self.core.lock().unwrap().snap_paths.get(&to_store) {
                 Some(p) => {
                     p.0.register(key.clone(), SnapEntry::Receiving);
-                    let data = msg.get_message().get_snapshot().get_data();
-                    p.0.get_snapshot_for_receiving(&key, data).unwrap()
+                    (
+                        p.0.get_temp_path_for_build(key.region_id),
+                        p.0.get_final_name_for_recv(&key),
+                    )
                 }
                 None => return Err(box_err!("missing temp dir for store {}", to_store)),
             };
@@ -94,7 +96,15 @@ impl Transport for ChannelTransport {
                     .deregister(&key, &SnapEntry::Receiving);
             });
 
-            copy_snapshot(from, to)?;
+            if !to.exists() {
+                std::fs::create_dir_all(&tmp)?;
+                for f in std::fs::read_dir(&from)? {
+                    let f = f?.path();
+                    let t = tmp.join(f.file_name().unwrap().to_str().unwrap());
+                    std::fs::copy(f, t)?;
+                }
+                std::fs::rename(&tmp, &to)?;
+            }
         }
 
         let core = self.core.lock().unwrap();
@@ -190,7 +200,7 @@ impl Simulator for NodeCluster {
         node_id: u64,
         cfg: TiKvConfig,
         engines: Engines<RocksEngine, RocksEngine>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<RocksEngine>>>,
         key_manager: Option<Arc<DataKeyManager>>,
         router: RaftRouter<RocksEngine, RocksEngine>,
         system: RaftBatchSystem<RocksEngine, RocksEngine>,
@@ -247,7 +257,7 @@ impl Simulator for NodeCluster {
             Arc::new(SSTImporter::new(dir, None).unwrap())
         };
 
-        let local_reader = LocalReader::new(engines.kv.clone(), store_meta.clone(), router.clone());
+        let local_reader = LocalReader::new(store_meta.clone(), router.clone());
         let cfg_controller = ConfigController::new(cfg.clone());
 
         let split_check_runner = SplitCheckRunner::new(

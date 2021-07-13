@@ -52,6 +52,7 @@ const CLEANUP_MAX_REGION_COUNT: usize = 128;
 pub enum Task {
     Gen {
         region_id: u64,
+        tablet_suffix: u64,
         notifier: SyncSender<RaftSnapshot>,
         for_balance: bool,
     },
@@ -239,6 +240,7 @@ where
     fn generate_snap(
         &self,
         region_id: u64,
+        tablet_suffix: u64,
         notifier: SyncSender<RaftSnapshot>,
         for_balance: bool,
     ) -> Result<()> {
@@ -246,6 +248,7 @@ where
         let snap = box_try!(store::do_snapshot(
             self.mgr.clone(),
             &self.engines,
+            tablet_suffix,
             region_id,
             for_balance,
         ));
@@ -267,7 +270,13 @@ where
     }
 
     /// Handles the task of generating snapshot of the Region. It calls `generate_snap` to do the actual work.
-    fn handle_gen(&self, region_id: u64, notifier: SyncSender<RaftSnapshot>, for_balance: bool) {
+    fn handle_gen(
+        &self,
+        region_id: u64,
+        tablet_suffix: u64,
+        notifier: SyncSender<RaftSnapshot>,
+        for_balance: bool,
+    ) {
         SNAP_COUNTER.generate.all.inc();
         let start = tikv_util::time::Instant::now();
         let _io_type_guard = WithIOType::new(if for_balance {
@@ -276,7 +285,7 @@ where
             IOType::Replication
         });
 
-        if let Err(e) = self.generate_snap(region_id, notifier, for_balance) {
+        if let Err(e) = self.generate_snap(region_id, tablet_suffix, notifier, for_balance) {
             error!(%e; "failed to generate snap!!!"; "region_id" => region_id,);
             return;
         }
@@ -516,6 +525,43 @@ where
         }
     }
 
+    fn clean_stale_tablets(&self) {
+        let root = self.engines.tablets.tablets_path();
+        let dir = match std::fs::read_dir(&root) {
+            Ok(dir) => dir,
+            Err(e) => {
+                info!("skip cleaning stale tablets: {:?}", e);
+                return;
+            }
+        };
+        let mut last_region_id = 0;
+        let mut last_suffix = 0;
+        for path in dir.flatten() {
+            let file_name = path.file_name().into_string().unwrap();
+            let mut parts = file_name.split('_');
+            if let (Some(Ok(region_id)), Some(Ok(suffix))) = (
+                parts.next().map(|p| p.parse()),
+                parts.next().map(|p| p.parse()),
+            ) {
+                if suffix == 0 {
+                    continue;
+                }
+                if region_id != last_region_id {
+                    last_region_id = region_id;
+                    last_suffix = suffix;
+                    continue;
+                }
+                let to_destory = std::cmp::min(last_suffix, suffix);
+                if let Err(e) = self.engines.tablets.destroy_tablet(region_id, to_destory) {
+                    info!(
+                        "failed to destroy tablet {} {}: {:?}",
+                        region_id, to_destory, e
+                    );
+                }
+            }
+        }
+    }
+
     /// Checks the number of files at level 0 to avoid write stall after ingesting sst.
     /// Returns true if the ingestion causes write stall.
     fn ingest_maybe_stall(&self) -> bool {
@@ -629,6 +675,7 @@ where
         match task {
             Task::Gen {
                 region_id,
+                tablet_suffix,
                 notifier,
                 for_balance,
             } => {
@@ -638,7 +685,7 @@ where
 
                 self.pool.spawn(async move {
                     tikv_alloc::add_thread_memory_accessor();
-                    ctx.handle_gen(region_id, notifier, for_balance);
+                    ctx.handle_gen(region_id, tablet_suffix, notifier, for_balance);
                     tikv_alloc::remove_thread_memory_accessor();
                 });
             }
@@ -687,6 +734,7 @@ where
         self.clean_stale_tick += 1;
         if self.clean_stale_tick >= STALE_PEER_CHECK_TICK {
             self.ctx.clean_stale_ranges();
+            self.ctx.clean_stale_tablets();
             self.clean_stale_tick = 0;
         }
     }
@@ -929,6 +977,7 @@ mod tests {
             sched
                 .schedule(Task::Gen {
                     region_id: id,
+                    tablet_suffix: 0,
                     notifier: tx,
                     for_balance: false,
                 })

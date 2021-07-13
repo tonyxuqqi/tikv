@@ -372,7 +372,7 @@ impl<ER: RaftEngine> Debugger<ER> {
                 continue;
             }
             let region = &region_state.get_region();
-            write_peer_state(&mut wb, region, PeerState::Tombstone, None).unwrap();
+            write_peer_state(&mut wb, region, PeerState::Tombstone, None, u64::MAX, 0).unwrap();
         }
 
         let mut write_opts = WriteOptions::new();
@@ -1201,7 +1201,14 @@ fn set_region_tombstone(
         return Err(box_err!("The peer is still in target peers"));
     }
 
-    box_try!(write_peer_state(wb, &region, PeerState::Tombstone, None));
+    box_try!(write_peer_state(
+        wb,
+        &region,
+        PeerState::Tombstone,
+        None,
+        u64::MAX,
+        0,
+    ));
     Ok(())
 }
 
