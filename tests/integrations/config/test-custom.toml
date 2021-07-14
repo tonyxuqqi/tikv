@@ -161,7 +161,7 @@ future-poll-size = 2
 hibernate-regions = false
 dev-assert = true
 perf-level = 5
-disable-kv-wal = true
+disable-tablet-wal = true
 skip-commit-index = true
 
 [coprocessor]

@@ -1244,6 +1244,10 @@ impl SnapManager {
         PathBuf::from(&self.core.base).join(&prefix)
     }
 
+    pub fn io_limiter(&self) -> &Limiter {
+        &self.core.limiter
+    }
+
     pub fn get_temp_path_for_ingest(&self) -> String {
         let sst_id = self.core.temp_sst_id.fetch_add(1, Ordering::SeqCst);
         let filename = format!(

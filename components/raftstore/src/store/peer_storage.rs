@@ -1329,11 +1329,6 @@ where
     /// Delete all data belong to the region.
     /// If return Err, data may get partial deleted.
     pub fn clear_data(&self) -> Result<()> {
-        let (start_key, end_key) = (enc_start_key(self.region()), enc_end_key(self.region()));
-        let region_id = self.get_region_id();
-        box_try!(self
-            .region_sched
-            .schedule(RegionTask::destroy(region_id, start_key, end_key)));
         Ok(())
     }
 
@@ -1363,6 +1358,7 @@ where
         if keys::DATA_MIN_KEY < start_key.as_slice() {
             box_try!(self.region_sched.schedule(RegionTask::destroy(
                 self.get_region_id(),
+                self.tablet_suffix,
                 keys::DATA_MIN_KEY.to_vec(),
                 start_key,
             )));
@@ -1370,6 +1366,7 @@ where
         if keys::DATA_MAX_KEY > end_key.as_slice() {
             box_try!(self.region_sched.schedule(RegionTask::destroy(
                 self.get_region_id(),
+                self.tablet_suffix,
                 end_key,
                 keys::DATA_MAX_KEY.to_vec(),
             )));

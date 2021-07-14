@@ -2203,7 +2203,6 @@ where
         }
         let mut write_opts = WriteOptions::new();
         write_opts.set_sync(true);
-        write_opts.set_disable_wal(self.ctx.cfg.disable_kv_wal);
         kv_wb.write_opt(&write_opts).unwrap();
         let mut meta = self.ctx.store_meta.lock().unwrap();
         meta.set_region(&self.ctx.coprocessor_host, derived, &mut self.fsm.peer);

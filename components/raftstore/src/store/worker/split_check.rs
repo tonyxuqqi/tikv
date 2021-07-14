@@ -15,7 +15,6 @@ use kvproto::pdpb::CheckPolicy;
 use crate::coprocessor::Config;
 use crate::coprocessor::CoprocessorHost;
 use crate::coprocessor::SplitCheckerHost;
-use crate::coprocessor::{get_region_approximate_keys, get_region_approximate_size};
 use crate::store::{Callback, CasualMessage, CasualRouter};
 use crate::Result;
 use configuration::{ConfigChange, Configuration};
@@ -363,8 +362,8 @@ where
                 if pending_tasks.fetch_sub(1, AtomicOrdering::SeqCst) > 1 {
                     return;
                 }
-                let size = get_region_approximate_size(&tablet, &region, 0).unwrap_or_default();
-                let keys = get_region_approximate_keys(&tablet, &region, 0).unwrap_or_default();
+                let size = tablet.get_engine_used_size().unwrap();
+                let keys = tablet.get_engine_total_keys().unwrap();
                 let _ = self.router.send(
                     region.get_id(),
                     CasualMessage::RegionApproximateSize { size },

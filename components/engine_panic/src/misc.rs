@@ -29,6 +29,10 @@ impl MiscExt for PanicEngine {
         panic!()
     }
 
+    fn get_engine_total_keys(&self) -> Result<u64> {
+        panic!()
+    }
+
     fn roughly_cleanup_ranges(&self, ranges: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
         panic!()
     }

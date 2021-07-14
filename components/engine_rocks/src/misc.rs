@@ -3,7 +3,7 @@
 use crate::engine::RocksEngine;
 use crate::import::RocksIngestExternalFileOptions;
 use crate::sst::RocksSstWriterBuilder;
-use crate::{util, RocksSstWriter};
+use crate::{util, RocksSstWriter, ROCKSDB_ESTIMATE_NUM_KEYS};
 use engine_traits::{
     CFNamesExt, DeleteStrategy, ImportExt, IngestExternalFileOptions, IterOptions, Iterable,
     Iterator, MiscExt, Mutable, Range, Result, SstWriter, SstWriterBuilder, WriteBatch,
@@ -131,7 +131,12 @@ impl RocksEngine {
 
 impl MiscExt for RocksEngine {
     fn flush(&self, sync: bool) -> Result<()> {
-        Ok(self.as_inner().flush(sync)?)
+        let handles: Result<Vec<_>> = self
+            .cf_names()
+            .into_iter()
+            .map(|name| util::get_cf_handle(self.as_inner(), &name))
+            .collect();
+        Ok(self.as_inner().flush_cfs(handles?.as_slice(), sync)?)
     }
 
     fn flush_cf(&self, cf: &str, sync: bool) -> Result<()> {
@@ -222,6 +227,18 @@ impl MiscExt for RocksEngine {
             used_size += util::get_engine_cf_used_size(self.as_inner(), handle);
         }
         Ok(used_size)
+    }
+
+    fn get_engine_total_keys(&self) -> Result<u64> {
+        let mut total_keys: u64 = 0;
+        for cf in ALL_CFS {
+            let handle = util::get_cf_handle(self.as_inner(), cf)?;
+            total_keys += self
+                .as_inner()
+                .get_property_int_cf(handle, ROCKSDB_ESTIMATE_NUM_KEYS)
+                .unwrap_or(0);
+        }
+        Ok(total_keys)
     }
 
     fn roughly_cleanup_ranges(&self, ranges: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {

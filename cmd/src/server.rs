@@ -25,7 +25,7 @@ use engine_rocks::{
     encryption::get_env as get_encrypted_env, file_system::get_env as get_inspected_env,
     RocksEngine,
 };
-use engine_traits::{Engines, RaftEngine, TabletFactory};
+use engine_traits::{Engines, MiscExt, RaftEngine, TabletFactory};
 use error_code::ErrorCodeExt;
 use file_system::{
     set_io_rate_limiter, BytesFetcher, IORateLimiter, MetricsManager as IOMetricsManager,
@@ -908,16 +908,14 @@ impl<ER: RaftEngine> TiKVServer<ER> {
         servers.lock_mgr.stop();
 
         self.to_stop.into_iter().for_each(|s| s.stop());
-        if self.config.raft_store.disable_kv_wal {
-            let db = engines.kv.as_inner();
-            for cf_name in db.cf_names() {
-                let cf = db.cf_handle(cf_name).unwrap();
-                if let Err(e) = db.flush_cf(cf, true) {
-                    error!("failed to flush kv engine"; "error" => ?e, "cf" => %cf_name);
+        if self.config.raft_store.disable_tablet_wal {
+            engines.tablets.loop_tablet_cache(Box::new(|id, suffix, tablet| {
+                if let Err(e) = tablet.flush(true) {
+                    error!("failed to flush kv engine"; "error" => ?e, "id" => id, "suffix" => suffix);
                 } else {
-                    info!("flushed kv engine"; "cf" => %cf_name);
+                    info!("flushed kv engine"; "id" => id, "suffix" => suffix);
                 }
-            }
+            }));
         }
     }
 }
@@ -1152,6 +1150,7 @@ const DEFAULT_ENGINE_METRICS_RESET_INTERVAL: Duration = Duration::from_millis(60
 pub struct EngineMetricsManager<R: RaftEngine> {
     engines: Engines<RocksEngine, R>,
     last_reset: Instant,
+    target: engine_rocks::EngineProperties,
 }
 
 impl<R: RaftEngine> EngineMetricsManager<R> {
@@ -1159,12 +1158,23 @@ impl<R: RaftEngine> EngineMetricsManager<R> {
         EngineMetricsManager {
             engines,
             last_reset: Instant::now(),
+            target: engine_rocks::EngineProperties::default(),
         }
     }
 
     pub fn flush(&mut self, now: Instant) {
-        self.engines.kv.flush_metrics("kv");
-        self.engines.raft.flush_metrics("raft");
+        self.engines.kv.flush_metrics("kv", false);
+        self.engines.raft.flush_metrics("raft", true);
+        self.target.reset();
+        let target = &mut self.target;
+        self.engines.kv.collect_engine_properties_to(target);
+
+        self.engines
+            .tablets
+            .loop_tablet_cache(Box::new(|_, _, tablet| {
+                tablet.collect_engine_properties_to(target)
+            }));
+        self.engines.kv.report_engine_properties("kv", target);
         if now.duration_since(self.last_reset) >= DEFAULT_ENGINE_METRICS_RESET_INTERVAL {
             self.engines.kv.reset_statistics();
             self.engines.raft.reset_statistics();

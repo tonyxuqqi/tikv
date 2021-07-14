@@ -170,7 +170,7 @@ pub struct Config {
     #[config(hidden)]
     pub apply_yield_duration: ReadableDuration,
     #[config(skip)]
-    pub disable_kv_wal: bool,
+    pub disable_tablet_wal: bool,
     #[config(skip)]
     pub skip_commit_index: bool,
 
@@ -257,7 +257,7 @@ impl Default for Config {
             hibernate_regions: tikv_util::build_on_master_branch(),
             dev_assert: false,
             apply_yield_duration: ReadableDuration::millis(500),
-            disable_kv_wal: false,
+            disable_tablet_wal: false,
             skip_commit_index: false,
 
             // They are preserved for compatibility check.

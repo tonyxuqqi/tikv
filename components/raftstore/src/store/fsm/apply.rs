@@ -352,7 +352,7 @@ where
     sync_log_hint: bool,
     // Whether to use the delete range API instead of deleting one by one.
     use_delete_range: bool,
-    disable_kv_wal: bool,
+    disable_tablet_wal: bool,
 
     perf_level: PerfLevel,
     yield_duration: Duration,
@@ -408,7 +408,7 @@ where
             last_applied_index: 0,
             committed_count: 0,
             sync_log_hint: false,
-            disable_kv_wal: cfg.disable_kv_wal,
+            disable_tablet_wal: cfg.disable_tablet_wal,
             exec_ctx: None,
             use_delete_range: cfg.use_delete_range,
             yield_duration: cfg.apply_yield_duration.0,
@@ -464,7 +464,7 @@ where
     /// If it returns true, all pending writes are persisted in engines.
     pub fn write_to_db(&mut self, delegate: &ApplyDelegate<EK>) -> bool {
         let need_sync = self.sync_log_hint;
-        let disable_kv_wal = self.disable_kv_wal;
+        let disable_tablet_wal = self.disable_tablet_wal;
         let perf_level = self.perf_level;
         let wb = self.kv_wb_mut(delegate);
         if !wb.is_empty() {
@@ -473,11 +473,16 @@ where
                 .get_perf_context(perf_level, PerfContextKind::RaftstoreApply);
             perf_context.start_observe();
             let mut write_opts = engine_traits::WriteOptions::new();
-            write_opts.set_sync(need_sync);
-            write_opts.set_disable_wal(disable_kv_wal);
+            write_opts.set_sync(!disable_tablet_wal && need_sync);
+            write_opts.set_disable_wal(disable_tablet_wal);
             wb.write_opt(&write_opts).unwrap_or_else(|e| {
                 panic!("failed to write to engine: {:?}", e);
             });
+            if disable_tablet_wal && need_sync {
+                delegate.tablet.flush(true).unwrap_or_else(|e| {
+                    panic!("failed to flush to engine: {:?}", e);
+                });
+            }
             // Clear data, reuse the WriteBatch, this can reduce memory allocations and deallocations.
             wb.clear();
             perf_context.report_metrics();

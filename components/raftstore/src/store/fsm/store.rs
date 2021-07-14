@@ -653,7 +653,6 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport> RaftPoller<EK, ER, T> {
         if !self.poll_ctx.kv_wb.is_empty() {
             let mut write_opts = WriteOptions::new();
             write_opts.set_sync(true);
-            write_opts.set_disable_wal(self.poll_ctx.cfg.disable_kv_wal);
             self.poll_ctx
                 .kv_wb
                 .write_opt(&write_opts)

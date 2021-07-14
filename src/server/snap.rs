@@ -214,6 +214,7 @@ fn recv_snap<R: RaftStoreRouter<RocksEngine> + 'static>(
         });
 
         let path = snap_mgr.get_temp_path_for_build(key.region_id);
+        let limiter = snap_mgr.io_limiter();
         fs::create_dir_all(&path)?;
         loop {
             let mut chunk = match stream.try_next().await? {
@@ -226,14 +227,16 @@ fn recv_snap<R: RaftStoreRouter<RocksEngine> + 'static>(
             let p = path.join(file_name);
             debug!("receiving snap file"; "file" => %p.display());
             let mut f = File::create(&p)?;
-            f.write_all(&chunk[len + 1..])?;
             let mut size = chunk.len() - len - 1;
+            limiter.consume(size).await;
+            f.write_all(&chunk[len + 1..])?;
             while chunk.len() >= SNAP_CHUNK_LEN {
                 chunk = match stream.try_next().await? {
                     Some(mut c) if !c.has_message() => c.take_data(),
                     Some(_) => return Err(box_err!("duplicated metadata")),
                     None => return Err(box_err!("missing chunk")),
                 };
+                limiter.consume(chunk.len()).await;
                 f.write_all(&chunk)?;
                 size += chunk.len();
             }

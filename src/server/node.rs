@@ -16,7 +16,9 @@ use crate::storage::{config::Config as StorageConfig, Storage};
 use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::raw::{Cache, Env};
-use engine_rocks::{CompactionListener, RocksCompactedEvent, RocksCompactionJobInfo, RocksEngine};
+use engine_rocks::{
+    CompactionListener, RocksCompactedEvent, RocksCompactionJobInfo, RocksEngine, Statistics,
+};
 use engine_traits::{
     CompactionJobInfo, Engines, Peekable, RaftEngine, TabletFactory, CF_DEFAULT, CF_WRITE,
 };
@@ -38,18 +40,15 @@ use tikv_util::worker::{FutureWorker, Scheduler, Worker};
 const MAX_CHECK_CLUSTER_BOOTSTRAPPED_RETRY_COUNT: u64 = 60;
 const CHECK_CLUSTER_BOOTSTRAPPED_RETRY_SECONDS: u64 = 3;
 
-// todo: Cache should be `Send` and `Sync`.
-struct CacheWrap(Option<Cache>);
-unsafe impl Send for CacheWrap {}
-unsafe impl Sync for CacheWrap {}
-
 struct FactoryInner {
     env: Option<Arc<Env>>,
     region_info_accessor: Option<RegionInfoAccessor>,
-    block_cache: CacheWrap,
+    block_cache: Option<Cache>,
     rocksdb_config: Arc<DbConfig>,
     store_path: PathBuf,
+    disable_tablet_wal: bool,
     enable_ttl: bool,
+    statistics: Option<Statistics>,
     registry: Mutex<HashMap<(u64, u64), RocksEngine>>,
 }
 
@@ -69,15 +68,22 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
         store_path: PathBuf,
         router: Option<RaftRouter<RocksEngine, ER>>,
     ) -> KvEngineFactory<ER> {
+        let statistics = if config.rocksdb.enable_statistics {
+            Some(Statistics::new())
+        } else {
+            None
+        };
         KvEngineFactory {
             inner: Arc::new(FactoryInner {
                 env,
                 region_info_accessor,
-                block_cache: CacheWrap(block_cache),
+                block_cache,
                 rocksdb_config: Arc::new(config.rocksdb.clone()),
                 store_path,
+                disable_tablet_wal: config.raft_store.disable_tablet_wal,
                 enable_ttl: config.storage.enable_ttl,
                 registry: Mutex::new(HashMap::default()),
+                statistics,
             }),
             router,
         }
@@ -116,17 +122,23 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
         ))
     }
 
-    fn create_tablet(&self, tablet_path: &Path, readonly: bool) -> RocksEngine {
+    fn create_tablet(&self, tablet_path: &Path, root: bool, readonly: bool) -> RocksEngine {
         // Create kv engine.
         let mut kv_db_opts = self.inner.rocksdb_config.build_opt();
         if let Some(env) = &self.inner.env {
             kv_db_opts.set_env(env.clone());
         }
+        if let Some(stats) = &self.inner.statistics {
+            kv_db_opts.set_statistics(stats);
+        }
+        if !root && self.inner.disable_tablet_wal {
+            kv_db_opts.set_atomic_flush(true);
+        }
         if let Some(filter) = self.create_raftstore_compaction_listener() {
             kv_db_opts.add_event_listener(filter);
         }
         let kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
-            &self.inner.block_cache.0,
+            &self.inner.block_cache,
             self.inner.region_info_accessor.as_ref(),
             self.inner.enable_ttl,
         );
@@ -146,7 +158,7 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
             .unwrap_or_else(|s| panic!("failed to open kv engine: {}", s))
         };
         let mut kv_engine = RocksEngine::from_db(Arc::new(kv_engine));
-        let shared_block_cache = self.inner.block_cache.0.is_some();
+        let shared_block_cache = self.inner.block_cache.is_some();
         kv_engine.set_shared_block_cache(shared_block_cache);
         kv_engine
     }
@@ -161,7 +173,7 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
             kv_db_opts.add_event_listener(filter);
         }
         let kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
-            &self.inner.block_cache.0,
+            &self.inner.block_cache,
             self.inner.region_info_accessor.as_ref(),
             self.inner.enable_ttl,
         );
@@ -193,7 +205,7 @@ impl<ER: RaftEngine> TabletFactory<RocksEngine> for KvEngineFactory<ER> {
         }
 
         let db_path = self.tablet_path(id, suffix);
-        let kv_engine = self.create_tablet(&db_path, false);
+        let kv_engine = self.create_tablet(&db_path, false, false);
         debug!("inserting tablet"; "key" => ?(id, suffix));
         reg.insert((id, suffix), kv_engine.clone());
         kv_engine
@@ -233,13 +245,13 @@ impl<ER: RaftEngine> TabletFactory<RocksEngine> for KvEngineFactory<ER> {
         if !RocksEngine::exists(&path) {
             panic!("tablet {} doesn't exist", path.display());
         }
-        self.create_tablet(path, readonly)
+        self.create_tablet(path, false, readonly)
     }
 
     #[inline]
     fn create_root_db(&self) -> RocksEngine {
         let root_path = self.root_db_path();
-        self.create_tablet(&root_path, false)
+        self.create_tablet(&root_path, true, false)
     }
 
     #[inline]
