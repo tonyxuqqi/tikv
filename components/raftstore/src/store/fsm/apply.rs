@@ -470,6 +470,8 @@ where
         if !wb.is_empty() {
             let mut perf_context = delegate
                 .tablet
+                .as_ref()
+                .unwrap()
                 .get_perf_context(perf_level, PerfContextKind::RaftstoreApply);
             perf_context.start_observe();
             let mut write_opts = engine_traits::WriteOptions::new();
@@ -479,9 +481,14 @@ where
                 panic!("failed to write to engine: {:?}", e);
             });
             if disable_tablet_wal && need_sync {
-                delegate.tablet.flush(true).unwrap_or_else(|e| {
-                    panic!("failed to flush to engine: {:?}", e);
-                });
+                delegate
+                    .tablet
+                    .as_ref()
+                    .unwrap()
+                    .flush(true)
+                    .unwrap_or_else(|e| {
+                        panic!("failed to flush to engine: {:?}", e);
+                    });
             }
             // Clear data, reuse the WriteBatch, this can reduce memory allocations and deallocations.
             wb.clear();
@@ -503,7 +510,7 @@ where
         }
         self.write_times += 1;
         // Call it before invoking callback for preventing Commit is executed before Prewrite is observed.
-        self.host.on_flush_apply(delegate.tablet.clone());
+        self.host.on_flush_apply(delegate.tablet.clone().unwrap());
 
         for cbs in self.cbs.drain(..) {
             cbs.invoke_all(&self.host);
@@ -549,7 +556,10 @@ where
         if self.kv_wb.is_none() {
             // If `enable_multi_batch_write` was set true, we create `RocksWriteBatchVec`.
             // Otherwise create `RocksWriteBatch`.
-            self.kv_wb = Some(W::with_capacity(&delegate.tablet, DEFAULT_APPLY_WB_SIZE));
+            self.kv_wb = Some(W::with_capacity(
+                delegate.tablet.as_ref().unwrap(),
+                DEFAULT_APPLY_WB_SIZE,
+            ));
         }
         self.kv_wb.as_mut().unwrap()
     }
@@ -794,7 +804,7 @@ where
     applied_index_term: u64,
     /// The latest synced apply index.
     last_sync_apply_index: u64,
-    tablet: EK,
+    tablet: Option<EK>,
 
     /// Info about cmd observer.
     observe_cmd: Option<ObserveCmd>,
@@ -1521,7 +1531,7 @@ where
                     e
                 )
             };
-            let tablet = &self.tablet;
+            let tablet = self.tablet.as_ref().unwrap();
             tablet
                 .delete_ranges_cf(cf, DeleteStrategy::DeleteFiles, &range)
                 .unwrap_or_else(|e| fail_f(e, DeleteStrategy::DeleteFiles));
@@ -1567,7 +1577,7 @@ where
             return Err(e);
         }
 
-        match importer.ingest(sst, &self.tablet) {
+        match importer.ingest(sst, self.tablet.as_ref().unwrap()) {
             Ok(meta_info) => ssts.push(meta_info),
             Err(e) => {
                 // If this failed, it means that the file is corrupted or something
@@ -2183,6 +2193,8 @@ where
             let region_state_key = keys::region_state_key(*region_id);
             match self
                 .tablet
+                .as_ref()
+                .unwrap()
                 .get_msg_cf::<RegionLocalState>(CF_RAFT, &region_state_key)
             {
                 Ok(None) => (),
@@ -2277,7 +2289,7 @@ where
             self.id == 3 && self.region_id() == 1,
             |_| { unreachable!() }
         );
-        let tablet = self.tablet.clone();
+        let tablet = self.tablet.as_ref().unwrap().clone();
         ctx.after_write.push(Box::new(move || {
             tablet.checkpoint_to(&to_cloned, 0).unwrap();
         }));
@@ -2436,7 +2448,12 @@ where
         self.ready_source_region_id = 0;
 
         let region_state_key = keys::region_state_key(source_region_id);
-        let state: RegionLocalState = match self.tablet.get_msg_cf(CF_RAFT, &region_state_key) {
+        let state: RegionLocalState = match self
+            .tablet
+            .as_ref()
+            .unwrap()
+            .get_msg_cf(CF_RAFT, &region_state_key)
+        {
             Ok(Some(s)) => s,
             e => panic!(
                 "{} failed to get regions state of {:?}: {:?}",
@@ -2512,7 +2529,12 @@ where
 
         PEER_ADMIN_CMD_COUNTER.rollback_merge.all.inc();
         let region_state_key = keys::region_state_key(self.region_id());
-        let state: RegionLocalState = match self.tablet.get_msg_cf(CF_RAFT, &region_state_key) {
+        let state: RegionLocalState = match self
+            .tablet
+            .as_ref()
+            .unwrap()
+            .get_msg_cf(CF_RAFT, &region_state_key)
+        {
             Ok(Some(s)) => s,
             e => panic!("{} failed to get regions state: {:?}", self.tag, e),
         };
@@ -2631,7 +2653,7 @@ where
                 // open files in rocksdb.
                 // TODO: figure out another way to do consistency check without snapshot
                 // or short life snapshot.
-                snap: self.tablet.snapshot(),
+                snap: self.tablet.as_ref().unwrap().snapshot(),
             }),
         ))
     }
@@ -2791,7 +2813,7 @@ pub struct Registration<EK> {
     pub region: Region,
     pub pending_request_snapshot_count: Arc<AtomicUsize>,
     pub is_merging: bool,
-    pub tablet: EK,
+    pub tablet: Option<EK>,
 }
 
 impl<EK: KvEngine> Registration<EK> {
@@ -2818,7 +2840,7 @@ impl<EK: KvEngine> Registration<EK> {
             region: Default::default(),
             pending_request_snapshot_count: Default::default(),
             is_merging: false,
-            tablet,
+            tablet: Some(tablet),
         }
     }
 }
@@ -3365,7 +3387,7 @@ where
                 ReadResponse {
                     response: Default::default(),
                     snapshot: Some(RegionSnapshot::from_snapshot(
-                        Arc::new(self.delegate.tablet.snapshot()),
+                        Arc::new(self.delegate.tablet.as_ref().unwrap().snapshot()),
                         Arc::new(self.delegate.region.clone()),
                     )),
                     txn_extra_op: TxnExtraOp::Noop,

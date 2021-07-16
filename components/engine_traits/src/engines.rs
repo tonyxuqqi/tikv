@@ -9,7 +9,6 @@ use std::fmt::{self, Debug};
 use std::path::{Path, PathBuf};
 
 pub trait TabletFactory<EK> {
-    fn forget_tablet(&self, _id: u64, _suffix: u64) {}
     fn loop_tablet_cache(&self, _f: Box<dyn FnMut(u64, u64, &EK) + '_>) {}
     fn destroy_tablet(&self, _id: u64, _suffix: u64) -> crate::Result<()> {
         Ok(())
@@ -34,6 +33,13 @@ pub trait TabletFactory<EK> {
     fn tablet_path(&self, id: u64, suffix: u64) -> PathBuf;
     fn tablets_path(&self) -> PathBuf;
     fn clone(&self) -> Box<dyn TabletFactory<EK> + Send>;
+    fn load_tablet(&self, _path: &Path, id: u64, suffix: u64) -> EK {
+        self.open_tablet(id, suffix)
+    }
+    fn mark_tombstone(&self, _region_id: u64, _suffix: u64) {}
+    fn is_tombstoned(&self, _region_id: u64, _suffix: u64) -> bool {
+        false
+    }
 }
 
 pub struct DummyFactory;

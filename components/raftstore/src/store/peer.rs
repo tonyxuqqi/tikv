@@ -793,7 +793,7 @@ where
             PeerState::Tombstone,
             self.pending_merge_state.clone(),
             u64::MAX,
-            self.get_store().tablet_suffix(),
+            self.get_store().tablet_suffix().unwrap_or(0),
         )?;
         // write kv rocksdb first in case of restart happen between two write
         let mut write_opts = WriteOptions::new();
@@ -1032,7 +1032,7 @@ where
     }
 
     #[inline]
-    pub fn tablet(&self) -> EK {
+    pub fn tablet(&self) -> Option<EK> {
         self.get_store().tablet()
     }
 
@@ -1632,7 +1632,7 @@ where
                     PeerState::Normal,
                     None,
                     self.get_store().applied_index(),
-                    self.get_store().tablet_suffix(),
+                    self.get_store().tablet_suffix().unwrap(),
                 )
                 .unwrap();
                 self.post_pending_read_index_on_replica(ctx);
@@ -3371,37 +3371,38 @@ where
         let region_id = self.region_id;
         let peer_id = self.peer.get_id();
         let scheduler = ctx.pd_scheduler.clone();
-        let tablet = self.get_store().tablet();
-        let split_check_task = SplitCheckTask::GetRegionApproximateSizeAndKeys {
-            tablet,
-            region: self.region().clone(),
-            pending_tasks: self.pending_pd_heartbeat_tasks.clone(),
-            cb: Box::new(move |size: u64, keys: u64| {
-                if let PdTask::Heartbeat(mut h) = task {
-                    h.approximate_size = size;
-                    h.approximate_keys = keys;
-                    if let Err(e) = scheduler.schedule(PdTask::Heartbeat(h)) {
-                        error!(
-                            "failed to notify pd";
-                            "region_id" => region_id,
-                            "peer_id" => peer_id,
-                            "err" => ?e,
-                        );
+        if let Some(tablet) = self.get_store().tablet() {
+            let split_check_task = SplitCheckTask::GetRegionApproximateSizeAndKeys {
+                tablet,
+                region: self.region().clone(),
+                pending_tasks: self.pending_pd_heartbeat_tasks.clone(),
+                cb: Box::new(move |size: u64, keys: u64| {
+                    if let PdTask::Heartbeat(mut h) = task {
+                        h.approximate_size = size;
+                        h.approximate_keys = keys;
+                        if let Err(e) = scheduler.schedule(PdTask::Heartbeat(h)) {
+                            error!(
+                                "failed to notify pd";
+                                "region_id" => region_id,
+                                "peer_id" => peer_id,
+                                "err" => ?e,
+                            );
+                        }
                     }
-                }
-            }),
-        };
-        self.pending_pd_heartbeat_tasks
-            .fetch_add(1, Ordering::SeqCst);
-        if let Err(e) = ctx.split_check_scheduler.schedule(split_check_task) {
-            error!(
-                "failed to notify pd";
-                "region_id" => region_id,
-                "peer_id" => peer_id,
-                "err" => ?e,
-            );
+                }),
+            };
             self.pending_pd_heartbeat_tasks
-                .fetch_sub(1, Ordering::SeqCst);
+                .fetch_add(1, Ordering::SeqCst);
+            if let Err(e) = ctx.split_check_scheduler.schedule(split_check_task) {
+                error!(
+                    "failed to notify pd";
+                    "region_id" => region_id,
+                    "peer_id" => peer_id,
+                    "err" => ?e,
+                );
+                self.pending_pd_heartbeat_tasks
+                    .fetch_sub(1, Ordering::SeqCst);
+            }
         }
     }
 

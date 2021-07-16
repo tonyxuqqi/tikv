@@ -415,29 +415,27 @@ where
                 return;
             }
         };
-        let mut last_region_id = 0;
-        let mut last_suffix = 0;
         for path in dir.flatten() {
             let file_name = path.file_name().into_string().unwrap();
             let mut parts = file_name.split('_');
-            if let (Some(Ok(region_id)), Some(Ok(suffix))) = (
+            let (region_id, suffix) = match (
                 parts.next().map(|p| p.parse()),
                 parts.next().map(|p| p.parse()),
             ) {
-                if suffix == 0 {
-                    continue;
-                }
-                if region_id != last_region_id {
-                    last_region_id = region_id;
-                    last_suffix = suffix;
-                    continue;
-                }
-                let to_destory = std::cmp::min(last_suffix, suffix);
-                if let Err(e) = self.engines.tablets.destroy_tablet(region_id, to_destory) {
-                    info!(
-                        "failed to destroy tablet {} {}: {:?}",
-                        region_id, to_destory, e
-                    );
+                (Some(Ok(r)), Some(Ok(s))) => (r, s),
+                _ => continue,
+            };
+            if self
+                .engines
+                .tablets
+                .open_tablet_cache(region_id, suffix)
+                .is_some()
+            {
+                continue;
+            }
+            if self.engines.tablets.is_tombstoned(region_id, suffix) {
+                if let Err(e) = self.engines.tablets.destroy_tablet(region_id, suffix) {
+                    info!("failed to destroy tablet {} {}: {:?}", region_id, suffix, e);
                 }
             }
         }

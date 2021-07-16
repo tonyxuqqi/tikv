@@ -170,7 +170,7 @@ impl RangePropertiesExt for RocksEngine {
 
         let (cf, cf_size) = cfs.iter().max_by_key(|(_, s)| s).unwrap();
         // assume the size of keys is uniform distribution in both cfs.
-        let cf_split_size = split_size * cf_size / total_size;
+        let cf_split_size = (split_size as f64 * (*cf_size as f64 / total_size as f64)) as u64;
 
         self.get_range_approximate_split_keys_cf(
             cf,

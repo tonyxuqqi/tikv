@@ -53,7 +53,7 @@ pub enum ConsistencyCheckMethod {
 }
 
 /// Default region split size.
-pub const DEFAULT_SPLIT_SIZE: ReadableSize = ReadableSize::gb(32);
+pub const DEFAULT_SPLIT_SIZE: ReadableSize = ReadableSize::gb(16);
 /// Default region split keys.
 pub const SPLIT_KEYS: u64 = 960000;
 /// Default batch split limit.

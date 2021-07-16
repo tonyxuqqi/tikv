@@ -493,7 +493,7 @@ fn init_raft_state<EK: KvEngine, ER: RaftEngine>(
 fn init_apply_state<EK: KvEngine, ER: RaftEngine>(
     engines: &Engines<EK, ER>,
     region: &Region,
-) -> Result<(EK, u64, RaftApplyState)> {
+) -> Result<(Option<(EK, u64)>, RaftApplyState)> {
     let state_key = keys::region_state_key(region.get_id());
     let kv_state: Option<RegionLocalState> = engines.kv.get_msg_cf(CF_RAFT, &state_key)?;
     let suffix = match kv_state {
@@ -501,12 +501,11 @@ fn init_apply_state<EK: KvEngine, ER: RaftEngine>(
             if s.get_state() == PeerState::Tombstone {
                 0
             } else if s.get_state() == PeerState::Applying {
-                let tablet = engines.tablets.create_tablet(region.get_id(), 0);
                 let apply_state = engines
                     .kv
                     .get_msg_cf(CF_RAFT, &keys::apply_state_key(region.get_id()))?
                     .unwrap();
-                return Ok((tablet, 0, apply_state));
+                return Ok((None, apply_state));
             } else {
                 s.get_tablet_suffix()
             }
@@ -514,7 +513,8 @@ fn init_apply_state<EK: KvEngine, ER: RaftEngine>(
         None => 0,
     };
     if suffix == 0 {
-        engines.tablets.create_tablet(region.get_id(), 0);
+        let apply_state = RaftApplyState::default();
+        return Ok((None, apply_state));
     }
     let tablet = engines.tablets.open_tablet(region.get_id(), suffix);
 
@@ -531,7 +531,7 @@ fn init_apply_state<EK: KvEngine, ER: RaftEngine>(
             apply_state
         }
     };
-    Ok((tablet, suffix, apply_state))
+    Ok((Some((tablet, suffix)), apply_state))
 }
 
 fn init_last_term<EK: KvEngine, ER: RaftEngine>(
@@ -707,8 +707,8 @@ where
     EK: KvEngine,
 {
     pub engines: Engines<EK, ER>,
-    tablet: EK,
-    tablet_suffix: u64,
+    tablet: Option<EK>,
+    tablet_suffix: Option<u64>,
 
     peer_id: u64,
     region: metapb::Region,
@@ -783,7 +783,10 @@ where
             "path" => ?engines.kv.path(),
         );
         let mut raft_state = init_raft_state(&engines, region)?;
-        let (tablet, suffix, apply_state) = init_apply_state(&engines, region)?;
+        let (tablet, suffix, apply_state) = match init_apply_state(&engines, region)? {
+            (Some((tablet, suffix)), apply_state) => (Some(tablet), Some(suffix), apply_state),
+            (None, apply_state) => (None, None, apply_state),
+        };
         if let Err(e) = validate_states(region.get_id(), &engines, &mut raft_state, &apply_state) {
             return Err(box_err!("{} validate state fail: {:?}", tag, e));
         }
@@ -997,16 +1000,16 @@ where
     }
 
     pub fn raw_snapshot(&self) -> EK::Snapshot {
-        self.tablet.snapshot()
+        self.tablet.as_ref().unwrap().snapshot()
     }
 
     #[inline]
-    pub fn tablet(&self) -> EK {
+    pub fn tablet(&self) -> Option<EK> {
         self.tablet.clone()
     }
 
     #[inline]
-    pub fn tablet_suffix(&self) -> u64 {
+    pub fn tablet_suffix(&self) -> Option<u64> {
         self.tablet_suffix
     }
 
@@ -1117,7 +1120,7 @@ where
         let (tx, rx) = mpsc::sync_channel(1);
         *snap_state = SnapState::Generating(rx);
 
-        let task = GenSnapTask::new(self.region.get_id(), self.tablet_suffix, tx);
+        let task = GenSnapTask::new(self.region.get_id(), self.tablet_suffix.unwrap(), tx);
         let mut gen_snap_task = self.gen_snap_task.borrow_mut();
         assert!(gen_snap_task.is_none());
         *gen_snap_task = Some(task);
@@ -1343,11 +1346,10 @@ where
             if keys::DATA_MAX_KEY > end_key.as_slice() {
                 ranges.push(Range::new(&end_key, keys::DATA_MAX_KEY));
             }
-            if let Err(e) = self
-                .tablet
-                .delete_all_in_range(DeleteStrategy::DeleteFiles, &ranges)
-            {
-                panic!("{} clear ranges failed: {:?}", self.tag, e);
+            if let Some(tablet) = &self.tablet {
+                if let Err(e) = tablet.delete_all_in_range(DeleteStrategy::DeleteFiles, &ranges) {
+                    panic!("{} clear ranges failed: {:?}", self.tag, e);
+                }
             }
         }
     }
@@ -1358,7 +1360,7 @@ where
         if keys::DATA_MIN_KEY < start_key.as_slice() {
             box_try!(self.region_sched.schedule(RegionTask::destroy(
                 self.get_region_id(),
-                self.tablet_suffix,
+                self.tablet_suffix.unwrap(),
                 keys::DATA_MIN_KEY.to_vec(),
                 start_key,
             )));
@@ -1366,7 +1368,7 @@ where
         if keys::DATA_MAX_KEY > end_key.as_slice() {
             box_try!(self.region_sched.schedule(RegionTask::destroy(
                 self.get_region_id(),
-                self.tablet_suffix,
+                self.tablet_suffix.unwrap(),
                 end_key,
                 keys::DATA_MAX_KEY.to_vec(),
             )));
@@ -1487,32 +1489,32 @@ where
 
         let index = self.truncated_index();
         let term = self.truncated_term();
-        let final_path = self
-            .engines
-            .tablets
-            .tablet_path(self.region.get_id(), index);
         let snap_key = SnapKey::new(self.region.get_id(), term, index);
         let snap_path = mgr.get_final_name_for_recv(&snap_key);
-        fs::rename(snap_path, final_path).unwrap();
+        self.engines
+            .tablets
+            .load_tablet(&snap_path, self.region.get_id(), index);
         status.store(JOB_STATUS_FINISHED, Ordering::SeqCst);
         self.refresh_tablet();
     }
 
     pub fn release_tablet(&mut self) {
         let region_id = self.get_region_id();
-        self.engines
-            .tablets
-            .forget_tablet(region_id, self.tablet_suffix);
+        self.tablet.take();
+        if let Some(suffix) = self.tablet_suffix.take() {
+            self.engines.tablets.mark_tombstone(region_id, suffix);
+        }
     }
 
     // Should only be called right after applying snapshot.
     pub fn refresh_tablet(&mut self) {
         self.release_tablet();
-        self.tablet_suffix = self.applied_index();
-        self.tablet = self
-            .engines
-            .tablets
-            .open_tablet(self.get_region_id(), self.tablet_suffix);
+        self.tablet_suffix = Some(self.applied_index());
+        self.tablet = Some(
+            self.engines
+                .tablets
+                .open_tablet(self.get_region_id(), self.tablet_suffix.unwrap()),
+        );
     }
 
     /// Save memory states to disk.

@@ -2180,7 +2180,7 @@ where
                     PeerState::Normal,
                     None,
                     split_index,
-                    self.fsm.peer.get_store().tablet_suffix(),
+                    self.fsm.peer.get_store().tablet_suffix().unwrap(),
                 )
                 .unwrap();
                 continue;
@@ -2241,7 +2241,7 @@ where
                     "err" => %e,
                 );
             }
-            let tablet = self.fsm.peer.get_store().tablet();
+            let tablet = self.fsm.peer.get_store().tablet().unwrap();
             if let Err(e) = self.ctx.split_check_scheduler.schedule(
                 SplitCheckTask::GetRegionApproximateSizeAndKeys {
                     tablet,
@@ -2366,7 +2366,7 @@ where
                 // check again after split.
                 new_peer.peer.size_diff_hint = self.ctx.cfg.region_split_check_diff.0;
             }
-            let new_tablet = new_peer.peer.get_store().tablet();
+            let new_tablet = new_peer.peer.get_store().tablet().unwrap();
             let mailbox = BasicMailbox::new(sender, new_peer);
             self.ctx.router.register(new_region_id, mailbox);
             self.ctx
@@ -3575,23 +3575,24 @@ where
         }
         self.fsm.skip_split_count = 0;
 
-        let tablet = self.fsm.peer.get_store().tablet();
-        let task = SplitCheckTask::split_check(
-            tablet,
-            self.region().clone(),
-            true,
-            CheckPolicy::Approximate,
-        );
-        if let Err(e) = self.ctx.split_check_scheduler.schedule(task) {
-            error!(
-                "failed to schedule split check";
-                "region_id" => self.fsm.region_id(),
-                "peer_id" => self.fsm.peer_id(),
-                "err" => %e,
+        if let Some(tablet) = self.fsm.peer.get_store().tablet() {
+            let task = SplitCheckTask::split_check(
+                tablet,
+                self.region().clone(),
+                true,
+                CheckPolicy::Approximate,
             );
+            if let Err(e) = self.ctx.split_check_scheduler.schedule(task) {
+                error!(
+                    "failed to schedule split check";
+                    "region_id" => self.fsm.region_id(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "err" => %e,
+                );
+            }
+            self.fsm.peer.size_diff_hint = 0;
+            self.fsm.peer.compaction_declined_bytes = 0;
         }
-        self.fsm.peer.size_diff_hint = 0;
-        self.fsm.peer.compaction_declined_bytes = 0;
         self.register_split_region_check_tick();
     }
 
@@ -3756,15 +3757,16 @@ where
             return;
         }
 
-        let tablet = self.fsm.peer.get_store().tablet();
-        let task = SplitCheckTask::split_check(tablet, region.clone(), false, policy);
-        if let Err(e) = self.ctx.split_check_scheduler.schedule(task) {
-            error!(
-                "failed to schedule split check";
-                "region_id" => self.fsm.region_id(),
-                "peer_id" => self.fsm.peer_id(),
-                "err" => %e,
-            );
+        if let Some(tablet) = self.fsm.peer.get_store().tablet() {
+            let task = SplitCheckTask::split_check(tablet, region.clone(), false, policy);
+            if let Err(e) = self.ctx.split_check_scheduler.schedule(task) {
+                error!(
+                    "failed to schedule split check";
+                    "region_id" => self.fsm.region_id(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "err" => %e,
+                );
+            }
         }
     }
 

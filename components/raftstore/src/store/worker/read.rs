@@ -141,7 +141,7 @@ pub struct ReadDelegate<E: KvEngine> {
     applied_index_term: u64,
     leader_lease: Option<RemoteLease>,
     last_valid_ts: Timespec,
-    tablet: E,
+    tablet: Option<E>,
 
     tag: String,
     pub txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
@@ -284,12 +284,14 @@ impl<E> ReadExecutor<E> for ReadDelegate<E>
 where
     E: KvEngine,
 {
+    #[inline]
     fn get_engine(&self) -> &E {
-        &self.tablet
+        self.tablet.as_ref().unwrap()
     }
 
+    #[inline]
     fn get_snapshot(&self, _create_time: Option<ThreadReadId>) -> Arc<E::Snapshot> {
-        Arc::new(self.tablet.snapshot())
+        Arc::new(self.tablet.as_ref().unwrap().snapshot())
     }
 }
 
@@ -852,7 +854,7 @@ mod tests {
                 txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::default())),
                 max_ts_sync_status: Arc::new(AtomicU64::new(0)),
                 track_ver: TrackVer::new(),
-                tablet: db,
+                tablet: Some(db),
             };
             meta.readers.insert(1, read_delegate);
         }
@@ -1062,7 +1064,7 @@ mod tests {
                 txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::default())),
                 max_ts_sync_status: Arc::new(AtomicU64::new(0)),
                 track_ver: TrackVer::new(),
-                tablet: db,
+                tablet: Some(db),
             };
             meta.readers.insert(1, read_delegate);
         }

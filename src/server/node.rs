@@ -39,6 +39,7 @@ use tikv_util::worker::{FutureWorker, Scheduler, Worker};
 
 const MAX_CHECK_CLUSTER_BOOTSTRAPPED_RETRY_COUNT: u64 = 60;
 const CHECK_CLUSTER_BOOTSTRAPPED_RETRY_SECONDS: u64 = 3;
+const TOMBSTONE_MARK: &str = "TOMBSTONE_TABLET";
 
 struct FactoryInner {
     env: Option<Arc<Env>>,
@@ -73,6 +74,10 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
         } else {
             None
         };
+        let tablets_dir = store_path.join("tablets");
+        if !tablets_dir.exists() {
+            std::fs::create_dir_all(&tablets_dir).unwrap();
+        }
         KvEngineFactory {
             inner: Arc::new(FactoryInner {
                 env,
@@ -164,6 +169,7 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
     }
 
     fn destroy_tablet(&self, tablet_path: &Path) -> engine_traits::Result<()> {
+        info!("destroy tablet"; "path" => %tablet_path.display());
         // Create kv engine.
         let mut kv_db_opts = self.inner.rocksdb_config.build_opt();
         if let Some(env) = &self.inner.env {
@@ -181,7 +187,9 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
             tablet_path.to_str().unwrap(),
             kv_db_opts,
             kv_cfs_opts,
-        )
+        )?;
+        let _ = std::fs::remove_dir_all(tablet_path);
+        Ok(())
     }
 
     #[inline]
@@ -275,9 +283,22 @@ impl<ER: RaftEngine> TabletFactory<RocksEngine> for KvEngineFactory<ER> {
     }
 
     #[inline]
-    fn forget_tablet(&self, id: u64, suffix: u64) {
-        debug!("forget tablet"; "key" => ?(id, suffix));
-        self.inner.registry.lock().unwrap().remove(&(id, suffix));
+    fn mark_tombstone(&self, region_id: u64, suffix: u64) {
+        let path = self.tablet_path(region_id, suffix).join(TOMBSTONE_MARK);
+        std::fs::File::create(&path).unwrap();
+        debug!("tombstone tablet"; "region_id" => region_id, "suffix" => suffix);
+        self.inner
+            .registry
+            .lock()
+            .unwrap()
+            .remove(&(region_id, suffix));
+    }
+
+    #[inline]
+    fn is_tombstoned(&self, region_id: u64, suffix: u64) -> bool {
+        self.tablet_path(region_id, suffix)
+            .join(TOMBSTONE_MARK)
+            .exists()
     }
 
     #[inline]
@@ -292,6 +313,29 @@ impl<ER: RaftEngine> TabletFactory<RocksEngine> for KvEngineFactory<ER> {
         for ((id, suffix), tablet) in &*reg {
             f(*id, *suffix, tablet)
         }
+    }
+
+    #[inline]
+    fn load_tablet(&self, path: &Path, id: u64, suffix: u64) -> RocksEngine {
+        let mut reg = self.inner.registry.lock().unwrap();
+        if let Some(db) = reg.get(&(id, suffix)) {
+            panic!("region {} {} already exists", id, db.as_inner().path());
+        }
+
+        let db_path = self.tablet_path(id, suffix);
+        if !path.exists() {}
+        if let Err(e) = std::fs::rename(path, &db_path) {
+            panic!(
+                "failed to move {} to {}: {:?}",
+                path.display(),
+                db_path.display(),
+                e
+            );
+        }
+        let db = self.open_tablet_raw(db_path.as_path(), false);
+        debug!("open tablet"; "key" => ?(id, suffix));
+        reg.insert((id, suffix), db.clone());
+        db
     }
 }
 
