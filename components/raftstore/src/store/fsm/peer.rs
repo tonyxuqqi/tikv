@@ -681,6 +681,7 @@ where
         let s = self.fsm.peer.get_store();
         let compacted_idx = s.truncated_index();
         let compacted_term = s.truncated_term();
+        let applied_idx = s.applied_index();
         let is_applying_snap = s.is_applying_snapshot();
         for (key, is_sending) in snaps {
             let p = self.ctx.snap_mgr.get_final_name_for_build(&key);
@@ -720,9 +721,7 @@ where
                         }
                     }
                 }
-            } else if key.term <= compacted_term
-                && (key.idx < compacted_idx || key.idx == compacted_idx && !is_applying_snap)
-            {
+            } else if key.idx <= applied_idx && !is_applying_snap {
                 info!(
                     "deleting applied snap file";
                     "region_id" => self.fsm.region_id(),

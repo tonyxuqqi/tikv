@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::fmt::{self, Display, Formatter};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -101,8 +102,8 @@ pub trait ReadExecutor<E: KvEngine> {
                     }
                 },
                 CmdType::Snap => {
-                    let snapshot =
-                        RegionSnapshot::from_snapshot(self.get_snapshot(ts.take()), region.clone());
+                    let raw_snap = self.get_snapshot(ts.take());
+                    let snapshot = RegionSnapshot::from_snapshot(raw_snap, region.clone());
                     response.snapshot = Some(snapshot);
                     Response::default()
                 }
@@ -141,7 +142,7 @@ pub struct ReadDelegate<E: KvEngine> {
     applied_index_term: u64,
     leader_lease: Option<RemoteLease>,
     last_valid_ts: Timespec,
-    tablet: Option<E>,
+    tablet: Arc<parking_lot::Mutex<Option<E>>>,
 
     tag: String,
     pub txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
@@ -156,6 +157,9 @@ impl<E: KvEngine> Drop for ReadDelegate<E> {
     fn drop(&mut self) {
         // call `inc` to notify the source `ReadDelegate` is dropped
         self.track_ver.inc();
+        if self.track_ver.source {
+            self.tablet.lock().take();
+        }
     }
 }
 
@@ -218,7 +222,7 @@ impl<E: KvEngine> ReadDelegate<E> {
             txn_extra_op: peer.txn_extra_op.clone(),
             max_ts_sync_status: peer.max_ts_sync_status.clone(),
             track_ver: TrackVer::new(),
-            tablet: peer.tablet(),
+            tablet: Arc::new(parking_lot::Mutex::new(peer.tablet())),
         }
     }
 
@@ -280,18 +284,32 @@ impl<E: KvEngine> Display for ReadDelegate<E> {
     }
 }
 
-impl<E> ReadExecutor<E> for ReadDelegate<E>
+#[derive(Clone)]
+struct ReadDelegateWrap<E: KvEngine> {
+    delegate: Arc<ReadDelegate<E>>,
+    tablet: E,
+}
+
+impl<E: KvEngine> Deref for ReadDelegateWrap<E> {
+    type Target = Arc<ReadDelegate<E>>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.delegate
+    }
+}
+
+impl<E> ReadExecutor<E> for ReadDelegateWrap<E>
 where
     E: KvEngine,
 {
     #[inline]
     fn get_engine(&self) -> &E {
-        self.tablet.as_ref().unwrap()
+        &self.tablet
     }
 
     #[inline]
-    fn get_snapshot(&self, _create_time: Option<ThreadReadId>) -> Arc<E::Snapshot> {
-        Arc::new(self.tablet.as_ref().unwrap().snapshot())
+    fn get_snapshot(&self, _: Option<ThreadReadId>) -> Arc<E::Snapshot> {
+        Arc::new(self.tablet.snapshot())
     }
 }
 
@@ -384,40 +402,50 @@ where
     // while the `&ReadDelegate` is alive, a better choice is use `Rc` but `LocalReader: Send` will be
     // violated, which is required by `LocalReadRouter: Send`, use `Arc` will introduce extra cost but
     // make the logic clear
-    fn get_delegate(&mut self, region_id: u64) -> Option<Arc<ReadDelegate<E>>> {
-        match self.delegates.get(&region_id) {
+    fn get_delegate(&mut self, region_id: u64) -> Option<ReadDelegateWrap<E>> {
+        if let Some(d) = self.delegates.get(&region_id) {
+            let e = d.tablet.lock().clone();
             // The local `ReadDelegate` is up to date
-            Some(d) if !d.track_ver.any_new() => Some(Arc::clone(d)),
-            _ => {
-                debug!("update local read delegate"; "region_id" => region_id);
-                self.metrics.rejected_by_cache_miss += 1;
-
-                let (meta_len, meta_reader) = {
-                    let meta = self.store_meta.lock().unwrap();
-                    (
-                        meta.readers.len(),
-                        meta.readers.get(&region_id).cloned().map(Arc::new),
-                    )
-                };
-
-                // Remove the stale delegate
-                self.delegates.remove(&region_id);
-                self.delegates.resize(meta_len);
-                match meta_reader {
-                    Some(reader) => {
-                        self.delegates.insert(region_id, Arc::clone(&reader));
-                        Some(reader)
-                    }
-                    None => None,
+            if !d.track_ver.any_new() {
+                if let Some(e) = e {
+                    return Some(ReadDelegateWrap {
+                        delegate: d.clone(),
+                        tablet: e,
+                    });
                 }
             }
         }
+        debug!("update local read delegate"; "region_id" => region_id);
+        self.metrics.rejected_by_cache_miss += 1;
+
+        let (meta_len, meta_reader) = {
+            let meta = self.store_meta.lock().unwrap();
+            (
+                meta.readers.len(),
+                meta.readers.get(&region_id).cloned().map(Arc::new),
+            )
+        };
+
+        // Remove the stale delegate
+        self.delegates.remove(&region_id);
+        self.delegates.resize(meta_len);
+        if let Some(reader) = meta_reader {
+            let e = reader.tablet.lock().clone();
+            if let Some(e) = e {
+                self.delegates.insert(region_id, reader.clone());
+                return Some(ReadDelegateWrap {
+                    delegate: reader,
+                    tablet: e,
+                });
+            }
+        }
+        None
     }
 
     fn pre_propose_raft_command(
         &mut self,
         req: &RaftCmdRequest,
-    ) -> Result<Option<Arc<ReadDelegate<E>>>> {
+    ) -> Result<Option<ReadDelegateWrap<E>>> {
         // Check store id.
         if self.store_id.get().is_none() {
             let store_id = self.store_meta.lock().unwrap().store_id;
@@ -854,7 +882,7 @@ mod tests {
                 txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::default())),
                 max_ts_sync_status: Arc::new(AtomicU64::new(0)),
                 track_ver: TrackVer::new(),
-                tablet: Some(db),
+                tablet: Arc::new(parking_lot::Mutex::new(Some(db))),
             };
             meta.readers.insert(1, read_delegate);
         }
@@ -1064,7 +1092,7 @@ mod tests {
                 txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::default())),
                 max_ts_sync_status: Arc::new(AtomicU64::new(0)),
                 track_ver: TrackVer::new(),
-                tablet: Some(db),
+                tablet: Arc::new(parking_lot::Mutex::new(Some(db))),
             };
             meta.readers.insert(1, read_delegate);
         }

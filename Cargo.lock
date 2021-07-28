@@ -3526,6 +3526,7 @@ dependencies = [
  "log_wrappers",
  "openssl",
  "panic_hook",
+ "parking_lot 0.11.0",
  "pd_client",
  "prometheus",
  "prometheus-static-metric",
