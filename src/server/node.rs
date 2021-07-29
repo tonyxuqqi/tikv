@@ -15,9 +15,10 @@ use crate::server::Config as ServerConfig;
 use crate::storage::{config::Config as StorageConfig, Storage};
 use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
-use engine_rocks::raw::{Cache, Env};
+use engine_rocks::raw::{Cache, Env, RateLimiter};
 use engine_rocks::{
-    CompactionListener, RocksCompactedEvent, RocksCompactionJobInfo, RocksEngine, Statistics,
+    CompactionListener, RocksCompactedEvent, RocksCompactionJobInfo, RocksEngine, RocksdbLogger,
+    Statistics,
 };
 use engine_traits::{
     CompactionJobInfo, Engines, Peekable, RaftEngine, TabletFactory, CF_DEFAULT, CF_WRITE,
@@ -50,6 +51,7 @@ struct FactoryInner {
     disable_tablet_wal: bool,
     enable_ttl: bool,
     statistics: Option<Statistics>,
+    rate_limiter: Option<Arc<RateLimiter>>,
     registry: Mutex<HashMap<(u64, u64), RocksEngine>>,
 }
 
@@ -74,6 +76,11 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
         } else {
             None
         };
+        let rate_limiter = if config.rocksdb.share_rate_limiter {
+            config.rocksdb.build_rate_limiter()
+        } else {
+            None
+        };
         let tablets_dir = store_path.join("tablets");
         if !tablets_dir.exists() {
             std::fs::create_dir_all(&tablets_dir).unwrap();
@@ -88,6 +95,7 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
                 disable_tablet_wal: config.raft_store.disable_tablet_wal,
                 enable_ttl: config.storage.enable_ttl,
                 registry: Mutex::new(HashMap::default()),
+                rate_limiter,
                 statistics,
             }),
             router,
@@ -127,14 +135,27 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
         ))
     }
 
-    fn create_tablet(&self, tablet_path: &Path, root: bool, readonly: bool) -> RocksEngine {
+    fn create_tablet(
+        &self,
+        tablet_id: u64,
+        tablet_suffix: u64,
+        tablet_path: &Path,
+        root: bool,
+        readonly: bool,
+    ) -> RocksEngine {
         // Create kv engine.
         let mut kv_db_opts = self.inner.rocksdb_config.build_opt();
+        kv_db_opts.set_info_log(RocksdbLogger::new(tablet_id, tablet_suffix));
         if let Some(env) = &self.inner.env {
             kv_db_opts.set_env(env.clone());
         }
         if let Some(stats) = &self.inner.statistics {
             kv_db_opts.set_statistics(stats);
+        }
+        if let Some(limiter) = &self.inner.rate_limiter {
+            kv_db_opts.set_rate_limiter(limiter);
+        } else if let Some(limiter) = self.inner.rocksdb_config.build_rate_limiter() {
+            kv_db_opts.set_rate_limiter(&limiter);
         }
         if !root && self.inner.disable_tablet_wal {
             kv_db_opts.set_atomic_flush(true);
@@ -213,7 +234,7 @@ impl<ER: RaftEngine> TabletFactory<RocksEngine> for KvEngineFactory<ER> {
         }
 
         let db_path = self.tablet_path(id, suffix);
-        let kv_engine = self.create_tablet(&db_path, false, false);
+        let kv_engine = self.create_tablet(id, suffix, &db_path, false, false);
         debug!("inserting tablet"; "key" => ?(id, suffix));
         reg.insert((id, suffix), kv_engine.clone());
         kv_engine
@@ -253,13 +274,13 @@ impl<ER: RaftEngine> TabletFactory<RocksEngine> for KvEngineFactory<ER> {
         if !RocksEngine::exists(&path) {
             panic!("tablet {} doesn't exist", path.display());
         }
-        self.create_tablet(path, false, readonly)
+        self.create_tablet(0, 1, path, false, readonly)
     }
 
     #[inline]
     fn create_root_db(&self) -> RocksEngine {
         let root_path = self.root_db_path();
-        self.create_tablet(&root_path, true, false)
+        self.create_tablet(0, 0, &root_path, true, false)
     }
 
     #[inline]

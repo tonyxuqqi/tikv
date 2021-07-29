@@ -192,6 +192,7 @@ fn recv_snap<R: RaftStoreRouter<RocksEngine> + 'static>(
     snap_mgr: SnapManager,
     raft_router: R,
 ) -> impl Future<Output = Result<()>> {
+    let timer = Instant::now();
     let recv_task = async move {
         let mut stream = stream.map_err(Error::from);
         let meta = match stream.try_next().await? {
@@ -244,17 +245,22 @@ fn recv_snap<R: RaftStoreRouter<RocksEngine> + 'static>(
             f.sync_data()?;
         }
         // TODO: should sync directory.
+        let final_path = snap_mgr.get_final_name_for_recv(&key);
         fs::rename(&path, snap_mgr.get_final_name_for_recv(&key))?;
         if let Err(e) = raft_router.send_raft_msg(meta) {
             return Err(box_err!("{} failed to send snapshot to raft: {}", key, e));
         }
-        Ok(())
+        Ok(final_path)
     };
 
     async move {
-        let res: Result<()> = recv_task.await;
+        let res: Result<PathBuf> = recv_task.await;
         match res {
-            Ok(()) => sink.success(Done::default()).await.map_err(Error::from),
+            Ok(p) => {
+                sink.success(Done::default()).await?;
+                info!("receive snap {} takes {:?}", p.display(), timer.elapsed());
+                Ok(())
+            }
             Err(e) => {
                 // If sink can't send back error, the error is lost, so print it here.
                 error!("failed to receive snapshot"; "error" => ?e);

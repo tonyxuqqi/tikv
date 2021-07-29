@@ -251,6 +251,7 @@ fn test_serde_custom_tikv_config() {
         rate_limiter_mode: DBRateLimiterMode::AllIo,
         auto_tuned: None,
         rate_limiter_auto_tuned: false,
+        share_rate_limiter: true,
         bytes_per_sync: ReadableSize::mb(1),
         wal_bytes_per_sync: ReadableSize::kb(32),
         max_sub_compactions: 12,
