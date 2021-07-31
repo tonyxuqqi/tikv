@@ -60,10 +60,12 @@ impl Display for Task {
 }
 
 async fn send_snap_files(
+    mgr: &SnapManager,
     mut sender: impl Sink<(SnapshotChunk, WriteFlags), Error = Error> + Unpin,
     msg: RaftMessage,
     files: Vec<PathBuf>,
 ) -> Result<u64> {
+    let limiter = mgr.io_limiter();
     let mut total_sent = msg.compute_size() as u64;
     let mut chunk = SnapshotChunk::default();
     debug!("sending metadata"; "metadata" => ?msg);
@@ -84,7 +86,10 @@ async fn send_snap_files(
         let mut off = buffer.len();
         loop {
             unsafe { buffer.set_len(SNAP_CHUNK_LEN) };
-            let new_len = f.read(&mut buffer[off..])? + off;
+            let readed = f.read(&mut buffer[off..])?;
+            // The file can be in cache, so read doesn't always trigger IO.
+            limiter.consume(readed / 2);
+            let new_len = readed + off;
             total_sent += new_len as u64;
             unsafe {
                 buffer.set_len(new_len);
@@ -94,7 +99,7 @@ async fn send_snap_files(
             sender
                 .feed((chunk, WriteFlags::default().buffer_hint(true)))
                 .await?;
-            size += new_len - off;
+            size += readed;
             if new_len < SNAP_CHUNK_LEN {
                 break;
             }
@@ -162,7 +167,7 @@ fn send_snap(
 
     let send_task = async move {
         let sink = sink.sink_map_err(Error::from);
-        let total_size = send_snap_files(sink, msg, files).await?;
+        let total_size = send_snap_files(&mgr, sink, msg, files).await?;
         let recv_result = receiver.map_err(Error::from).await;
         send_timer.observe_duration();
         drop(deregister);

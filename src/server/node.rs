@@ -274,7 +274,13 @@ impl<ER: RaftEngine> TabletFactory<RocksEngine> for KvEngineFactory<ER> {
         if !RocksEngine::exists(&path) {
             panic!("tablet {} doesn't exist", path.display());
         }
-        self.create_tablet(0, 1, path, false, readonly)
+        let (mut tablet_id, mut tablet_suffix) = (0, 1);
+        if let Some(s) = path.file_name().map(|s| s.to_string_lossy()) {
+            let mut split = s.split('_');
+            tablet_id = split.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            tablet_suffix = split.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+        }
+        self.create_tablet(tablet_id, tablet_suffix, path, false, readonly)
     }
 
     #[inline]
