@@ -88,12 +88,7 @@ pub const PENDING_MSG_CAP: usize = 100;
 const UNREACHABLE_BACKOFF: Duration = Duration::from_secs(10);
 const ENTRY_CACHE_EVICT_TICK_DURATION: Duration = Duration::from_secs(1);
 
-pub struct StoreInfo<E> {
-    pub engine: E,
-    pub capacity: u64,
-}
-
-pub struct StoreMeta {
+pub struct StoreMeta<EK: KvEngine> {
     /// store id
     pub store_id: Option<u64>,
     /// region_end_key -> region_id
@@ -101,7 +96,7 @@ pub struct StoreMeta {
     /// region_id -> region
     pub regions: HashMap<u64, Region>,
     /// region_id -> reader
-    pub readers: HashMap<u64, ReadDelegate>,
+    pub readers: HashMap<u64, ReadDelegate<EK>>,
     /// region_id -> (term, leader_peer_id)
     pub leaders: HashMap<u64, (u64, u64)>,
     /// `MsgRequestPreVote`, `MsgRequestVote` or `MsgAppend` messages from newly split Regions shouldn't be
@@ -128,8 +123,8 @@ pub struct StoreMeta {
     pub region_read_progress: RegionReadProgressRegistry,
 }
 
-impl StoreMeta {
-    pub fn new(vote_capacity: usize) -> StoreMeta {
+impl<EK: KvEngine> StoreMeta<EK> {
+    pub fn new(vote_capacity: usize) -> StoreMeta<EK> {
         StoreMeta {
             store_id: None,
             region_ranges: BTreeMap::default(),
@@ -147,7 +142,7 @@ impl StoreMeta {
     }
 
     #[inline]
-    pub fn set_region<EK: KvEngine, ER: RaftEngine>(
+    pub fn set_region<ER: RaftEngine>(
         &mut self,
         host: &CoprocessorHost<EK>,
         region: Region,
@@ -333,7 +328,7 @@ where
     pub store: metapb::Store,
     pub pd_scheduler: FutureScheduler<PdTask<EK>>,
     pub consistency_check_scheduler: Scheduler<ConsistencyCheckTask<EK::Snapshot>>,
-    pub split_check_scheduler: Scheduler<SplitCheckTask>,
+    pub split_check_scheduler: Scheduler<SplitCheckTask<EK>>,
     // handle Compact, CleanupSST task
     pub cleanup_scheduler: Scheduler<CleanupTask>,
     pub raftlog_gc_scheduler: Scheduler<RaftlogGcTask>,
@@ -341,7 +336,7 @@ where
     pub apply_router: ApplyRouter<EK>,
     pub router: RaftRouter<EK, ER>,
     pub importer: Arc<SSTImporter>,
-    pub store_meta: Arc<Mutex<StoreMeta>>,
+    pub store_meta: Arc<Mutex<StoreMeta<EK>>>,
     pub feature_gate: FeatureGate,
     /// region_id -> (peer_id, is_splitting)
     /// Used for handling race between splitting and creating new peer.
@@ -402,6 +397,11 @@ where
     #[inline]
     fn set_sync_log(&mut self, sync: bool) {
         self.sync_log = sync;
+    }
+
+    #[inline]
+    fn skip_write_commit_index(&self) -> bool {
+        self.cfg.skip_commit_index
     }
 }
 
@@ -677,7 +677,6 @@ impl<EK: KvEngine, ER: RaftEngine, T: Transport> RaftPoller<EK, ER, T> {
         if !self.poll_ctx.kv_wb.is_empty() {
             let mut write_opts = WriteOptions::new();
             write_opts.set_sync(true);
-            write_opts.set_disable_wal(self.poll_ctx.cfg.disable_kv_wal);
             self.poll_ctx
                 .kv_wb
                 .write_opt(&write_opts)
@@ -931,14 +930,14 @@ pub struct RaftPollerBuilder<EK: KvEngine, ER: RaftEngine, T> {
     pub store: metapb::Store,
     pd_scheduler: FutureScheduler<PdTask<EK>>,
     consistency_check_scheduler: Scheduler<ConsistencyCheckTask<EK::Snapshot>>,
-    split_check_scheduler: Scheduler<SplitCheckTask>,
+    split_check_scheduler: Scheduler<SplitCheckTask<EK>>,
     cleanup_scheduler: Scheduler<CleanupTask>,
     raftlog_gc_scheduler: Scheduler<RaftlogGcTask>,
     pub region_scheduler: Scheduler<RegionTask>,
     apply_router: ApplyRouter<EK>,
     pub router: RaftRouter<EK, ER>,
     pub importer: Arc<SSTImporter>,
-    pub store_meta: Arc<Mutex<StoreMeta>>,
+    pub store_meta: Arc<Mutex<StoreMeta<EK>>>,
     pub pending_create_peers: Arc<Mutex<HashMap<u64, (u64, bool)>>>,
     snap_mgr: SnapManager,
     pub coprocessor_host: CoprocessorHost<EK>,
@@ -971,6 +970,33 @@ impl<EK: KvEngine, ER: RaftEngine, T> RaftPollerBuilder<EK, ER, T> {
         let mut merging_count = 0;
         let mut meta = self.store_meta.lock().unwrap();
         let mut replication_state = self.global_replication_state.lock().unwrap();
+
+        kv_engine.scan_cf(CF_RAFT, start_key, end_key, false, |key, value| {
+            let (region_id, suffix) = box_try!(keys::decode_region_meta_key(key));
+            if suffix != keys::REGION_STATE_SUFFIX {
+                return Ok(true);
+            }
+
+            let mut local_state = RegionLocalState::default();
+            local_state.merge_from_bytes(value)?;
+            if local_state.get_state() == PeerState::Tombstone {
+                return Ok(true);
+            }
+            peer_storage::resume_applying_result(
+                &self.engines,
+                region_id,
+                &local_state,
+                &mut kv_wb,
+            );
+            Ok(true)
+        })?;
+
+        if !kv_wb.is_empty() {
+            kv_wb.write().unwrap();
+            self.engines.kv.sync_wal().unwrap();
+            kv_wb.clear();
+        }
+
         kv_engine.scan_cf(CF_RAFT, start_key, end_key, false, |key, value| {
             let (region_id, suffix) = box_try!(keys::decode_region_meta_key(key));
             if suffix != keys::REGION_STATE_SUFFIX {
@@ -1049,7 +1075,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> RaftPollerBuilder<EK, ER, T> {
                 &region,
             )?;
             peer.peer.init_replication_mode(&mut *replication_state);
-            peer.schedule_applying_snapshot();
+            peer.schedule_applying_snapshot(&self.snap_mgr);
             meta.region_ranges
                 .insert(enc_end_key(&region), region.get_id());
             meta.region_read_progress
@@ -1091,7 +1117,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> RaftPollerBuilder<EK, ER, T> {
     }
 
     /// `clear_stale_data` clean up all possible garbage data.
-    fn clear_stale_data(&self, meta: &StoreMeta) -> Result<()> {
+    fn clear_stale_data(&self, meta: &StoreMeta<EK>) -> Result<()> {
         let t = TiInstant::now();
 
         let mut ranges = Vec::new();
@@ -1221,10 +1247,10 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
         pd_client: Arc<C>,
         mgr: SnapManager,
         pd_worker: FutureWorker<PdTask<EK>>,
-        store_meta: Arc<Mutex<StoreMeta>>,
+        store_meta: Arc<Mutex<StoreMeta<EK>>>,
         mut coprocessor_host: CoprocessorHost<EK>,
         importer: Arc<SSTImporter>,
-        split_check_scheduler: Scheduler<SplitCheckTask>,
+        split_check_scheduler: Scheduler<SplitCheckTask<EK>>,
         background_worker: Worker,
         auto_split_controller: AutoSplitController,
         global_replication_state: Arc<Mutex<GlobalReplicationState>>,
@@ -1366,6 +1392,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
         });
 
         let tag = format!("raftstore-{}", store.get_id());
+        let engines = builder.engines.clone();
         self.system.spawn(tag, builder);
         let mut mailboxes = Vec::with_capacity(region_peers.len());
         let mut address = Vec::with_capacity(region_peers.len());
@@ -1395,6 +1422,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
             store.get_id(),
             Arc::clone(&pd_client),
             self.router.clone(),
+            engines,
             workers.pd_worker.scheduler(),
             cfg.pd_store_heartbeat_tick_interval.0,
             auto_split_controller,
@@ -2042,12 +2070,10 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
                 .swap(false, Ordering::SeqCst),
         );
 
-        let store_info = StoreInfo {
-            engine: self.ctx.engines.kv.clone(),
+        let task = PdTask::StoreHeartbeat {
+            stats,
             capacity: self.ctx.cfg.capacity.0,
         };
-
-        let task = PdTask::StoreHeartbeat { stats, store_info };
         if let Err(e) = self.ctx.pd_scheduler.schedule(task) {
             error!("notify pd failed";
                 "store_id" => self.fsm.store.id,

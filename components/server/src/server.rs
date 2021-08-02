@@ -186,7 +186,7 @@ struct TiKVServer<ER: RaftEngine> {
 
 struct TiKVEngines<ER: RaftEngine> {
     engines: Engines<RocksEngine, ER>,
-    store_meta: Arc<Mutex<StoreMeta>>,
+    store_meta: Arc<Mutex<StoreMeta<RocksEngine>>>,
     engine: RaftKv<RocksEngine, ServerRaftStoreRouter<RocksEngine, ER>>,
 }
 
@@ -476,7 +476,7 @@ impl<ER: RaftEngine> TiKVServer<ER> {
         let engine = RaftKv::new(
             ServerRaftStoreRouter::new(
                 self.router.clone(),
-                LocalReader::new(engines.kv.clone(), store_meta.clone(), self.router.clone()),
+                LocalReader::new(store_meta.clone(), self.router.clone()),
             ),
             engines.kv.clone(),
         );
@@ -1078,16 +1078,14 @@ impl<ER: RaftEngine> TiKVServer<ER> {
         servers.lock_mgr.stop();
 
         self.to_stop.into_iter().for_each(|s| s.stop());
-        if self.config.raft_store.disable_kv_wal {
-            let db = engines.kv.as_inner();
-            for cf_name in db.cf_names() {
-                let cf = db.cf_handle(cf_name).unwrap();
-                if let Err(e) = db.flush_cf(cf, true) {
-                    error!("failed to flush kv engine"; "error" => ?e, "cf" => %cf_name);
+        if self.config.raft_store.disable_tablet_wal {
+            engines.tablets.loop_tablet_cache(Box::new(|id, suffix, tablet| {
+                if let Err(e) = tablet.flush(true) {
+                    error!("failed to flush kv engine"; "error" => ?e, "id" => id, "suffix" => suffix);
                 } else {
-                    info!("flushed kv engine"; "cf" => %cf_name);
+                    info!("flushed kv engine"; "id" => id, "suffix" => suffix);
                 }
-            }
+            }));
         }
     }
 }

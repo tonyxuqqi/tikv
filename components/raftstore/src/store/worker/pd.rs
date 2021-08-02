@@ -15,7 +15,7 @@ use fail::fail_point;
 use futures::future::TryFutureExt;
 use tokio::task::spawn_local;
 
-use engine_traits::{KvEngine, RaftEngine};
+use engine_traits::{Engines, KvEngine, RaftEngine};
 use kvproto::raft_cmdpb::{
     AdminCmdType, AdminRequest, ChangePeerRequest, ChangePeerV2Request, RaftCmdRequest,
     SplitRequest,
@@ -32,7 +32,7 @@ use crate::store::util::{is_epoch_stale, ConfChangeKind, KeysInfoFormatter};
 use crate::store::worker::split_controller::{SplitInfo, TOP_N};
 use crate::store::worker::{AutoSplitController, ReadStats};
 use crate::store::{
-    Callback, CasualMessage, PeerMsg, RaftCommand, RaftRouter, SnapManager, StoreInfo, StoreMsg,
+    Callback, CasualMessage, PeerMsg, RaftCommand, RaftRouter, SnapManager, StoreMsg,
 };
 
 use collections::HashMap;
@@ -119,7 +119,7 @@ where
     Heartbeat(HeartbeatTask),
     StoreHeartbeat {
         stats: pdpb::StoreStats,
-        store_info: StoreInfo<E>,
+        capacity: u64,
     },
     ReportBatchSplit {
         regions: Vec<metapb::Region>,
@@ -459,6 +459,7 @@ where
     store_id: u64,
     pd_client: Arc<T>,
     router: RaftRouter<EK, ER>,
+    engines: Engines<EK, ER>,
     region_peers: HashMap<u64, PeerStat>,
     store_stat: StoreStat,
     is_hb_receiver_scheduled: bool,
@@ -487,6 +488,7 @@ where
         store_id: u64,
         pd_client: Arc<T>,
         router: RaftRouter<EK, ER>,
+        engines: Engines<EK, ER>,
         scheduler: Scheduler<Task<EK>>,
         store_heartbeat_interval: Duration,
         auto_split_controller: AutoSplitController,
@@ -503,6 +505,7 @@ where
             store_id,
             pd_client,
             router,
+            engines,
             is_hb_receiver_scheduled: false,
             region_peers: HashMap::default(),
             store_stat: StoreStat::default(),
@@ -675,12 +678,12 @@ where
         spawn_local(f);
     }
 
-    fn handle_store_heartbeat(&mut self, mut stats: pdpb::StoreStats, store_info: StoreInfo<EK>) {
-        let disk_stats = match fs2::statvfs(store_info.engine.path()) {
+    fn handle_store_heartbeat(&mut self, mut stats: pdpb::StoreStats, capacity: u64) {
+        let disk_stats = match fs2::statvfs(self.engines.kv.path()) {
             Err(e) => {
                 error!(
                     "get disk stat for rocksdb failed";
-                    "engine_path" => store_info.engine.path(),
+                    "engine_path" => self.engines.kv.path(),
                     "err" => ?e
                 );
                 return;
@@ -707,15 +710,22 @@ where
         }
 
         let disk_cap = disk_stats.total_space();
-        let capacity = if store_info.capacity == 0 || disk_cap < store_info.capacity {
+        let capacity = if capacity == 0 || disk_cap < capacity {
             disk_cap
         } else {
-            store_info.capacity
+            capacity
         };
         stats.set_capacity(capacity);
 
-        let used_size = self.snap_mgr.get_total_snap_size().unwrap()
-            + store_info.engine.get_engine_used_size().expect("cf");
+        let mut used_size = self.snap_mgr.get_total_snap_size().unwrap();
+        used_size += self.engines.kv.get_engine_used_size().expect("cf");
+        self.engines
+            .tablets
+            .loop_tablet_cache(Box::new(|id, suffix, tablet: &EK| {
+                used_size += tablet.get_engine_used_size().unwrap_or_else(|e| {
+                    panic!("failed to load size of {}_{}: {:?}", id, suffix, e);
+                });
+            }));
         stats.set_used_size(used_size);
 
         let mut available = capacity.checked_sub(used_size).unwrap_or_default();
@@ -1204,8 +1214,8 @@ where
                     hb_task.replication_status,
                 )
             }
-            Task::StoreHeartbeat { stats, store_info } => {
-                self.handle_store_heartbeat(stats, store_info)
+            Task::StoreHeartbeat { stats, capacity } => {
+                self.handle_store_heartbeat(stats, capacity)
             }
             Task::ReportBatchSplit { regions } => self.handle_report_batch_split(regions),
             Task::ValidatePeer { region, peer } => self.handle_validate_peer(region, peer),

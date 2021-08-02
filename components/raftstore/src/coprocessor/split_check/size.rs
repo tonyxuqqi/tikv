@@ -332,6 +332,7 @@ pub mod tests {
         }
 
         runnable.run(SplitCheckTask::split_check(
+            engine.clone(),
             region.clone(),
             true,
             CheckPolicy::Scan,
@@ -354,6 +355,7 @@ pub mod tests {
         engine.flush_cf(data_cf, true).unwrap();
 
         runnable.run(SplitCheckTask::split_check(
+            engine.clone(),
             region.clone(),
             true,
             CheckPolicy::Scan,
@@ -367,6 +369,7 @@ pub mod tests {
         }
         engine.flush_cf(data_cf, true).unwrap();
         runnable.run(SplitCheckTask::split_check(
+            engine.clone(),
             region.clone(),
             true,
             CheckPolicy::Scan,
@@ -381,6 +384,7 @@ pub mod tests {
         }
         engine.flush_cf(data_cf, true).unwrap();
         runnable.run(SplitCheckTask::split_check(
+            engine.clone(),
             region.clone(),
             true,
             CheckPolicy::Scan,
@@ -399,7 +403,12 @@ pub mod tests {
 
         drop(rx);
         // It should be safe even the result can't be sent back.
-        runnable.run(SplitCheckTask::split_check(region, true, CheckPolicy::Scan));
+        runnable.run(SplitCheckTask::split_check(
+            engine,
+            region,
+            true,
+            CheckPolicy::Scan,
+        ));
     }
 
     #[test]
@@ -463,7 +472,12 @@ pub mod tests {
         }
 
         for policy in &[CheckPolicy::Scan, CheckPolicy::Approximate] {
-            runnable.run(SplitCheckTask::split_check(region.clone(), true, *policy));
+            runnable.run(SplitCheckTask::split_check(
+                engine.clone(),
+                region.clone(),
+                true,
+                *policy,
+            ));
             // Ignore the split keys. Only check whether it can split or not.
             must_split_at_impl(&rx, &region, vec![], true);
         }
@@ -492,7 +506,12 @@ pub mod tests {
         }
         engine.flush_cf(CF_LOCK, true).unwrap();
         for policy in &[CheckPolicy::Scan, CheckPolicy::Approximate] {
-            runnable.run(SplitCheckTask::split_check(region.clone(), true, *policy));
+            runnable.run(SplitCheckTask::split_check(
+                engine.clone(),
+                region.clone(),
+                true,
+                *policy,
+            ));
             // Ignore the split keys. Only check whether it can split or not.
             must_split_at_impl(&rx, &region, vec![], true);
         }

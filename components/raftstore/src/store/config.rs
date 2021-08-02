@@ -5,7 +5,8 @@ use std::time::Duration;
 use std::u64;
 use time::Duration as TimeDuration;
 
-use crate::{coprocessor, Result};
+use crate::coprocessor::config::DEFAULT_SPLIT_SIZE;
+use crate::Result;
 use batch_system::Config as BatchSystemConfig;
 use configuration::{ConfigChange, ConfigManager, ConfigValue, Configuration};
 use engine_traits::config as engine_config;
@@ -175,7 +176,9 @@ pub struct Config {
     #[config(hidden)]
     pub apply_yield_duration: ReadableDuration,
     #[config(skip)]
-    pub disable_kv_wal: bool,
+    pub disable_tablet_wal: bool,
+    #[config(skip)]
+    pub skip_commit_index: bool,
 
     // Deprecated! These configuration has been moved to Coprocessor.
     // They are preserved for compatibility check.
@@ -199,7 +202,6 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
-        let split_size = ReadableSize::mb(coprocessor::config::SPLIT_SIZE_MB);
         Config {
             id: 0,
             prevote: true,
@@ -216,14 +218,14 @@ impl Default for Config {
             raft_log_gc_tick_interval: ReadableDuration::secs(10),
             raft_log_gc_threshold: 50,
             // Assume the average size of entries is 1k.
-            raft_log_gc_count_limit: split_size * 3 / 4 / ReadableSize::kb(1),
-            raft_log_gc_size_limit: split_size * 3 / 4,
+            raft_log_gc_count_limit: DEFAULT_SPLIT_SIZE * 3 / 4 / ReadableSize::kb(1),
+            raft_log_gc_size_limit: DEFAULT_SPLIT_SIZE * 3 / 4,
             raft_log_reserve_max_ticks: 6,
             raft_engine_purge_interval: ReadableDuration::secs(10),
             raft_entry_cache_life_time: ReadableDuration::secs(30),
             raft_reject_transfer_leader_duration: ReadableDuration::secs(3),
             split_region_check_tick_interval: ReadableDuration::secs(10),
-            region_split_check_diff: split_size / 16,
+            region_split_check_diff: DEFAULT_SPLIT_SIZE / 16,
             region_compact_check_interval: ReadableDuration::minutes(5),
             region_compact_check_step: 100,
             region_compact_min_tombstones: 10000,
@@ -260,7 +262,8 @@ impl Default for Config {
             hibernate_regions: true,
             dev_assert: false,
             apply_yield_duration: ReadableDuration::millis(500),
-            disable_kv_wal: false,
+            disable_tablet_wal: false,
+            skip_commit_index: false,
 
             // They are preserved for compatibility check.
             region_max_size: ReadableSize(0),

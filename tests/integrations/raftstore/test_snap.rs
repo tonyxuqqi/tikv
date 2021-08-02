@@ -572,8 +572,9 @@ fn test_gen_during_heavy_recv() {
     let snap_term = cluster.raft_local_state(r2, 2).get_hard_state().term;
     let snap_apply_state = cluster.apply_state(r2, 2);
     let mut snap_index = snap_apply_state.applied_index;
+    let suffix = cluster.region_local_state(r2, 2).get_tablet_suffix();
 
-    let snap = do_snapshot(snap_mgr.clone(), &engine, r2, true).unwrap();
+    let snap = do_snapshot(snap_mgr.clone(), &engine, r2, suffix, true).unwrap();
 
     // Keep sending snapshots to store 1.
     let s1_addr = cluster.sim.rl().get_addr(1);

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use engine_rocks::raw::DB;
 use engine_rocks::Compat;
+use engine_rocks::RocksEngine;
 use raftstore::coprocessor::{
     config::{Config, SplitCheckConfigManager},
     CoprocessorHost,
@@ -27,7 +28,7 @@ fn tmp_engine<P: AsRef<Path>>(path: P) -> Arc<DB> {
     )
 }
 
-fn setup(cfg: TiKvConfig, engine: Arc<DB>) -> (ConfigController, LazyWorker<Task>) {
+fn setup(cfg: TiKvConfig, engine: Arc<DB>) -> (ConfigController, LazyWorker<Task<RocksEngine>>) {
     let (router, _) = sync_channel(1);
     let runner = Runner::new(
         engine.c().clone(),
@@ -47,7 +48,7 @@ fn setup(cfg: TiKvConfig, engine: Arc<DB>) -> (ConfigController, LazyWorker<Task
     (cfg_controller, worker)
 }
 
-fn validate<F>(scheduler: &Scheduler<Task>, f: F)
+fn validate<F>(scheduler: &Scheduler<Task<RocksEngine>>, f: F)
 where
     F: FnOnce(&Config) + Send + 'static,
 {
