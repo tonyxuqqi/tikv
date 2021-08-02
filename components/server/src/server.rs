@@ -1363,8 +1363,8 @@ impl<R: RaftEngine> EngineMetricsManager<R> {
     }
 
     pub fn flush(&mut self, now: Instant) {
-        self.engines.kv.flush_metrics("kv");
-        self.engines.raft.flush_metrics("raft");
+        self.engines.kv.flush_metrics("kv", true);
+        self.engines.raft.flush_metrics("raft", true);
         if now.saturating_duration_since(self.last_reset) >= DEFAULT_ENGINE_METRICS_RESET_INTERVAL {
             self.engines.kv.reset_statistics();
             self.engines.raft.reset_statistics();

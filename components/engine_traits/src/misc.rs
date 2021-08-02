@@ -8,6 +8,7 @@
 use crate::cf_names::CFNamesExt;
 use crate::errors::Result;
 use crate::range::Range;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub enum DeleteStrategy {
@@ -43,6 +44,8 @@ pub trait MiscExt: CFNamesExt {
     /// *  total size (bytes) of all blob files.
     ///
     fn get_engine_used_size(&self) -> Result<u64>;
+
+    fn get_engine_total_keys(&self) -> Result<u64>;
 
     /// Roughly deletes files in multiple ranges.
     ///
@@ -88,4 +91,6 @@ pub trait MiscExt: CFNamesExt {
     fn get_cf_compaction_pending_bytes(&self, cf: &str) -> Result<Option<u64>>;
 
     fn is_stalled_or_stopped(&self) -> bool;
+
+    fn checkpoint_to(&self, path: &[PathBuf], size_to_flush: u64) -> Result<()>;
 }
