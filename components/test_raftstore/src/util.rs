@@ -1,7 +1,7 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 use std::{thread, u64};
 
@@ -32,15 +32,15 @@ use engine_rocks::raw::DB;
 use engine_rocks::{
     encryption::get_env as get_encrypted_env, file_system::get_env as get_inspected_env,
 };
-use engine_rocks::{CompactionListener, RocksCompactionJobInfo};
 use engine_rocks::{Compat, RocksEngine, RocksSnapshot};
-use engine_traits::{Engines, Iterable, Peekable};
+use engine_traits::{Engines, Iterable, Peekable, TabletFactory};
 use file_system::IORateLimiter;
 use futures::executor::block_on;
 use raftstore::store::fsm::RaftRouter;
 use raftstore::store::*;
 use raftstore::Result;
 use tikv::config::*;
+use tikv::server::node::KvEngineFactory;
 use tikv::storage::point_key_range;
 use tikv_util::config::*;
 use tikv_util::{escape, HandyRwLock};
@@ -81,6 +81,61 @@ pub fn must_get(engine: &Arc<DB>, cf: &str, key: &[u8], value: Option<&[u8]>) {
 
 pub fn must_get_equal(engine: &Arc<DB>, key: &[u8], value: &[u8]) {
     must_get(engine, "default", key, Some(value));
+}
+
+pub fn must_get_in(
+    engines: &Engines<RocksEngine, RocksEngine>,
+    region_id: u64,
+    cf: &str,
+    key: &[u8],
+    value: Option<&[u8]>,
+) {
+    for _ in 1..300 {
+        if let Some(tablet) = engines.tablets.open_tablet_cache_any(region_id) {
+            let res = tablet.get_value_cf(cf, &keys::data_key(key)).unwrap();
+            if let (Some(value), Some(res)) = (value, res.as_ref()) {
+                assert_eq!(value, &res[..]);
+                return;
+            }
+            if value.is_none() && res.is_none() {
+                return;
+            }
+        } else if value.is_none() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    debug!("last try to get {}", log_wrappers::hex_encode_upper(key));
+    if let Some(tablet) = engines.tablets.open_tablet_cache_any(region_id) {
+        let res = tablet.get_value_cf(cf, &keys::data_key(key)).unwrap();
+        if let (Some(value), Some(res)) = (value, res.as_ref()) {
+            assert_eq!(value, &res[..]);
+            return;
+        }
+        if value.is_none() && res.is_none() {
+            return;
+        }
+    } else if value.is_none() {
+        return;
+    }
+    panic!(
+        "can't get value {:?} for key {}",
+        value.map(escape),
+        log_wrappers::hex_encode_upper(key)
+    )
+}
+
+pub fn must_get_equal_in(
+    engines: &Engines<RocksEngine, RocksEngine>,
+    region_id: u64,
+    key: &[u8],
+    value: &[u8],
+) {
+    must_get_in(engines, region_id, "default", key, Some(value));
+}
+
+pub fn must_get_none_in(engines: &Engines<RocksEngine, RocksEngine>, region_id: u64, key: &[u8]) {
+    must_get_in(engines, region_id, "default", key, None);
 }
 
 pub fn must_get_none(engine: &Arc<DB>, key: &[u8]) {
@@ -582,10 +637,6 @@ pub fn must_contains_error(resp: &RaftCmdResponse, msg: &str) {
     assert!(err_msg.contains(msg), "{:?}", resp);
 }
 
-fn dummpy_filter(_: &RocksCompactionJobInfo) -> bool {
-    true
-}
-
 pub fn create_test_engine(
     // TODO: pass it in for all cases.
     router: Option<RaftRouter<RocksEngine, RocksEngine>>,
@@ -597,6 +648,8 @@ pub fn create_test_engine(
     TempDir,
 ) {
     let dir = Builder::new().prefix("test_cluster").tempdir().unwrap();
+    let mut cfg = cfg.clone();
+    cfg.storage.data_dir = dir.path().to_str().unwrap().to_string();
     let key_manager =
         data_key_manager_from_config(&cfg.security.encryption, dir.path().to_str().unwrap())
             .unwrap()
@@ -606,52 +659,32 @@ pub fn create_test_engine(
     let env = get_inspected_env(Some(env), limiter).unwrap();
     let cache = cfg.storage.block_cache.build_shared_cache();
 
-    let kv_path = dir.path().join(DEFAULT_ROCKSDB_SUB_DIR);
-    let kv_path_str = kv_path.to_str().unwrap();
-
-    let mut kv_db_opt = cfg.rocksdb.build_opt();
-    kv_db_opt.set_env(env.clone());
-
-    if let Some(router) = router {
-        let router = Mutex::new(router);
-        let compacted_handler = Box::new(move |event| {
-            router
-                .lock()
-                .unwrap()
-                .send_control(StoreMsg::CompactedEvent(event))
-                .unwrap();
-        });
-        kv_db_opt.add_event_listener(CompactionListener::new(
-            compacted_handler,
-            Some(dummpy_filter),
-        ));
-    }
-
-    let kv_cfs_opt = cfg
-        .rocksdb
-        .build_cf_opts(&cache, None, cfg.storage.enable_ttl);
-
-    let engine = Arc::new(
-        engine_rocks::raw_util::new_engine_opt(kv_path_str, kv_db_opt, kv_cfs_opt).unwrap(),
-    );
-
     let raft_path = dir.path().join("raft");
     let raft_path_str = raft_path.to_str().unwrap();
 
     let mut raft_db_opt = cfg.raftdb.build_opt();
-    raft_db_opt.set_env(env);
+    raft_db_opt.set_env(env.clone());
 
     let raft_cfs_opt = cfg.raftdb.build_cf_opts(&cache);
     let raft_engine = Arc::new(
         engine_rocks::raw_util::new_engine_opt(raft_path_str, raft_db_opt, raft_cfs_opt).unwrap(),
     );
 
-    let mut engine = RocksEngine::from_db(engine);
     let mut raft_engine = RocksEngine::from_db(raft_engine);
     let shared_block_cache = cache.is_some();
-    engine.set_shared_block_cache(shared_block_cache);
     raft_engine.set_shared_block_cache(shared_block_cache);
-    let engines = Engines::new(engine, raft_engine);
+
+    let factory = Box::new(KvEngineFactory::new(
+        Some(env),
+        &cfg,
+        None,
+        cache,
+        dir.path().to_path_buf(),
+        router,
+    ));
+    let engine = factory.create_root_db();
+    let mut engines = Engines::new(engine, raft_engine);
+    engines.tablets = factory;
     (engines, key_manager, dir)
 }
 

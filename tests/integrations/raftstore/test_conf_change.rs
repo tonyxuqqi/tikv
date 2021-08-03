@@ -35,8 +35,8 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
-    let engine_2 = cluster.get_engine(2);
-    must_get_none(&engine_2, b"k1");
+    let engine_2 = cluster.engine(2).clone();
+    must_get_none_in(&engine_2, r1, b"k1");
     // add peer (2,2) to region 1.
     pd_client.must_add_peer(r1, new_peer(2, 2));
 
@@ -45,8 +45,8 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
     // now peer 2 must have v1 and v2;
-    must_get_equal(&engine_2, b"k1", b"v1");
-    must_get_equal(&engine_2, b"k2", b"v2");
+    must_get_equal_in(&engine_2, r1, b"k1", b"v1");
+    must_get_equal_in(&engine_2, r1, b"k2", b"v2");
 
     let epoch = cluster.pd_client.get_region_epoch(r1);
 
@@ -54,12 +54,12 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     assert!(epoch.get_conf_ver() > 1);
 
     // peer 5 must not exist
-    let engine_5 = cluster.get_engine(5);
-    must_get_none(&engine_5, b"k1");
+    let engine_5 = cluster.engine(5).clone();
+    must_get_none_in(&engine_5, r1, b"k1");
 
     // add peer (3, 3) to region 1.
     pd_client.must_add_peer(r1, new_peer(3, 3));
-    must_get_equal(&cluster.get_engine(3), b"k1", b"v1");
+    must_get_equal_in(cluster.engine(3), r1, b"k1", b"v1");
     // Remove peer (2, 2) from region 1.
     pd_client.must_remove_peer(r1, new_peer(2, 2));
 
@@ -67,17 +67,17 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer 3 must have v1, v2 and v3
-    let engine_3 = cluster.get_engine(3);
-    must_get_equal(&engine_3, b"k1", b"v1");
-    must_get_equal(&engine_3, b"k2", b"v2");
-    must_get_equal(&engine_3, b"k3", b"v3");
+    let engine_3 = cluster.engine(3).clone();
+    must_get_equal_in(&engine_3, r1, b"k1", b"v1");
+    must_get_equal_in(&engine_3, r1, b"k2", b"v2");
+    must_get_equal_in(&engine_3, r1, b"k3", b"v3");
 
     // peer 2 has nothing
-    must_get_none(&engine_2, b"k1");
-    must_get_none(&engine_2, b"k2");
+    must_get_none_in(&engine_2, r1, b"k1");
+    must_get_none_in(&engine_2, r1, b"k2");
 
     // peer 3 must exist
-    must_get_equal(&engine_3, b"k3", b"v3");
+    must_get_equal_in(&engine_3, r1, b"k3", b"v3");
 
     // add peer 2 then remove it again.
     pd_client.must_add_peer(r1, new_peer(2, 2));
@@ -87,16 +87,16 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
 
-    let engine_2 = cluster.get_engine(2);
+    let engine_2 = cluster.engine(2).clone();
 
-    must_get_equal(&engine_2, b"k1", b"v1");
-    must_get_equal(&engine_2, b"k2", b"v2");
-    must_get_equal(&engine_2, b"k3", b"v3");
+    must_get_equal_in(&engine_2, r1, b"k1", b"v1");
+    must_get_equal_in(&engine_2, r1, b"k2", b"v2");
+    must_get_equal_in(&engine_2, r1, b"k3", b"v3");
 
     // Make sure peer 2 is not in probe mode.
     cluster.must_put(b"k4", b"v4");
     assert_eq!(cluster.get(b"k4"), Some(b"v4".to_vec()));
-    must_get_equal(&engine_2, b"k4", b"v4");
+    must_get_equal_in(&engine_2, r1, b"k4", b"v4");
 
     let resp = call_conf_change(cluster, r1, ConfChangeType::AddNode, new_peer(2, 2)).unwrap();
     let exec_res = resp
@@ -116,7 +116,7 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     // add peer (2, 4) to region 1.
     pd_client.must_add_peer(r1, new_peer(2, 4));
     cluster.must_put(b"add_2_4", b"add_2_4");
-    must_get_equal(&engine_2, b"add_2_4", b"add_2_4");
+    must_get_equal_in(&engine_2, r1, b"add_2_4", b"add_2_4");
 
     // Remove peer (3, 3) from region 1.
     pd_client.must_remove_peer(r1, new_peer(3, 3));
@@ -125,14 +125,14 @@ fn test_simple_conf_change<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, value);
     assert_eq!(cluster.get(key), Some(value.to_vec()));
     // now peer 4 in store 2 must have v1, v2, v3, v4, we check v1 and v4 here.
-    let engine_2 = cluster.get_engine(2);
+    let engine_2 = cluster.engine(2);
 
-    must_get_equal(&engine_2, b"k1", b"v1");
-    must_get_equal(&engine_2, b"k4", b"v4");
+    must_get_equal_in(engine_2, r1, b"k1", b"v1");
+    must_get_equal_in(engine_2, r1, b"k4", b"v4");
 
     // peer 3 has nothing, we check v1 and v4 here.
-    must_get_none(&engine_3, b"k1");
-    must_get_none(&engine_3, b"k4");
+    must_get_none_in(&engine_3, r1, b"k1");
+    must_get_none_in(&engine_3, r1, b"k4");
 
     // TODO: add more tests.
 }

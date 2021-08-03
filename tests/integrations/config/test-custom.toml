@@ -218,6 +218,7 @@ rate-bytes-per-sec = "1KB"
 rate-limiter-refill-period = "10ms"
 rate-limiter-mode = 3
 rate-limiter-auto-tuned = false
+share-rate-limiter = true
 bytes-per-sync = "1MB"
 wal-bytes-per-sync = "32KB"
 max-sub-compactions = 12
