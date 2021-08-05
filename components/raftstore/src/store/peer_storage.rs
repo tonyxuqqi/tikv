@@ -785,6 +785,20 @@ pub fn resume_applying_result<EK: KvEngine, ER: RaftEngine>(
     tablet.checkpoint_to(&to_cloned, 0).unwrap();
 }
 
+pub fn clear_extra_data<EK: KvEngine>(region: &metapb::Region, tablet: &EK) {
+    let (start_key, end_key) = (enc_start_key(region), enc_end_key(region));
+    let mut ranges = Vec::with_capacity(2);
+    if keys::DATA_MIN_KEY < start_key.as_slice() {
+        ranges.push(engine_traits::Range::new(keys::DATA_MIN_KEY, &start_key));
+    }
+    if keys::DATA_MAX_KEY > end_key.as_slice() {
+        ranges.push(engine_traits::Range::new(&end_key, keys::DATA_MAX_KEY));
+    }
+    if let Err(e) = tablet.delete_all_in_range(DeleteStrategy::DeleteFiles, &ranges) {
+        panic!("{:?} clear ranges failed: {:?}", region, e);
+    }
+}
+
 pub struct PeerStorage<EK, ER>
 where
     EK: KvEngine,
@@ -1480,19 +1494,8 @@ where
         if !self.is_initialized() {
             return;
         }
-
-        let (start_key, end_key) = (enc_start_key(&self.region), enc_end_key(&self.region));
-        let mut ranges = Vec::with_capacity(2);
-        if keys::DATA_MIN_KEY < start_key.as_slice() {
-            ranges.push(engine_traits::Range::new(keys::DATA_MIN_KEY, &start_key));
-        }
-        if keys::DATA_MAX_KEY > end_key.as_slice() {
-            ranges.push(engine_traits::Range::new(&end_key, keys::DATA_MAX_KEY));
-        }
         if let Some(tablet) = &self.tablet {
-            if let Err(e) = tablet.delete_all_in_range(DeleteStrategy::DeleteFiles, &ranges) {
-                panic!("{} clear ranges failed: {:?}", self.tag, e);
-            }
+            clear_extra_data(&self.region, tablet);
         }
     }
 

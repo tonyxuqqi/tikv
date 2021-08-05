@@ -149,19 +149,24 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
         if let Some(env) = &self.inner.env {
             kv_db_opts.set_env(env.clone());
         }
-        if let Some(stats) = &self.inner.statistics {
-            kv_db_opts.set_statistics(stats);
-        }
-        if let Some(limiter) = &self.inner.rate_limiter {
-            kv_db_opts.set_rate_limiter(limiter);
-        } else if let Some(limiter) = self.inner.rocksdb_config.build_rate_limiter() {
-            kv_db_opts.set_rate_limiter(&limiter);
+        if !readonly {
+            if let Some(stats) = &self.inner.statistics {
+                kv_db_opts.set_statistics(stats);
+            }
+            if let Some(limiter) = &self.inner.rate_limiter {
+                kv_db_opts.set_rate_limiter(limiter);
+            } else if let Some(limiter) = self.inner.rocksdb_config.build_rate_limiter() {
+                kv_db_opts.set_rate_limiter(&limiter);
+            }
+            if let Some(filter) = self.create_raftstore_compaction_listener() {
+                kv_db_opts.add_event_listener(filter);
+            }
+        } else {
+            kv_db_opts.set_disable_auto_compactions(true);
+            kv_db_opts.set_disable_background_gc(true);
         }
         if !root && self.inner.disable_tablet_wal {
             kv_db_opts.set_atomic_flush(true);
-        }
-        if let Some(filter) = self.create_raftstore_compaction_listener() {
-            kv_db_opts.add_event_listener(filter);
         }
         let kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
             &self.inner.block_cache,
@@ -176,7 +181,7 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
             )
             .unwrap_or_else(|s| panic!("failed to create kv engine: {}", s))
         } else {
-            engine_rocks::raw_util::new_engine_readonly_opt(
+            engine_rocks::raw_util::new_engine_opt(
                 tablet_path.to_str().unwrap(),
                 kv_db_opts,
                 kv_cfs_opts,

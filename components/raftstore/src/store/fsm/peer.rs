@@ -55,7 +55,7 @@ use crate::store::memory::*;
 use crate::store::metrics::*;
 use crate::store::msg::{Callback, ExtCallback};
 use crate::store::peer::{ConsistencyState, Peer, StaleState};
-use crate::store::peer_storage::{ApplySnapResult, InvokeContext, RAFT_INIT_LOG_INDEX};
+use crate::store::peer_storage::{self, ApplySnapResult, InvokeContext, RAFT_INIT_LOG_INDEX};
 use crate::store::transport::Transport;
 use crate::store::util::{is_learner, KeysInfoFormatter};
 use crate::store::worker::{
@@ -2261,6 +2261,14 @@ where
                 RAFT_INIT_LOG_INDEX,
             )
             .unwrap();
+            let tablet_path = self
+                .ctx
+                .engines
+                .tablets
+                .tablet_path(new_region.get_id(), RAFT_INIT_LOG_INDEX);
+            let tablet = self.ctx.engines.tablets.open_tablet_raw(&tablet_path, true);
+            // Avoid potential compactions
+            peer_storage::clear_extra_data(&new_region, &tablet);
         }
         let mut write_opts = WriteOptions::new();
         write_opts.set_sync(true);
