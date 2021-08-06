@@ -161,33 +161,26 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
             if let Some(filter) = self.create_raftstore_compaction_listener() {
                 kv_db_opts.add_event_listener(filter);
             }
-        } else {
-            kv_db_opts.set_disable_auto_compactions(true);
-            kv_db_opts.set_disable_background_gc(true);
         }
         if !root && self.inner.disable_tablet_wal {
             kv_db_opts.set_atomic_flush(true);
         }
-        let kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
+        let mut kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
             &self.inner.block_cache,
             self.inner.region_info_accessor.as_ref(),
             self.inner.enable_ttl,
         );
-        let kv_engine = if !readonly {
-            engine_rocks::raw_util::new_engine_opt(
-                tablet_path.to_str().unwrap(),
-                kv_db_opts,
-                kv_cfs_opts,
-            )
-            .unwrap_or_else(|s| panic!("failed to create kv engine: {}", s))
-        } else {
-            engine_rocks::raw_util::new_engine_opt(
-                tablet_path.to_str().unwrap(),
-                kv_db_opts,
-                kv_cfs_opts,
-            )
-            .unwrap_or_else(|s| panic!("failed to open kv engine: {}", s))
-        };
+        if readonly {
+            for cf_opt in &mut kv_cfs_opts {
+                cf_opt.options_mut().set_disable_auto_compactions(true);
+            }
+        }
+        let kv_engine = engine_rocks::raw_util::new_engine_opt(
+            tablet_path.to_str().unwrap(),
+            kv_db_opts,
+            kv_cfs_opts,
+        )
+        .unwrap_or_else(|s| panic!("failed to create kv engine: {}", s));
         let mut kv_engine = RocksEngine::from_db(Arc::new(kv_engine));
         let shared_block_cache = self.inner.block_cache.is_some();
         kv_engine.set_shared_block_cache(shared_block_cache);
