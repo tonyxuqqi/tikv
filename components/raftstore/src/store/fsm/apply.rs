@@ -2954,7 +2954,7 @@ impl<EK: KvEngine> Registration<EK> {
             pending_request_snapshot_count: peer.pending_request_snapshot_count.clone(),
             is_merging: peer.pending_merge_state.is_some(),
             raft_engine: Box::new(peer.get_store().engines.raft.clone()),
-            tablet: peer.tablet(),
+            tablet: peer.tablet().cloned(),
         }
     }
 }

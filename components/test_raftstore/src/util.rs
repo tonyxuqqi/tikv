@@ -588,7 +588,7 @@ pub fn must_get_value(resp: &RaftCmdResponse) -> Vec<u8> {
     }
     assert_eq!(resp.get_responses().len(), 1);
     assert_eq!(resp.get_responses()[0].get_cmd_type(), CmdType::Get);
-    assert!(resp.get_responses()[0].has_get());
+    assert!(resp.get_responses()[0].has_get(), "{:?}", resp);
     resp.get_responses()[0].get_get().get_value().to_vec()
 }
 

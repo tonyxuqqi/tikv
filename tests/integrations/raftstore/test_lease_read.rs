@@ -52,7 +52,7 @@ fn test_renew_lease<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.must_put(key, b"v0");
     for id in 2..=cluster.engines.len() as u64 {
         cluster.pd_client.must_add_peer(region_id, new_peer(id, id));
-        must_get_equal(&cluster.get_engine(id), key, b"v0");
+        must_get_equal_in(&cluster.engine(id), region_id, key, b"v0");
     }
 
     // Write the initial value for a key.
@@ -184,9 +184,9 @@ fn test_lease_unsafe_during_leader_transfers<T: Simulator>(cluster: &mut Cluster
     let r1 = cluster.run_conf_change();
     cluster.must_put(b"k0", b"v0");
     cluster.pd_client.must_add_peer(r1, new_peer(2, 2));
-    must_get_equal(&cluster.get_engine(2), b"k0", b"v0");
+    must_get_equal_in(cluster.engine(2), r1, b"k0", b"v0");
     cluster.pd_client.must_add_peer(r1, new_peer(3, 3));
-    must_get_equal(&cluster.get_engine(3), b"k0", b"v0");
+    must_get_equal_in(cluster.engine(3), r1, b"k0", b"v0");
 
     let detector = LeaseReadFilter::default();
     cluster.add_send_filter(CloneFilterFactory(detector.clone()));
@@ -214,7 +214,7 @@ fn test_lease_unsafe_during_leader_transfers<T: Simulator>(cluster: &mut Cluster
     assert_eq!(detector.ctx.rl().len(), 0);
 
     // Ensure peer 3 is ready to transfer leader.
-    must_get_equal(&cluster.get_engine(3), key, b"v1");
+    must_get_equal_in(cluster.engine(3), r1, key, b"v1");
 
     // Drop MsgTimeoutNow to `peer3` so that the leader transfer procedure would abort later.
     cluster.add_send_filter(CloneFilterFactory(

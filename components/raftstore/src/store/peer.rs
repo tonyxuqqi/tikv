@@ -1059,7 +1059,7 @@ where
         })
     }
 
-    pub fn tablet(&self) -> Option<EK> {
+    pub fn tablet(&self) -> Option<&EK> {
         self.get_store().tablet()
     }
 
@@ -2034,12 +2034,7 @@ where
         }
     }
 
-    fn response_read<T>(
-        &self,
-        read: &mut ReadIndexRequest<EK::Snapshot>,
-        ctx: &mut PollContext<EK, ER, T>,
-        replica_read: bool,
-    ) {
+    fn response_read(&self, read: &mut ReadIndexRequest<EK::Snapshot>, replica_read: bool) {
         debug!(
             "handle reads with a read index";
             "request_id" => ?read.id,
@@ -2077,12 +2072,12 @@ where
                     }
                     _ => {}
                 }
-                cb.invoke_read(self.handle_read(ctx, req, true, read_index));
+                cb.invoke_read(self.handle_read(req, true, read_index));
                 continue;
             }
             if req.get_header().get_replica_read() {
                 // We should check epoch since the range could be changed.
-                cb.invoke_read(self.handle_read(ctx, req, true, read.read_index));
+                cb.invoke_read(self.handle_read(req, true, read.read_index));
             } else {
                 // The request could be proposed when the peer was leader.
                 // TODO: figure out that it's necessary to notify stale or not.
@@ -2119,9 +2114,9 @@ where
                 && read.cmds()[0].0.get_requests()[0].get_cmd_type() == CmdType::ReadIndex;
 
             if is_read_index_request {
-                self.response_read(&mut read, ctx, false);
+                self.response_read(&mut read, false);
             } else if self.ready_to_handle_unsafe_replica_read(read.read_index.unwrap()) {
-                self.response_read(&mut read, ctx, true);
+                self.response_read(&mut read, true);
             } else {
                 // TODO: `ReadIndex` requests could be blocked.
                 self.pending_reads.push_front(read);
@@ -2181,7 +2176,7 @@ where
             propose_time = self.pending_reads.last_ready().map(|r| r.propose_time);
             if self.ready_to_handle_read() {
                 while let Some(mut read) = self.pending_reads.pop_front() {
-                    self.response_read(&mut read, ctx, false);
+                    self.response_read(&mut read, false);
                 }
             }
         }
@@ -2248,7 +2243,7 @@ where
             self.post_pending_read_index_on_replica(ctx)
         } else if self.ready_to_handle_read() {
             while let Some(mut read) = self.pending_reads.pop_front() {
-                self.response_read(&mut read, ctx, false);
+                self.response_read(&mut read, false);
             }
         }
         self.pending_reads.gc();
@@ -2666,7 +2661,7 @@ where
         cb: Callback<EK::Snapshot>,
     ) {
         ctx.raft_metrics.propose.local_read += 1;
-        cb.invoke_read(self.handle_read(ctx, req, false, Some(self.get_store().commit_index())))
+        cb.invoke_read(self.handle_read(req, false, Some(self.get_store().commit_index())))
     }
 
     fn pre_read_index(&self) -> Result<()> {
@@ -3318,9 +3313,8 @@ where
         Ok(propose_index)
     }
 
-    fn handle_read<T>(
+    fn handle_read(
         &self,
-        ctx: &mut PollContext<EK, ER, T>,
         req: RaftCmdRequest,
         check_epoch: bool,
         read_index: Option<u64>,
@@ -3363,7 +3357,7 @@ where
             }
         }
 
-        let mut resp = ctx.execute(&req, &Arc::new(region), read_index, None);
+        let mut resp = self.execute(&req, &Arc::new(region), read_index, None);
         if let Some(snap) = resp.snapshot.as_mut() {
             snap.max_ts_sync_status = Some(self.max_ts_sync_status.clone());
         }
@@ -3819,17 +3813,17 @@ where
     }
 }
 
-impl<EK, ER, T> ReadExecutor<EK> for PollContext<EK, ER, T>
+impl<EK, ER> ReadExecutor<EK> for Peer<EK, ER>
 where
     EK: KvEngine,
     ER: RaftEngine,
 {
     fn get_engine(&self) -> &EK {
-        &self.engines.kv
+        self.get_store().tablet().unwrap()
     }
 
     fn get_snapshot(&self, _: Option<ThreadReadId>) -> Arc<EK::Snapshot> {
-        Arc::new(self.engines.kv.snapshot())
+        Arc::new(self.get_store().raw_snapshot())
     }
 }
 

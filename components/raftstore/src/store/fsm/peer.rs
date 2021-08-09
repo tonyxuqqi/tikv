@@ -3678,7 +3678,7 @@ where
         self.fsm.skip_split_count = 0;
         if let Some(tablet) = self.fsm.peer.get_store().tablet() {
             let task = SplitCheckTask::split_check(
-                tablet,
+                tablet.clone(),
                 self.region().clone(),
                 true,
                 CheckPolicy::Approximate,
@@ -3861,7 +3861,7 @@ where
         }
 
         if let Some(tablet) = self.fsm.peer.get_store().tablet() {
-            let task = SplitCheckTask::split_check(tablet, region.clone(), false, policy);
+            let task = SplitCheckTask::split_check(tablet.clone(), region.clone(), false, policy);
             if let Err(e) = self.ctx.split_check_scheduler.schedule(task) {
                 error!(
                     "failed to schedule split check";

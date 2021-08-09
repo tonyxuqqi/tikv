@@ -1101,8 +1101,8 @@ where
     }
 
     #[inline]
-    pub fn tablet(&self) -> Option<EK> {
-        self.tablet.clone()
+    pub fn tablet(&self) -> Option<&EK> {
+        self.tablet.as_ref()
     }
 
     #[inline]

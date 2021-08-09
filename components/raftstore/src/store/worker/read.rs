@@ -228,7 +228,7 @@ impl<E: KvEngine> ReadDelegate<E> {
             max_ts_sync_status: peer.max_ts_sync_status.clone(),
             read_progress: peer.read_progress.clone(),
             track_ver: TrackVer::new(),
-            tablet: Arc::new(parking_lot::Mutex::new(peer.tablet())),
+            tablet: Arc::new(parking_lot::Mutex::new(peer.tablet().cloned())),
         }
     }
 
