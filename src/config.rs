@@ -944,6 +944,8 @@ pub struct DbConfig {
     #[config(skip)]
     pub enable_pipelined_write: bool,
     #[config(skip)]
+    pub allow_concurrent_memtable_write: bool,
+    #[config(skip)]
     pub enable_multi_batch_write: bool,
     #[config(skip)]
     pub enable_unordered_write: bool,
@@ -997,6 +999,7 @@ impl Default for DbConfig {
             writable_file_max_buffer_size: ReadableSize::mb(1),
             use_direct_io_for_flush_and_compaction: false,
             enable_pipelined_write: true,
+            allow_concurrent_memtable_write: true,
             enable_multi_batch_write: true,
             enable_unordered_write: false,
             defaultcf: DefaultCfConfig::default(),
@@ -1034,6 +1037,10 @@ impl DbConfig {
     }
 
     pub fn build_opt(&self) -> DBOptions {
+        self.build_opt_for_target(true)
+    }
+
+    pub fn build_opt_for_target(&self, root: bool) -> DBOptions {
         let mut opts = DBOptions::new();
         opts.set_wal_recovery_mode(self.wal_recovery_mode);
         if !self.wal_dir.is_empty() {
@@ -1068,6 +1075,9 @@ impl DbConfig {
                 && !self.enable_unordered_write,
         );
         opts.enable_multi_batch_write(self.enable_multi_batch_write);
+        if !self.allow_concurrent_memtable_write && !root {
+            opts.allow_concurrent_memtable_write(false);
+        }
         opts.enable_unordered_write(self.enable_unordered_write);
         opts.add_event_listener(RocksEventListener::new("kv"));
         opts.set_info_log_level(self.info_log_level.into());

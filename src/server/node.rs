@@ -144,7 +144,7 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
         readonly: bool,
     ) -> RocksEngine {
         // Create kv engine.
-        let mut kv_db_opts = self.inner.rocksdb_config.build_opt();
+        let mut kv_db_opts = self.inner.rocksdb_config.build_opt_for_target(root);
         kv_db_opts.set_info_log(RocksdbLogger::new(tablet_id, tablet_suffix));
         if let Some(env) = &self.inner.env {
             kv_db_opts.set_env(env.clone());

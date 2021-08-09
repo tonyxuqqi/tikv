@@ -1062,7 +1062,7 @@ where
                 || apply_ctx
                     .kv_wb
                     .as_ref()
-                    .map_or(false, |wb| wb.should_write_to_engine())
+                    .map_or(false, |wb| wb.count() >= 1024)
             {
                 apply_ctx.commit(self);
                 if let Some(start) = self.handle_start.as_ref() {

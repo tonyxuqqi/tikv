@@ -225,6 +225,7 @@ max-sub-compactions = 12
 writable-file-max-buffer-size = "12MB"
 use-direct-io-for-flush-and-compaction = true
 enable-pipelined-write = false
+allow-concurrent-memtable-write = false
 enable-unordered-write = true
 enable-multi-batch-write = false
 
