@@ -3,7 +3,7 @@
 use crate::engine::RocksEngine;
 use crate::import::RocksIngestExternalFileOptions;
 use crate::sst::RocksSstWriterBuilder;
-use crate::{util, RocksSstWriter, ROCKSDB_ESTIMATE_NUM_KEYS};
+use crate::{util, RocksSstWriter, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES, ROCKSDB_ESTIMATE_NUM_KEYS};
 use engine_traits::{
     CFNamesExt, DeleteStrategy, ImportExt, IngestExternalFileOptions, IterOptions, Iterable,
     Iterator, MiscExt, Mutable, Range, Result, SstWriter, SstWriterBuilder, WriteBatch,
@@ -240,6 +240,18 @@ impl MiscExt for RocksEngine {
                 .unwrap_or(0);
         }
         Ok(total_keys)
+    }
+
+    fn get_engine_memory_usage(&self) -> u64 {
+        let mut total_mem: u64 = 0;
+        for cf in ALL_CFS {
+            let handle = util::get_cf_handle(self.as_inner(), cf).unwrap();
+            total_mem += self
+                .as_inner()
+                .get_property_int_cf(handle, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES)
+                .unwrap_or(0);
+        }
+        total_mem
     }
 
     fn roughly_cleanup_ranges(&self, ranges: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {

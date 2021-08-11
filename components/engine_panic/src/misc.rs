@@ -33,6 +33,10 @@ impl MiscExt for PanicEngine {
         panic!()
     }
 
+    fn get_engine_memory_usage(&self) -> u64 {
+        panic!()
+    }
+
     fn roughly_cleanup_ranges(&self, ranges: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
         panic!()
     }

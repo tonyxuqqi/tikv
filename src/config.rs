@@ -22,7 +22,7 @@ use engine_rocks::properties::MvccPropertiesCollectorFactory;
 use engine_rocks::raw::{
     BlockBasedOptions, Cache, ColumnFamilyOptions, CompactionFilterFactory, CompactionPriority,
     DBCompactionStyle, DBCompressionType, DBOptions, DBRateLimiterMode, DBRecoveryMode,
-    LRUCacheOptions, RateLimiter, TitanDBOptions,
+    LRUCacheOptions, RateLimiter, TitanDBOptions, WriteBufferManager,
 };
 use engine_rocks::raw_util::CFOptions;
 use engine_rocks::util::{
@@ -256,6 +256,7 @@ macro_rules! cf_config {
             #[config(skip)]
             pub compression_per_level: [DBCompressionType; 7],
             pub write_buffer_size: ReadableSize,
+            pub memtable_prefix_bloom_size_ratio: f64,
             pub max_write_buffer_number: i32,
             #[config(skip)]
             pub min_write_buffer_number_to_merge: i32,
@@ -541,6 +542,7 @@ impl Default for DefaultCfConfig {
                 DBCompressionType::Zstd,
             ],
             write_buffer_size: ReadableSize::mb(128),
+            memtable_prefix_bloom_size_ratio: 0.1,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(512),
@@ -636,6 +638,7 @@ impl Default for WriteCfConfig {
                 DBCompressionType::Zstd,
             ],
             write_buffer_size: ReadableSize::mb(128),
+            memtable_prefix_bloom_size_ratio: 0.1,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(512),
@@ -680,7 +683,7 @@ impl WriteCfConfig {
             .set_prefix_extractor("FixedSuffixSliceTransform", e)
             .unwrap();
         // Create prefix bloom filter for memtable.
-        cf_opts.set_memtable_prefix_bloom_size_ratio(0.1);
+        cf_opts.set_memtable_prefix_bloom_size_ratio(self.memtable_prefix_bloom_size_ratio);
         // Collects user defined properties.
         let f = Box::new(MvccPropertiesCollectorFactory::default());
         cf_opts.add_table_properties_collector_factory("tikv.mvcc-properties-collector", f);
@@ -726,6 +729,7 @@ impl Default for LockCfConfig {
             read_amp_bytes_per_bit: 0,
             compression_per_level: [DBCompressionType::No; 7],
             write_buffer_size: ReadableSize::mb(32),
+            memtable_prefix_bloom_size_ratio: 0.1,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(128),
@@ -770,7 +774,7 @@ impl LockCfConfig {
             prop_keys_index_distance: self.prop_keys_index_distance,
         });
         cf_opts.add_table_properties_collector_factory("tikv.range-properties-collector", f);
-        cf_opts.set_memtable_prefix_bloom_size_ratio(0.1);
+        cf_opts.set_memtable_prefix_bloom_size_ratio(self.memtable_prefix_bloom_size_ratio);
         cf_opts.set_titandb_options(&self.titan.build_opts());
         cf_opts
     }
@@ -799,6 +803,7 @@ impl Default for RaftCfConfig {
             read_amp_bytes_per_bit: 0,
             compression_per_level: [DBCompressionType::No; 7],
             write_buffer_size: ReadableSize::mb(128),
+            memtable_prefix_bloom_size_ratio: 0.1,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(128),
@@ -834,11 +839,13 @@ impl RaftCfConfig {
     pub fn build_opt(&self, cache: &Option<Cache>) -> ColumnFamilyOptions {
         let no_region_info_accessor: Option<&RegionInfoAccessor> = None;
         let mut cf_opts = build_cf_opt!(self, CF_RAFT, cache, no_region_info_accessor);
-        let f = Box::new(NoopSliceTransform);
-        cf_opts
-            .set_prefix_extractor("NoopSliceTransform", f)
-            .unwrap();
-        cf_opts.set_memtable_prefix_bloom_size_ratio(0.1);
+        if self.memtable_prefix_bloom_size_ratio > 0f64 {
+            let f = Box::new(NoopSliceTransform);
+            cf_opts
+                .set_prefix_extractor("NoopSliceTransform", f)
+                .unwrap();
+            cf_opts.set_memtable_prefix_bloom_size_ratio(self.memtable_prefix_bloom_size_ratio);
+        }
         cf_opts.set_titandb_options(&self.titan.build_opts());
         cf_opts
     }
@@ -938,6 +945,7 @@ pub struct DbConfig {
     pub wal_bytes_per_sync: ReadableSize,
     #[config(skip)]
     pub max_sub_compactions: u32,
+    pub db_write_buffer_size: ReadableSize,
     pub writable_file_max_buffer_size: ReadableSize,
     #[config(skip)]
     pub use_direct_io_for_flush_and_compaction: bool,
@@ -993,6 +1001,7 @@ impl Default for DbConfig {
             auto_tuned: None, // deprecated
             rate_limiter_auto_tuned: true,
             share_rate_limiter: false,
+            db_write_buffer_size: ReadableSize::gb(0),
             bytes_per_sync: ReadableSize::mb(1),
             wal_bytes_per_sync: ReadableSize::kb(512),
             max_sub_compactions: bg_job_limits.max_sub_compactions as u32,
@@ -1034,6 +1043,27 @@ impl DbConfig {
         } else {
             None
         }
+    }
+
+    pub fn build_write_buffer_manager(&self) -> Option<WriteBufferManager> {
+        if self.db_write_buffer_size.0 == 0 {
+            return None;
+        }
+        if self.db_write_buffer_size.0 >= ReadableSize::mb(1).0 {
+            return Some(WriteBufferManager::new(
+                self.db_write_buffer_size.0 as usize,
+                None,
+            ));
+        }
+        let mut calculated = self.lockcf.write_buffer_size.0
+            * self.lockcf.max_write_buffer_number as u64
+            + self.raftcf.write_buffer_size.0 * self.raftcf.max_write_buffer_number as u64
+            + self.defaultcf.write_buffer_size.0 * self.defaultcf.max_write_buffer_number as u64
+            + self.writecf.write_buffer_size.0 * self.writecf.max_write_buffer_number as u64;
+        if calculated >= ReadableSize::gb(5).0 {
+            calculated = ReadableSize::gb(5).0;
+        }
+        Some(WriteBufferManager::new(calculated as usize, None))
     }
 
     pub fn build_opt(&self) -> DBOptions {
@@ -1162,6 +1192,7 @@ impl Default for RaftDefaultCfConfig {
                 DBCompressionType::Zstd,
             ],
             write_buffer_size: ReadableSize::mb(128),
+            memtable_prefix_bloom_size_ratio: 0.1,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(512),

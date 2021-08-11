@@ -518,6 +518,8 @@ where
     /// The number of the last unpersisted ready.
     last_unpersisted_number: u64,
 
+    pub handled_proposals: usize,
+
     pub read_progress: Arc<RegionReadProgress>,
 }
 
@@ -620,6 +622,7 @@ where
                 REGION_READ_PROGRESS_CAP,
                 tag,
             )),
+            handled_proposals: 0,
         };
 
         // If this region has only one peer and I am the one, campaign directly.
@@ -1348,6 +1351,25 @@ where
     }
 
     pub fn check_stale_state<T>(&mut self, ctx: &mut PollContext<EK, ER, T>) -> StaleState {
+        let tablet = self.get_store().tablet();
+        let usage = tablet.map_or(0, |t| t.get_engine_memory_usage());
+        if self.handled_proposals > 0 {
+            if self.handled_proposals < 1024 {
+                let after_usage = if usage >= 10 * 1024 * 1024 {
+                    tablet.map(|t| t.flush(false));
+                    tablet.map(|t| t.get_engine_memory_usage())
+                } else {
+                    None
+                };
+                info!("flushed"; "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage, "after flush" => ?after_usage);
+                self.handled_proposals = 0;
+            } else {
+                info!("handled proposals"; "count" => self.handled_proposals, "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage);
+                self.handled_proposals = 1;
+            }
+        } else {
+            info!("pending memory usage"; "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage);
+        }
         if self.is_leader() {
             // Leaders always have valid state.
             //
@@ -2226,6 +2248,9 @@ where
                 .compact_cache_to(apply_state.applied_index + 1);
         }
 
+        if apply_metrics.size_diff_hint != 0 {
+            self.handled_proposals += (applied_index - self.get_store().applied_index()) as usize;
+        }
         let progress_to_be_updated = self.mut_store().applied_index_term() != applied_index_term;
         self.mut_store().set_applied_state(apply_state);
         self.mut_store().set_applied_term(applied_index_term);

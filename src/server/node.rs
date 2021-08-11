@@ -15,7 +15,7 @@ use crate::server::Config as ServerConfig;
 use crate::storage::{config::Config as StorageConfig, Storage};
 use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
-use engine_rocks::raw::{Cache, Env, RateLimiter};
+use engine_rocks::raw::{Cache, Env, RateLimiter, WriteBufferManager};
 use engine_rocks::{
     CompactionListener, RocksCompactedEvent, RocksCompactionJobInfo, RocksEngine, RocksdbLogger,
     Statistics,
@@ -52,6 +52,7 @@ struct FactoryInner {
     enable_ttl: bool,
     statistics: Option<Statistics>,
     rate_limiter: Option<Arc<RateLimiter>>,
+    write_buffer_manager: Option<WriteBufferManager>,
     registry: Mutex<HashMap<(u64, u64), RocksEngine>>,
 }
 
@@ -81,6 +82,7 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
         } else {
             None
         };
+        let write_buffer_manager = config.rocksdb.build_write_buffer_manager();
         let tablets_dir = store_path.join("tablets");
         if !tablets_dir.exists() {
             std::fs::create_dir_all(&tablets_dir).unwrap();
@@ -97,6 +99,7 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
                 registry: Mutex::new(HashMap::default()),
                 rate_limiter,
                 statistics,
+                write_buffer_manager,
             }),
             router,
         }
@@ -162,8 +165,13 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
                 kv_db_opts.add_event_listener(filter);
             }
         }
-        if !root && self.inner.disable_tablet_wal {
-            kv_db_opts.set_atomic_flush(true);
+        if !root {
+            if let Some(mgr) = &self.inner.write_buffer_manager {
+                kv_db_opts.set_write_buffer_manager(mgr);
+            }
+            if self.inner.disable_tablet_wal {
+                kv_db_opts.set_atomic_flush(true);
+            }
         }
         let mut kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
             &self.inner.block_cache,
