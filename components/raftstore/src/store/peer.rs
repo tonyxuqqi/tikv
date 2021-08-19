@@ -3030,6 +3030,7 @@ where
         }
 
         poll_ctx.raft_metrics.propose.normal += 1;
+        let mut skip_header_check = false;
 
         if self.has_applied_to_current_term() {
             // Only when applied index's term is equal to current leader's term, the information
@@ -3040,6 +3041,7 @@ where
             {
                 return Ok(Either::Right(index));
             }
+            skip_header_check = poll_ctx.cfg.skip_header;
         } else if req.has_admin_request() {
             // The admin request is rejected because it may need to update epoch checker which
             // introduces an uncertainty and may breaks the correctness of epoch checker.
@@ -3066,6 +3068,9 @@ where
             }
         };
 
+        if skip_header_check && req.get_header().get_uuid().is_empty() {
+            req.take_header();
+        }
         let data = req.write_to_bytes()?;
 
         // TODO: use local histogram metrics

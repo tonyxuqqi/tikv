@@ -209,6 +209,8 @@ fn test_serde_custom_tikv_config() {
         dev_assert: true,
         apply_yield_duration: ReadableDuration::millis(333),
         perf_level: PerfLevel::EnableTime,
+        enable_propose_batch: false,
+        skip_header: true,
     };
     value.pd = PdConfig::new(vec!["example.com:443".to_owned()]);
     let titan_cf_config = TitanCfConfig {
