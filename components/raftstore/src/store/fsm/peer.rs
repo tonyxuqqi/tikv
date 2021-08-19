@@ -550,14 +550,18 @@ where
                         continue;
                     }
 
-                    let req_size = cmd.request.compute_size();
-                    if self.fsm.batch_req_builder.can_batch(&cmd.request, req_size) {
-                        self.fsm.batch_req_builder.add(cmd, req_size);
-                        if self.fsm.batch_req_builder.should_finish() {
+                    if self.ctx.cfg.enable_propose_batch {
+                        let req_size = cmd.request.compute_size();
+                        if self.fsm.batch_req_builder.can_batch(&cmd.request, req_size) {
+                            self.fsm.batch_req_builder.add(cmd, req_size);
+                            if self.fsm.batch_req_builder.should_finish() {
+                                self.propose_batch_raft_command();
+                            }
+                        } else {
                             self.propose_batch_raft_command();
+                            self.propose_raft_command(cmd.request, cmd.callback)
                         }
                     } else {
-                        self.propose_batch_raft_command();
                         self.propose_raft_command(cmd.request, cmd.callback)
                     }
                 }

@@ -1351,10 +1351,12 @@ where
         ctx: &mut ApplyContext<EK, W>,
         req: &RaftCmdRequest,
     ) -> Result<(RaftCmdResponse, ApplyResult<EK::Snapshot>)> {
-        // Include region for epoch not match after merge may cause key not in range.
-        let include_region =
-            req.get_header().get_region_epoch().get_version() >= self.last_merge_version;
-        check_region_epoch(req, &self.region, include_region)?;
+        if req.has_header() {
+            // Include region for epoch not match after merge may cause key not in range.
+            let include_region =
+                req.get_header().get_region_epoch().get_version() >= self.last_merge_version;
+            check_region_epoch(req, &self.region, include_region)?;
+        }
         if req.has_admin_request() {
             self.exec_admin_cmd(ctx, req)
         } else {

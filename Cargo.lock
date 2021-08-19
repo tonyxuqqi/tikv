@@ -5445,7 +5445,6 @@ dependencies = [
  "engine_traits",
  "engine_traits_tests",
  "error_code",
- "example_plugin",
  "fail",
  "file_system",
  "fs2",
