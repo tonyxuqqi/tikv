@@ -22,7 +22,7 @@ use engine_rocks::properties::MvccPropertiesCollectorFactory;
 use engine_rocks::raw::{
     BlockBasedOptions, Cache, ColumnFamilyOptions, CompactionFilterFactory, CompactionPriority,
     DBCompactionStyle, DBCompressionType, DBOptions, DBRateLimiterMode, DBRecoveryMode,
-    LRUCacheOptions, RateLimiter, TitanDBOptions, WriteBufferManager,
+    FifoCompactionOptions, LRUCacheOptions, RateLimiter, TitanDBOptions, WriteBufferManager,
 };
 use engine_rocks::raw_util::CFOptions;
 use engine_rocks::util::{
@@ -278,6 +278,8 @@ macro_rules! cf_config {
             #[config(skip)]
             pub compaction_style: DBCompactionStyle,
             pub disable_auto_compactions: bool,
+            pub fifo_compaction_max_table_files_size: ReadableSize,
+            pub fifo_compaction_allow_compaction: bool,
             pub soft_pending_compaction_bytes_limit: ReadableSize,
             pub hard_pending_compaction_bytes_limit: ReadableSize,
             #[config(skip)]
@@ -510,6 +512,10 @@ macro_rules! build_cf_opt {
                 warn!("compaction guard is disabled due to region info provider not available")
             }
         }
+        let mut fifo_opt = FifoCompactionOptions::new();
+        fifo_opt.set_max_table_files_size($opt.fifo_compaction_max_table_files_size.0);
+        fifo_opt.set_allow_compaction($opt.fifo_compaction_allow_compaction);
+        cf_opts.set_fifo_compaction_options(fifo_opt);
         cf_opts
     }};
 }
@@ -570,6 +576,8 @@ impl Default for DefaultCfConfig {
             bottommost_level_compression: DBCompressionType::Zstd,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(1),
+            fifo_compaction_allow_compaction: false,
         }
     }
 }
@@ -666,6 +674,8 @@ impl Default for WriteCfConfig {
             bottommost_level_compression: DBCompressionType::Zstd,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(1),
+            fifo_compaction_allow_compaction: false,
         }
     }
 }
@@ -757,6 +767,8 @@ impl Default for LockCfConfig {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(1),
+            fifo_compaction_allow_compaction: false,
         }
     }
 }
@@ -831,6 +843,8 @@ impl Default for RaftCfConfig {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::mb(50),
+            fifo_compaction_allow_compaction: false,
         }
     }
 }
@@ -1220,6 +1234,8 @@ impl Default for RaftDefaultCfConfig {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(1),
+            fifo_compaction_allow_compaction: false,
         }
     }
 }

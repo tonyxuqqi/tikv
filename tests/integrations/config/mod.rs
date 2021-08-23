@@ -210,6 +210,9 @@ fn test_serde_custom_tikv_config() {
         dev_assert: true,
         apply_yield_duration: ReadableDuration::millis(333),
         perf_level: PerfLevel::EnableTime,
+        flush_threshold: ReadableSize::mb(1),
+        flush_tablet_interval: ReadableDuration::secs(1),
+        flush_min_interval: ReadableDuration::secs(4),
     };
     value.pd = PdConfig::new(vec!["example.com:443".to_owned()]);
     let titan_cf_config = TitanCfConfig {
@@ -319,6 +322,8 @@ fn test_serde_custom_tikv_config() {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 1024,
             bottommost_zstd_compression_sample_size: 1024,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(2),
+            fifo_compaction_allow_compaction: false,
         },
         writecf: WriteCfConfig {
             block_size: ReadableSize::kb(12),
@@ -384,6 +389,8 @@ fn test_serde_custom_tikv_config() {
             bottommost_level_compression: DBCompressionType::Zstd,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(2),
+            fifo_compaction_allow_compaction: false,
         },
         lockcf: LockCfConfig {
             block_size: ReadableSize::kb(12),
@@ -449,6 +456,8 @@ fn test_serde_custom_tikv_config() {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(2),
+            fifo_compaction_allow_compaction: false,
         },
         raftcf: RaftCfConfig {
             block_size: ReadableSize::kb(12),
@@ -514,6 +523,8 @@ fn test_serde_custom_tikv_config() {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(2),
+            fifo_compaction_allow_compaction: false,
         },
         titan: titan_db_config.clone(),
     };
@@ -594,6 +605,8 @@ fn test_serde_custom_tikv_config() {
             bottommost_level_compression: DBCompressionType::Disable,
             bottommost_zstd_compression_dict_size: 0,
             bottommost_zstd_compression_sample_size: 0,
+            fifo_compaction_max_table_files_size: ReadableSize::gb(2),
+            fifo_compaction_allow_compaction: false,
         },
         titan: titan_db_config,
     };

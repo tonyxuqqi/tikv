@@ -56,7 +56,7 @@ use collections::{HashMap, HashSet};
 use pd_client::INVALID_ID;
 use tikv_util::codec::number::decode_u64;
 use tikv_util::time::{duration_to_sec, monotonic_raw_now};
-use tikv_util::time::{Instant as TiInstant, InstantExt, ThreadReadId};
+use tikv_util::time::{Instant as TiInstant, InstantExt, ThreadReadId, UnixSecs};
 use tikv_util::worker::{FutureScheduler, Scheduler};
 use tikv_util::Either;
 use tikv_util::{box_err, debug, error, info, warn};
@@ -1350,26 +1350,48 @@ where
         false
     }
 
-    pub fn check_stale_state<T>(&mut self, ctx: &mut PollContext<EK, ER, T>) -> StaleState {
+    pub fn flush_tablet<T>(&mut self, ctx: &mut PollContext<EK, ER, T>) -> Option<bool> {
         let tablet = self.get_store().tablet();
         let usage = tablet.map_or(0, |t| t.get_engine_memory_usage());
         if self.handled_proposals > 0 {
             if self.handled_proposals < 1024 {
-                let after_usage = if usage >= 10 * 1024 * 1024 {
-                    tablet.map(|t| t.flush(false));
-                    tablet.map(|t| t.get_engine_memory_usage())
+                let after_usage = if usage >= ctx.cfg.flush_threshold.0 {
+                    let secs = UnixSecs::now().into_inner();
+                    let res = ctx.last_flush_time.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |u| {
+                            if u + ctx.cfg.flush_min_interval.as_secs() < secs {
+                                Some(secs)
+                            } else {
+                                None
+                            }
+                        },
+                    );
+                    if res.is_err() {
+                        None
+                    } else {
+                        tablet.map(|t| t.flush(false));
+                        tablet.map(|t| t.get_engine_memory_usage())
+                    }
                 } else {
                     None
                 };
                 info!("flushed"; "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage, "after flush" => ?after_usage);
                 self.handled_proposals = 0;
+                after_usage.map(|_| true)
             } else {
                 info!("handled proposals"; "count" => self.handled_proposals, "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage);
                 self.handled_proposals = 1;
+                Some(false)
             }
         } else {
             info!("pending memory usage"; "peer_id" => self.peer.get_id(), "region_id" => self.region_id, "memory" => usage);
+            None
         }
+    }
+
+    pub fn check_stale_state<T>(&mut self, ctx: &mut PollContext<EK, ER, T>) -> StaleState {
         if self.is_leader() {
             // Leaders always have valid state.
             //

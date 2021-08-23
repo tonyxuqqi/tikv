@@ -4,7 +4,7 @@ use std::cmp::{Ord, Ordering as CmpOrdering};
 use std::collections::Bound::{Excluded, Included, Unbounded};
 use std::collections::{vec_deque, BTreeMap};
 use std::ops::Deref;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{mem, u64};
@@ -368,6 +368,7 @@ where
     pub perf_context: EK::PerfContext,
     pub tick_batch: Vec<PeerTickBatch>,
     pub node_start_time: Option<TiInstant>,
+    pub last_flush_time: Arc<AtomicU64>,
 }
 
 impl<EK, ER, T> HandleRaftReadyContext<EK::WriteBatch, ER::LogBatch> for PollContext<EK, ER, T>
@@ -430,6 +431,8 @@ where
             self.cfg.peer_stale_state_check_interval.0;
         self.tick_batch[PeerTicks::CHECK_MERGE.bits() as usize].wait_duration =
             self.cfg.merge_check_tick_interval.0;
+        self.tick_batch[PeerTicks::FLUSH_TABLET.bits() as usize].wait_duration =
+            self.cfg.flush_tablet_interval.0;
     }
 }
 
@@ -946,6 +949,7 @@ pub struct RaftPollerBuilder<EK: KvEngine, ER: RaftEngine, T> {
     pub engines: Engines<EK, ER>,
     global_replication_state: Arc<Mutex<GlobalReplicationState>>,
     feature_gate: FeatureGate,
+    last_flush_time: Arc<AtomicU64>,
 }
 
 impl<EK: KvEngine, ER: RaftEngine, T> RaftPollerBuilder<EK, ER, T> {
@@ -1190,6 +1194,7 @@ where
             tick_batch: vec![PeerTickBatch::default(); 256],
             node_start_time: Some(TiInstant::now_coarse()),
             feature_gate: self.feature_gate.clone(),
+            last_flush_time: self.last_flush_time.clone(),
         };
         ctx.update_ticks_timeout();
         let tag = format!("[store {}]", ctx.store.get_id());
@@ -1326,6 +1331,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
             store_meta,
             pending_create_peers: Arc::new(Mutex::new(HashMap::default())),
             feature_gate: pd_client.feature_gate().clone(),
+            last_flush_time: Arc::new(AtomicU64::new(0)),
         };
         let region_peers = builder.init()?;
         let engine = builder.engines.kv.clone();

@@ -179,6 +179,9 @@ pub struct Config {
     pub disable_tablet_wal: bool,
     #[config(skip)]
     pub skip_commit_index: bool,
+    pub flush_threshold: ReadableSize,
+    pub flush_tablet_interval: ReadableDuration,
+    pub flush_min_interval: ReadableDuration,
 
     // Deprecated! These configuration has been moved to Coprocessor.
     // They are preserved for compatibility check.
@@ -264,6 +267,9 @@ impl Default for Config {
             apply_yield_duration: ReadableDuration::millis(500),
             disable_tablet_wal: false,
             skip_commit_index: false,
+            flush_threshold: ReadableSize::mb(20),
+            flush_tablet_interval: ReadableDuration::secs(30),
+            flush_min_interval: ReadableDuration::secs(5),
 
             // They are preserved for compatibility check.
             region_max_size: ReadableSize(0),

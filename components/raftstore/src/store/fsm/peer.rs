@@ -698,6 +698,16 @@ where
         }
     }
 
+    fn register_flush_tablet_tick(&mut self) {
+        self.schedule_tick(PeerTicks::FLUSH_TABLET)
+    }
+
+    fn on_flush_tablet_tick(&mut self) {
+        if Some(false) == self.fsm.peer.flush_tablet(self.ctx) {
+            self.register_flush_tablet_tick();
+        }
+    }
+
     fn on_tick(&mut self, tick: PeerTicks) {
         if self.fsm.stopped {
             return;
@@ -717,6 +727,7 @@ where
             PeerTicks::CHECK_MERGE => self.on_check_merge(),
             PeerTicks::CHECK_PEER_STALE_STATE => self.on_check_peer_stale_state_tick(),
             PeerTicks::ENTRY_CACHE_EVICT => self.on_entry_cache_evict_tick(),
+            PeerTicks::FLUSH_TABLET => self.on_flush_tablet_tick(),
             _ => unreachable!(),
         }
     }
@@ -728,6 +739,7 @@ where
         self.register_split_region_check_tick();
         self.register_check_peer_stale_state_tick();
         self.on_check_merge();
+        self.register_flush_tablet_tick();
         // Apply committed entries more quickly.
         // Or if it's a leader. This implicitly means it's a singleton
         // because it becomes leader in `Peer::new` when it's a
@@ -1177,6 +1189,9 @@ where
                 self.on_ready_result(&mut res.exec_res, &res.metrics);
                 if self.fsm.stopped {
                     return;
+                }
+                if res.metrics.size_diff_hint != 0 {
+                    self.register_flush_tablet_tick();
                 }
                 self.fsm.has_ready |= self.fsm.peer.post_apply(
                     self.ctx,
