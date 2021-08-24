@@ -1243,10 +1243,14 @@ impl SnapManager {
         &self,
         key: &SnapKey,
         is_sending: bool,
+        fault_inject: bool,
     ) -> RaftStoreResult<Box<Snapshot>> {
         let _lock = self.core.registry.rl();
         let base = &self.core.base;
         let s = Snapshot::new(base, key, is_sending, CheckPolicy::None, &self.core)?;
+        fail_point! ("get_snapshot_for_gc",  key.idx <= 40 && fault_inject,  |_|  
+            Err(box_err!("invalid cf number of snapshot meta"))
+        );
         Ok(Box::new(s))
     }
 

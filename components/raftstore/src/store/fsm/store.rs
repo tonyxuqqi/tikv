@@ -78,7 +78,7 @@ use crate::store::worker::{
 };
 use crate::store::{
     util, Callback, CasualMessage, GlobalReplicationState, InspectedRaftMessage, MergeResultKind,
-    PdTask, PeerMsg, PeerTicks, RaftCommand, SignificantMsg, SnapManager, StoreMsg, StoreTick,
+    PdTask, PeerMsg, PeerTicks, RaftCommand, SignificantMsg, SnapManager, StoreMsg, StoreTick, SnapKey,
 };
 use crate::Result;
 use concurrency_manager::ConcurrencyManager;
@@ -2104,13 +2104,36 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
             return Ok(());
         }
         let (mut last_region_id, mut keys) = (0, vec![]);
-        let schedule_gc_snap = |region_id: u64, snaps| -> Result<()> {
+        let on_send_failure = |snaps: std::vec::Vec<(SnapKey, bool)>| -> Result<()> {
+            for (key, is_sending) in snaps {
+                let snap = match self.ctx.snap_mgr.get_snapshot_for_gc(&key, is_sending, self.fsm.store.id == 3) {
+                    Ok(snap) => snap,
+                    Err(e) => {
+                        error!(%e;
+                            "failed to load snapshot";
+                            "snapshot" => ?key,
+                        );
+                        continue;
+                    }
+                };
+                self.ctx
+                    .snap_mgr
+                    .delete_snapshot(&key, snap.as_ref(), false);
+            }
+            Ok(()) 
+        };
+
+        let schedule_gc_snap = |region_id: u64, snaps: std::vec::Vec<(SnapKey, bool)>| -> Result<()> {
             debug!(
                 "schedule snap gc";
                 "store_id" => self.fsm.store.id,
                 "region_id" => region_id,
             );
-            let gc_snap = PeerMsg::CasualMessage(CasualMessage::GcSnap { snaps });
+            
+            fail_point!("send_gc_snap_fail", self.fsm.store.id == 3, |_| {
+                on_send_failure(snaps.clone())
+            });
+            let gc_snap = PeerMsg::CasualMessage(CasualMessage::GcSnap { snaps }); 
             match self.ctx.router.send(region_id, gc_snap) {
                 Ok(()) => Ok(()),
                 Err(TrySendError::Disconnected(_)) if self.ctx.router.is_shutdown() => Ok(()),
@@ -2125,13 +2148,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
                         "region_id" => region_id,
                         "snaps" => ?snaps,
                     );
-                    for (key, is_sending) in snaps {
-                        let snap = self.ctx.snap_mgr.get_snapshot_for_gc(&key, is_sending)?;
-                        self.ctx
-                            .snap_mgr
-                            .delete_snapshot(&key, snap.as_ref(), false);
-                    }
-                    Ok(())
+                    on_send_failure(snaps)
                 }
                 Err(TrySendError::Full(_)) => Ok(()),
                 Err(TrySendError::Disconnected(_)) => unreachable!(),

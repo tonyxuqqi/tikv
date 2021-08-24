@@ -160,7 +160,6 @@ pub fn send_snap(
     let channel = security_mgr.connect(cb, addr);
     let client = TikvClient::new(channel);
     let (sink, receiver) = client.snapshot()?;
-
     let send_task = async move {
         let mut sink = sink.sink_map_err(Error::from);
         sink.send_all(&mut chunks).await?;
@@ -171,7 +170,14 @@ pub fn send_snap(
         drop(client);
         match recv_result {
             Ok(_) => {
-                fail_point!("snapshot_delete_after_send");
+                fail_point!("snapshot_delete_after_send", |_|{
+                    Ok(SendStat {
+                        key:key.clone(),
+                        total_size,
+                        elapsed: timer.saturating_elapsed(),
+                    })
+                });
+
                 mgr.delete_snapshot(&key, &*chunks.snap, true);
                 // TODO: improve it after rustc resolves the bug.
                 // Call `info` in the closure directly will cause rustc

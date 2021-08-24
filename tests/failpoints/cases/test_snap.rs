@@ -467,3 +467,86 @@ fn test_cancel_snapshot_generating() {
         assert!(snap_index > truncated_idx);
     }
 }
+
+#[test]
+fn test_snapshot_gc_skip_failed() {
+    let mut cluster = new_server_cluster(0, 3);
+    configure_for_snapshot(&mut cluster);
+    cluster.cfg.raft_store.snap_gc_timeout = ReadableDuration::millis(300);
+
+    let pd_client = Arc::clone(&cluster.pd_client);
+    // Disable default max peer count check.
+    pd_client.disable_default_operator();
+    let r1 = cluster.run_conf_change();
+    pd_client.must_add_peer(r1, new_peer(2, 2));
+    let (tx, _rx) = mpsc::channel();
+    // drop all the snapshot so we can detect stale snapfile.
+    cluster
+        .sim
+        .wl()
+        .add_recv_filter(3, Box::new(DropSnapshotFilter::new(tx)));
+    pd_client.must_add_peer(r1, new_peer(3, 3));
+    fail::cfg("send_gc_snap_fail", "return(0)").unwrap();
+    fail::cfg("get_snapshot_for_gc", "return(0)").unwrap();
+    for _ in 0..10 {
+        cluster.must_put(b"k1", b"v1");
+        cluster.must_put(b"k2", b"v2");
+    }
+    sleep_ms(1200); // waiting for snapshot being generated
+
+    cluster.sim.wl().clear_recv_filters(3);
+    sleep_ms(400); // waiting for a new round of gc, only one file is left (which is hardcoded in get_snapshot_for_gc's fail point)
+    // at this point we expect only one snapshot file is found
+    let now = Instant::now();
+    loop {
+        let snap_dir = cluster.get_snap_dir(3);
+        // it must have more than 2 snaps.
+        let snapfiles: Vec<_> = fs::read_dir(snap_dir)
+            .unwrap()
+            .map(|p| p.unwrap().path())
+            .collect();
+       
+        if snapfiles.len() == 0 {
+            panic!("no snapshot file is found");
+        }
+
+        let mut found_unexpected_file = false;
+        for snapfile in snapfiles {
+            // parse file name such as rev_1_6_87.meta. 87 is the idx
+            let paths : Vec<&str> = snapfile.file_name().unwrap().to_str().unwrap().split("_").collect();
+            let idxs : Vec<&str> = paths[3].split(".").collect();
+            let idx = idxs[0].parse::<u32>().unwrap();
+            if idx > 40 { // gc snapshot fails when idx <=40
+                found_unexpected_file = true;
+                break
+            }
+        }
+
+        if !found_unexpected_file {
+            break;
+        }
+
+        if now.saturating_elapsed() > Duration::from_secs(10) {
+            panic!("unexpected snapshot file found");
+        }
+        sleep_ms(2000);
+    }
+    fail::cfg("send_gc_snap_fail", "off").unwrap();
+    fail::cfg("get_snapshot_for_gc", "off").unwrap();
+    loop {
+        let snap_dir = cluster.get_snap_dir(3);
+        // it must have more than 2 snaps.
+        let snapfiles: Vec<_> = fs::read_dir(snap_dir)
+            .unwrap()
+            .map(|p| p.unwrap().path())
+            .collect();
+        if snapfiles.len() == 0 {
+            break;
+        }
+
+        if now.saturating_elapsed() > Duration::from_secs(10) {
+            panic!("unexpected snapshot file found {:?}", snapfiles);
+        }
+        sleep_ms(2000);
+    }
+}
