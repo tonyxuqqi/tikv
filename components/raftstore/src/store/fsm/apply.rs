@@ -381,6 +381,7 @@ where
     // Whether to use the delete range API instead of deleting one by one.
     use_delete_range: bool,
     disable_kv_wal: bool,
+    max_batch_limit: usize,
 
     perf_context: EK::PerfContext,
 
@@ -428,7 +429,13 @@ where
     ) -> ApplyContext<EK, W> {
         // If `enable_multi_batch_write` was set true, we create `RocksWriteBatchVec`.
         // Otherwise create `RocksWriteBatch`.
-        let kv_wb = W::with_capacity(&engine, DEFAULT_APPLY_WB_SIZE);
+        let max_batch_limit = if engine.support_write_batch_vec() {
+            cfg.max_batch_count
+        } else {
+            cfg.max_batch_key_size
+        };
+        let kv_wb =
+            W::with_capacity_and_max_entries(&engine, DEFAULT_APPLY_WB_SIZE, max_batch_limit);
 
         ApplyContext {
             tag,
@@ -447,6 +454,7 @@ where
             committed_count: 0,
             sync_log_hint: false,
             disable_kv_wal: cfg.disable_kv_wal,
+            max_batch_limit,
             exec_ctx: None,
             use_delete_range: cfg.use_delete_range,
             perf_context: engine.get_perf_context(cfg.perf_level, PerfContextKind::RaftstoreApply),
@@ -524,7 +532,11 @@ where
             if data_size > APPLY_WB_SHRINK_SIZE {
                 // Control the memory usage for the WriteBatch. Whether it's `RocksWriteBatch` or
                 // `RocksWriteBatchVec` depends on the `enable_multi_batch_write` configuration.
-                self.kv_wb = W::with_capacity(&self.engine, DEFAULT_APPLY_WB_SIZE);
+                self.kv_wb = W::with_capacity_and_max_entries(
+                    &self.engine,
+                    DEFAULT_APPLY_WB_SIZE,
+                    self.max_batch_limit,
+                );
             } else {
                 // Clear data, reuse the WriteBatch, this can reduce memory allocations and deallocations.
                 self.kv_wb_mut().clear();

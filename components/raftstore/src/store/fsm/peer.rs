@@ -10,9 +10,7 @@ use std::{cmp, mem, u64};
 use batch_system::{BasicMailbox, Fsm};
 use collections::HashMap;
 use engine_traits::CF_RAFT;
-use engine_traits::{
-    Engines, KvEngine, RaftEngine, RaftLogBatch, SSTMetaInfo, WriteBatch, WriteBatchExt,
-};
+use engine_traits::{Engines, KvEngine, RaftEngine, RaftLogBatch, SSTMetaInfo, WriteBatch};
 use error_code::ErrorCodeExt;
 use fail::fail_point;
 use kvproto::errorpb;
@@ -387,14 +385,14 @@ where
         self.batch_req_size += req_size;
     }
 
-    fn should_finish(&self) -> bool {
+    fn should_finish(&self, max_batch_keys: usize) -> bool {
         if let Some(batch_req) = self.request.as_ref() {
             // Limit the size of batch request so that it will not exceed raft_entry_max_size after
             // adding header.
             if f64::from(self.batch_req_size) > self.raft_entry_max_size * 0.4 {
                 return true;
             }
-            if batch_req.get_requests().len() > <E as WriteBatchExt>::WRITE_BATCH_MAX_KEYS {
+            if batch_req.get_requests().len() > max_batch_keys {
                 return true;
             }
         }
@@ -554,7 +552,11 @@ where
                         let req_size = cmd.request.compute_size();
                         if self.fsm.batch_req_builder.can_batch(&cmd.request, req_size) {
                             self.fsm.batch_req_builder.add(cmd, req_size);
-                            if self.fsm.batch_req_builder.should_finish() {
+                            if self
+                                .fsm
+                                .batch_req_builder
+                                .should_finish(self.ctx.cfg.max_batch_key_size)
+                            {
                                 self.propose_batch_raft_command();
                             }
                         } else {

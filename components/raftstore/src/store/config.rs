@@ -176,6 +176,10 @@ pub struct Config {
     pub apply_yield_duration: ReadableDuration,
     #[config(skip)]
     pub disable_kv_wal: bool,
+    #[config(skip)]
+    pub max_batch_key_size: usize,
+    #[config(skip)]
+    pub max_batch_count: usize,
     pub enable_propose_batch: bool,
     pub skip_header: bool,
 
@@ -263,6 +267,8 @@ impl Default for Config {
             dev_assert: false,
             apply_yield_duration: ReadableDuration::millis(500),
             disable_kv_wal: false,
+            max_batch_key_size: 256,
+            max_batch_count: 16,
             enable_propose_batch: true,
             skip_header: false,
 

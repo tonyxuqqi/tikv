@@ -19,12 +19,24 @@ impl WriteBatchExt for PanicEngine {
     fn write_batch_with_cap(&self, cap: usize) -> Self::WriteBatch {
         panic!()
     }
+
+    fn write_batch_with_cap_and_max_keys(
+        &self,
+        cap: usize,
+        max_batch_key_size: usize,
+    ) -> Self::WriteBatch {
+        panic!()
+    }
 }
 
 pub struct PanicWriteBatch;
 
 impl WriteBatch<PanicEngine> for PanicWriteBatch {
     fn with_capacity(_: &PanicEngine, _: usize) -> Self {
+        panic!()
+    }
+
+    fn with_capacity_and_max_entries(_: &PanicEngine, _: usize, _: usize) -> Self {
         panic!()
     }
 

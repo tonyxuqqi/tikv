@@ -27,6 +27,11 @@ pub trait WriteBatchExt: Sized {
 
     fn write_batch(&self) -> Self::WriteBatch;
     fn write_batch_with_cap(&self, cap: usize) -> Self::WriteBatch;
+    fn write_batch_with_cap_and_max_keys(
+        &self,
+        cap: usize,
+        max_batch_key_size: usize,
+    ) -> Self::WriteBatch;
 }
 
 /// A trait implemented by WriteBatch
@@ -82,6 +87,9 @@ pub trait Mutable: Send {
 pub trait WriteBatch<E: WriteBatchExt + Sized>: Mutable {
     /// Create a WriteBatch with a given command capacity
     fn with_capacity(e: &E, cap: usize) -> Self;
+
+    /// Create a WriteBatch with a given command capacity and max entries
+    fn with_capacity_and_max_entries(e: &E, cap: usize, max_entries: usize) -> Self;
 
     /// Commit the WriteBatch to disk with the given options
     fn write_opt(&self, opts: &WriteOptions) -> Result<()>;
