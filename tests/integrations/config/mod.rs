@@ -181,6 +181,7 @@ fn test_serde_custom_tikv_config() {
         snap_mgr_gc_tick_interval: ReadableDuration::minutes(12),
         snap_gc_timeout: ReadableDuration::hours(12),
         messages_per_tick: 12_345,
+        apply_task_per_tick: 16,
         max_peer_down_duration: ReadableDuration::minutes(12),
         max_leader_missing_duration: ReadableDuration::hours(12),
         abnormal_leader_missing_duration: ReadableDuration::hours(6),

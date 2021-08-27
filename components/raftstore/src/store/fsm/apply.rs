@@ -3581,7 +3581,7 @@ where
 {
     msg_buf: Vec<Msg<EK>>,
     apply_ctx: ApplyContext<EK, W>,
-    messages_per_tick: usize,
+    task_per_tick: usize,
     cfg_tracker: Tracker<Config>,
 
     trace_event: TraceEvent,
@@ -3594,14 +3594,14 @@ where
 {
     fn begin(&mut self, _batch_size: usize) {
         if let Some(incoming) = self.cfg_tracker.any_new() {
-            match Ord::cmp(&incoming.messages_per_tick, &self.messages_per_tick) {
+            match Ord::cmp(&incoming.apply_task_per_tick, &self.task_per_tick) {
                 CmpOrdering::Greater => {
-                    self.msg_buf.reserve(incoming.messages_per_tick);
-                    self.messages_per_tick = incoming.messages_per_tick;
+                    self.msg_buf.reserve(incoming.apply_task_per_tick);
+                    self.task_per_tick = incoming.apply_task_per_tick;
                 }
                 CmpOrdering::Less => {
-                    self.msg_buf.shrink_to(incoming.messages_per_tick);
-                    self.messages_per_tick = incoming.messages_per_tick;
+                    self.msg_buf.shrink_to(incoming.apply_task_per_tick);
+                    self.task_per_tick = incoming.apply_task_per_tick;
                 }
                 _ => {}
             }
@@ -3649,7 +3649,7 @@ where
             normal.delegate.id() == 1003,
             |_| { HandleResult::KeepProcessing }
         );
-        while self.msg_buf.len() < self.messages_per_tick {
+        while self.msg_buf.len() < self.task_per_tick {
             match normal.receiver.try_recv() {
                 Ok(msg) => self.msg_buf.push(msg),
                 Err(TryRecvError::Empty) => {
@@ -3739,7 +3739,7 @@ where
     fn build(&mut self, priority: Priority) -> ApplyPoller<EK, W> {
         let cfg = self.cfg.value();
         ApplyPoller {
-            msg_buf: Vec::with_capacity(cfg.messages_per_tick),
+            msg_buf: Vec::with_capacity(cfg.apply_task_per_tick),
             apply_ctx: ApplyContext::new(
                 self.tag.clone(),
                 self.coprocessor_host.clone(),
@@ -3753,7 +3753,7 @@ where
                 self.pending_create_peers.clone(),
                 priority,
             ),
-            messages_per_tick: cfg.messages_per_tick,
+            task_per_tick: cfg.apply_task_per_tick,
             cfg_tracker: self.cfg.clone().tracker(self.tag.clone()),
             trace_event: Default::default(),
         }
