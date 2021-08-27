@@ -253,6 +253,13 @@ lazy_static! {
             exponential_buckets(0.0005, 2.0, 20).unwrap()
         ).unwrap();
 
+    pub static ref STORE_APPLY_LOG_WRITE_COUNT_HISTOGRAM: Histogram =
+        register_histogram!(
+            "tikv_raftstore_apply_log_write_count",
+            "Bucketed histogram of peer applying log write count duration.",
+            exponential_buckets(0.0005, 2.0, 20).unwrap()
+        ).unwrap();
+
     pub static ref APPLY_TASK_WAIT_TIME_HISTOGRAM: Histogram =
         register_histogram!(
             "tikv_raftstore_apply_wait_time_duration_secs",

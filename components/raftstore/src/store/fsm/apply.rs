@@ -375,6 +375,7 @@ where
     kv_wb_last_keys: u64,
 
     committed_count: usize,
+    write_count: usize,
 
     // Whether synchronize WAL is preferred.
     sync_log_hint: bool,
@@ -465,6 +466,7 @@ where
             priority,
             yield_high_latency_operation: cfg.apply_batch_system.low_priority_pool_size > 0,
             pending_ssts: vec![],
+            write_count: 0,
         }
     }
 
@@ -526,6 +528,7 @@ where
             self.kv_wb().write_opt(&write_opts).unwrap_or_else(|e| {
                 panic!("failed to write to engine: {:?}", e);
             });
+            self.write_count = self.write_count + 1;
             self.perf_context.report_metrics();
             self.sync_log_hint = false;
             let data_size = self.kv_wb().data_size();
@@ -628,6 +631,7 @@ where
 
         let elapsed = t.saturating_elapsed();
         STORE_APPLY_LOG_HISTOGRAM.observe(duration_to_sec(elapsed) as f64);
+        STORE_APPLY_LOG_WRITE_COUNT_HISTOGRAM.observe(self.write_count as f64);
 
         slow_log!(
             elapsed,
@@ -636,6 +640,7 @@ where
             self.committed_count
         );
         self.committed_count = 0;
+        self.write_count = 0;
         is_synced
     }
 }
@@ -3162,6 +3167,7 @@ where
     ) {
         if apply_ctx.timer.is_none() {
             apply_ctx.timer = Some(Instant::now_coarse());
+            apply_ctx.write_count = 0;
         }
 
         fail_point!("on_handle_apply_1003", self.delegate.id() == 1003, |_| {});
@@ -3295,6 +3301,7 @@ where
 
         if ctx.timer.is_none() {
             ctx.timer = Some(Instant::now_coarse());
+            ctx.write_count = 0;
         }
         if !state.pending_entries.is_empty() {
             self.delegate
@@ -3369,6 +3376,7 @@ where
         if need_sync {
             if apply_ctx.timer.is_none() {
                 apply_ctx.timer = Some(Instant::now_coarse());
+                apply_ctx.write_count = 0;
             }
             self.delegate.write_apply_state(apply_ctx.kv_wb_mut());
             fail_point!(
