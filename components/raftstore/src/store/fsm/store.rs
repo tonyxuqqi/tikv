@@ -403,6 +403,11 @@ where
     fn set_sync_log(&mut self, sync: bool) {
         self.sync_log = sync;
     }
+
+    #[inline]
+    fn skip_write_commit_index(&self) -> bool {
+        self.cfg.skip_write_commit_index
+    }
 }
 
 impl<EK, ER, T> PollContext<EK, ER, T>

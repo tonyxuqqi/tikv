@@ -177,6 +177,7 @@ pub struct Config {
     pub apply_yield_duration: ReadableDuration,
     #[config(skip)]
     pub disable_kv_wal: bool,
+    pub skip_write_commit_index: bool,
     pub enable_propose_batch: bool,
     pub skip_header: bool,
 
@@ -265,6 +266,7 @@ impl Default for Config {
             dev_assert: false,
             apply_yield_duration: ReadableDuration::millis(500),
             disable_kv_wal: false,
+            skip_write_commit_index: false,
             enable_propose_batch: true,
             skip_header: false,
 

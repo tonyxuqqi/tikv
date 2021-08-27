@@ -398,6 +398,7 @@ where
     fn raft_wb_mut(&mut self) -> &mut WR;
     fn sync_log(&self) -> bool;
     fn set_sync_log(&mut self, sync: bool);
+    fn skip_write_commit_index(&self) -> bool;
 }
 
 fn storage_error<E>(error: E) -> raft::Error
@@ -1549,9 +1550,16 @@ where
                 ctx.raft_state.set_hard_state(hs.clone());
             }
         }
+        let new_commit = ctx.raft_state.get_hard_state().get_commit();
+        if ready_ctx.skip_write_commit_index() {
+            let old_commit = self.raft_state.get_hard_state().get_commit();
+            ctx.raft_state.mut_hard_state().set_commit(old_commit);
+        }
+        let skip_write = ctx.raft_state == self.raft_state;
+        ctx.raft_state.mut_hard_state().set_commit(new_commit);
 
         // Save raft state if it has changed or there is a snapshot.
-        if ctx.raft_state != self.raft_state || snapshot_index > 0 {
+        if !skip_write || snapshot_index > 0 {
             ctx.save_raft_state_to(ready_ctx.raft_wb_mut())?;
             if snapshot_index > 0 {
                 // in case of restart happen when we just write region state to Applying,
@@ -1949,6 +1957,9 @@ mod tests {
         }
         fn set_sync_log(&mut self, sync: bool) {
             self.sync_log = sync;
+        }
+        fn skip_write_commit_index(&self) -> bool {
+            false
         }
     }
 
