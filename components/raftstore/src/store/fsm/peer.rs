@@ -11,8 +11,8 @@ use batch_system::{BasicMailbox, Fsm};
 use collections::HashMap;
 use engine_traits::CF_RAFT;
 use engine_traits::{
-    Engines, KvEngine, RaftEngine, RaftLogBatch, SSTMetaInfo, WriteBatch, WriteBatchExt,
-    WriteOptions,
+    Engines, KvEngine, RaftEngine, RaftLogBatch, ReadOptions, SSTMetaInfo, WriteBatch,
+    WriteBatchExt, WriteOptions,
 };
 use error_code::ErrorCodeExt;
 use fail::fail_point;
@@ -132,6 +132,9 @@ where
     max_inflight_msgs: usize,
 
     trace: PeerMemoryTrace,
+
+    // read applied idx from sst for GC
+    check_trancated_idx_for_gc: bool,
 }
 
 pub struct BatchRaftCmdRequestBuilder<E>
@@ -232,6 +235,7 @@ where
                 ),
                 max_inflight_msgs: cfg.raft_max_inflight_msgs,
                 trace: PeerMemoryTrace::default(),
+                check_trancated_idx_for_gc: cfg.disable_tablet_wal,
             }),
         ))
     }
@@ -277,6 +281,7 @@ where
                 ),
                 max_inflight_msgs: cfg.raft_max_inflight_msgs,
                 trace: PeerMemoryTrace::default(),
+                check_trancated_idx_for_gc: cfg.disable_tablet_wal,
             }),
         ))
     }
@@ -2211,18 +2216,59 @@ where
         }
     }
 
+    fn get_flushed_trancated_idx(&mut self, region_id: u64) -> u64 {
+        let state_key = keys::apply_state_key(region_id);
+        let mut opts = ReadOptions::new();
+        const PERSISTED_TIER: i32 = 0x2;
+        opts.set_read_tier(PERSISTED_TIER);
+        let mut m = RaftApplyState::default();
+        if let Some(tablet) = self.fsm.peer.get_store().tablet() {
+            let value = tablet.get_value_cf_opt(&opts, CF_RAFT, &state_key).unwrap();
+            if !value.is_none() {
+                m.merge_from_bytes(&value.unwrap()).unwrap();
+                return cmp::min(m.get_truncated_state().get_index(), m.applied_index);
+            }
+        }
+
+        let value = self
+            .ctx
+            .engines
+            .kv
+            .get_value_cf_opt(&opts, CF_RAFT, &state_key)
+            .unwrap();
+        if value.is_none() {
+            return 0;
+        }
+        m.merge_from_bytes(&value.unwrap()).unwrap();
+        cmp::min(m.get_truncated_state().get_index(), m.applied_index)
+    }
+
     fn on_ready_compact_log(&mut self, first_index: u64, state: RaftTruncatedState) {
         let total_cnt = self.fsm.peer.last_applying_idx - first_index;
+
+        let mut index = state.get_index();
+        if self.fsm.check_trancated_idx_for_gc {
+            let last_trancated_idx =
+                self.get_flushed_trancated_idx(self.fsm.peer.get_store().get_region_id());
+            if last_trancated_idx != 0 && last_trancated_idx - 1 < index {
+                debug!("on_ready_compact_log update index.";
+                    "region" => self.fsm.peer.get_store().get_region_id(),
+                    "original" => index,
+                    "new value" => last_trancated_idx-1);
+                index = last_trancated_idx - 1;
+            }
+        }
         // the size of current CompactLog command can be ignored.
-        let remain_cnt = self.fsm.peer.last_applying_idx - state.get_index() - 1;
+        let remain_cnt = self.fsm.peer.last_applying_idx - index - 1;
         self.fsm.peer.raft_log_size_hint =
             self.fsm.peer.raft_log_size_hint * remain_cnt / total_cnt;
-        let compact_to = state.get_index() + 1;
+        let compact_to = index + 1;
         let task = RaftlogGcTask::gc(
             self.fsm.peer.get_store().get_region_id(),
             self.fsm.peer.last_compacted_idx,
             compact_to,
         );
+        let start_idx = self.fsm.peer.last_compacted_idx;
         self.fsm.peer.last_compacted_idx = compact_to;
         self.fsm.peer.mut_store().compact_to(compact_to);
         if let Err(e) = self.ctx.raftlog_gc_scheduler.schedule(task) {
@@ -2231,6 +2277,14 @@ where
                 "region_id" => self.fsm.region_id(),
                 "peer_id" => self.fsm.peer_id(),
                 "err" => %e,
+            );
+        } else {
+            debug!(
+                "successfully to schedule compact task";
+                "region_id" => self.fsm.region_id(),
+                "peer_id" => self.fsm.peer_id(),
+                "start_idx" => start_idx,
+                "end_idx" => compact_to,
             );
         }
     }

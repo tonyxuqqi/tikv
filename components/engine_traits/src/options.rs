@@ -5,6 +5,7 @@ use tikv_util::keybuilder::KeyBuilder;
 #[derive(Clone)]
 pub struct ReadOptions {
     fill_cache: bool,
+    read_tier: i32,
 }
 
 impl ReadOptions {
@@ -21,11 +22,24 @@ impl ReadOptions {
     pub fn set_fill_cache(&mut self, v: bool) {
         self.fill_cache = v;
     }
+
+    #[inline]
+    pub fn read_tier(&self) -> i32 {
+        self.read_tier
+    }
+
+    #[inline]
+    pub fn set_read_tier(&mut self, v: i32) {
+        self.read_tier = v;
+    }
 }
 
 impl Default for ReadOptions {
     fn default() -> ReadOptions {
-        ReadOptions { fill_cache: true }
+        ReadOptions {
+            fill_cache: true,
+            read_tier: 0, // all tier
+        }
     }
 }
 
