@@ -2389,13 +2389,17 @@ where
                 .tablet_factory
                 .tablet_path(new_region.get_id(), RAFT_INIT_LOG_INDEX);
             to_cloned.push(tablet_path);
+            let mut output_stream = CodedOutputStream::vec(&mut apply_result);
             new_region
-                .write_length_delimited_to(&mut CodedOutputStream::vec(&mut apply_result))
+                .write_length_delimited_to(&mut output_stream)
                 .unwrap();
+            output_stream.flush().unwrap();
         }
+        let mut output_stream = CodedOutputStream::vec(&mut apply_result);
         derived
-            .write_length_delimited_to(&mut CodedOutputStream::vec(&mut apply_result))
+            .write_length_delimited_to(&mut output_stream)
             .unwrap();
+        output_stream.flush().unwrap(); 
         let apply_res_key = keys::region_apply_result_key(derived.get_id(), cur_index);
         write_peer_state(kv_wb_mut, &derived, PeerState::Normal, None, cur_index, 0)
             .and_then(|_| {

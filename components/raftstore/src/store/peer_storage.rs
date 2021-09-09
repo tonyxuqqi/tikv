@@ -602,43 +602,50 @@ fn init_apply_state<EK: KvEngine, ER: RaftEngine>(
     }
 
     let tablet = engines.tablets.open_tablet(region.get_id(), suffix);
-    let apply_state = match tablet
-        .get_msg_cf::<RaftApplyState>(CF_RAFT, &keys::apply_state_key(region.get_id()))?
-    {
-        Some(s) => {
-            if suffix == s.get_applied_index() {
-                match engines.kv.get_msg_cf::<RaftApplyState>(
-                    CF_RAFT,
-                    &keys::apply_state_key(region.get_id()),
-                )? {
-                    Some(ss) => {
-                        info!("getting apply state from kv. ";
-                            "region" => region.get_id(),
-                            "suffix" => suffix,
-                            "applied index" => ss.get_applied_index(),
-                        );
-                        return Ok((Some((tablet, suffix)), ss));
-                    }
-                    None => {}
-                };
+    let tablet_apply_state =
+        tablet.get_msg_cf::<RaftApplyState>(CF_RAFT, &keys::apply_state_key(region.get_id()))?;
+    let kv_apply_state = engines
+        .kv
+        .get_msg_cf::<RaftApplyState>(CF_RAFT, &keys::apply_state_key(region.get_id()))?;
+    let apply_state = match tablet_apply_state {
+        Some(mut tablet_apply_state) => match kv_apply_state {
+            Some(kv_apply_state) => {
+                if tablet_apply_state.get_truncated_state().get_index()
+                    >= kv_apply_state.get_truncated_state().get_index()
+                {
+                    assert!(
+                        tablet_apply_state.get_truncated_state().get_term()
+                            >= kv_apply_state.get_truncated_state().get_term()
+                    );
+                } else {
+                    assert!(
+                        tablet_apply_state.get_truncated_state().get_term()
+                            <= kv_apply_state.get_truncated_state().get_term()
+                    );
+                    tablet_apply_state
+                        .mut_truncated_state()
+                        .set_index(kv_apply_state.get_truncated_state().get_index());
+                    tablet_apply_state
+                        .mut_truncated_state()
+                        .set_term(kv_apply_state.get_truncated_state().get_term());
+                }
+                tablet_apply_state
             }
-            info!("getting apply state from tablet.";
-                "region" => region.get_id(),
-                "suffix" => suffix,
-                "apply_state" => format!("{:?}", s),
-            );
-            s
-        }
-        None => {
-            let mut apply_state = RaftApplyState::default();
-            if util::is_region_initialized(region) {
-                apply_state.set_applied_index(RAFT_INIT_LOG_INDEX);
-                let state = apply_state.mut_truncated_state();
-                state.set_index(RAFT_INIT_LOG_INDEX);
-                state.set_term(RAFT_INIT_LOG_TERM);
+            None => tablet_apply_state,
+        },
+        None => match kv_apply_state {
+            Some(kv_apply_state) => kv_apply_state,
+            None => {
+                let mut apply_state = RaftApplyState::default();
+                if util::is_region_initialized(region) {
+                    apply_state.set_applied_index(RAFT_INIT_LOG_INDEX);
+                    let state = apply_state.mut_truncated_state();
+                    state.set_index(RAFT_INIT_LOG_INDEX);
+                    state.set_term(RAFT_INIT_LOG_TERM);
+                }
+                apply_state
             }
-            apply_state
-        }
+        },
     };
     Ok((Some((tablet, suffix)), apply_state))
 }
@@ -656,8 +663,8 @@ fn init_last_term<EK: KvEngine, ER: RaftEngine>(
         return Ok(RAFT_INIT_LOG_TERM);
     } else if last_idx == apply_state.get_truncated_state().get_index() {
         info! ("last_index is same as apply_state's index";
-               "last_index" => last_idx,
-            );
+           "last_index" => last_idx,
+        );
         return Ok(apply_state.get_truncated_state().get_term());
     } else {
         assert!(last_idx > RAFT_INIT_LOG_INDEX);

@@ -11,7 +11,7 @@ use batch_system::{BasicMailbox, Fsm};
 use collections::HashMap;
 use engine_traits::CF_RAFT;
 use engine_traits::{
-    Engines, KvEngine, RaftEngine, RaftLogBatch, ReadOptions, SSTMetaInfo, WriteBatch,
+    Engines, KvEngine, RaftEngine, RaftLogBatch, ReadOptions, ReadTie, SSTMetaInfo, WriteBatch,
     WriteBatchExt, WriteOptions,
 };
 use error_code::ErrorCodeExt;
@@ -134,7 +134,7 @@ where
     trace: PeerMemoryTrace,
 
     // read applied idx from sst for GC
-    check_trancated_idx_for_gc: bool,
+    check_truncated_idx_for_gc: bool,
 }
 
 pub struct BatchRaftCmdRequestBuilder<E>
@@ -235,7 +235,7 @@ where
                 ),
                 max_inflight_msgs: cfg.raft_max_inflight_msgs,
                 trace: PeerMemoryTrace::default(),
-                check_trancated_idx_for_gc: cfg.disable_tablet_wal,
+                check_truncated_idx_for_gc: cfg.disable_tablet_wal,
             }),
         ))
     }
@@ -281,7 +281,7 @@ where
                 ),
                 max_inflight_msgs: cfg.raft_max_inflight_msgs,
                 trace: PeerMemoryTrace::default(),
-                check_trancated_idx_for_gc: cfg.disable_tablet_wal,
+                check_truncated_idx_for_gc: cfg.disable_tablet_wal,
             }),
         ))
     }
@@ -2216,11 +2216,10 @@ where
         }
     }
 
-    fn get_flushed_trancated_idx(&mut self, region_id: u64) -> u64 {
+    fn get_flushed_truncated_idx(&mut self, region_id: u64) -> u64 {
         let state_key = keys::apply_state_key(region_id);
         let mut opts = ReadOptions::new();
-        const PERSISTED_TIER: i32 = 0x2;
-        opts.set_read_tier(PERSISTED_TIER);
+        opts.set_read_tier(ReadTie::Sst);
         let mut m = RaftApplyState::default();
         if let Some(tablet) = self.fsm.peer.get_store().tablet() {
             let value = tablet.get_value_cf_opt(&opts, CF_RAFT, &state_key).unwrap();
@@ -2247,15 +2246,15 @@ where
         let total_cnt = self.fsm.peer.last_applying_idx - first_index;
 
         let mut index = state.get_index();
-        if self.fsm.check_trancated_idx_for_gc {
-            let last_trancated_idx =
-                self.get_flushed_trancated_idx(self.fsm.peer.get_store().get_region_id());
-            if last_trancated_idx != 0 && last_trancated_idx - 1 < index {
+        if self.fsm.check_truncated_idx_for_gc {
+            let last_truncated_idx =
+                self.get_flushed_truncated_idx(self.fsm.peer.get_store().get_region_id());
+            if last_truncated_idx != 0 && last_truncated_idx - 1 < index {
                 debug!("on_ready_compact_log update index.";
                     "region" => self.fsm.peer.get_store().get_region_id(),
                     "original" => index,
-                    "new value" => last_trancated_idx-1);
-                index = last_trancated_idx - 1;
+                    "new value" => last_truncated_idx-1);
+                index = last_truncated_idx - 1;
             }
         }
         // the size of current CompactLog command can be ignored.

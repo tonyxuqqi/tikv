@@ -17,7 +17,7 @@ impl From<engine_traits::ReadOptions> for RocksReadOptions {
     fn from(opts: engine_traits::ReadOptions) -> Self {
         let mut r = RawReadOptions::default();
         r.fill_cache(opts.fill_cache());
-        r.set_read_tier(opts.read_tier());
+        r.set_read_tier(opts.read_tier() as i32);
         RocksReadOptions(r)
     }
 }

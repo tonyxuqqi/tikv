@@ -2,10 +2,17 @@
 use std::ops::Bound;
 use tikv_util::keybuilder::KeyBuilder;
 
+#[repr(i32)]
+#[derive(Clone)]
+pub enum ReadTie {
+    All = 0,
+    Sst = 2,
+}
+
 #[derive(Clone)]
 pub struct ReadOptions {
     fill_cache: bool,
-    read_tier: i32,
+    read_tier: ReadTie,
 }
 
 impl ReadOptions {
@@ -24,12 +31,12 @@ impl ReadOptions {
     }
 
     #[inline]
-    pub fn read_tier(&self) -> i32 {
-        self.read_tier
+    pub fn read_tier(&self) -> ReadTie {
+        self.read_tier.clone()
     }
 
     #[inline]
-    pub fn set_read_tier(&mut self, v: i32) {
+    pub fn set_read_tier(&mut self, v: ReadTie) {
         self.read_tier = v;
     }
 }
@@ -38,7 +45,7 @@ impl Default for ReadOptions {
     fn default() -> ReadOptions {
         ReadOptions {
             fill_cache: true,
-            read_tier: 0, // all tier
+            read_tier: ReadTie::All, // all tier
         }
     }
 }
