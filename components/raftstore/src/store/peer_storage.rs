@@ -584,6 +584,7 @@ fn init_apply_state<EK: KvEngine, ER: RaftEngine>(
             if s.get_state() == PeerState::Tombstone {
                 0
             } else if s.get_state() == PeerState::Applying {
+                info!("getting apply state from engines.kv as it's state is PeerState::Applying");
                 let apply_state = engines
                     .kv
                     .get_msg_cf(CF_RAFT, &keys::apply_state_key(region.get_id()))?
@@ -599,20 +600,52 @@ fn init_apply_state<EK: KvEngine, ER: RaftEngine>(
         let apply_state = RaftApplyState::default();
         return Ok((None, apply_state));
     }
-    let tablet = engines.tablets.open_tablet(region.get_id(), suffix);
 
-    let apply_state = match tablet.get_msg_cf(CF_RAFT, &keys::apply_state_key(region.get_id()))? {
-        Some(s) => s,
-        None => {
-            let mut apply_state = RaftApplyState::default();
-            if util::is_region_initialized(region) {
-                apply_state.set_applied_index(RAFT_INIT_LOG_INDEX);
-                let state = apply_state.mut_truncated_state();
-                state.set_index(RAFT_INIT_LOG_INDEX);
-                state.set_term(RAFT_INIT_LOG_TERM);
+    let tablet = engines.tablets.open_tablet(region.get_id(), suffix);
+    let tablet_apply_state =
+        tablet.get_msg_cf::<RaftApplyState>(CF_RAFT, &keys::apply_state_key(region.get_id()))?;
+    let kv_apply_state = engines
+        .kv
+        .get_msg_cf::<RaftApplyState>(CF_RAFT, &keys::apply_state_key(region.get_id()))?;
+    let apply_state = match tablet_apply_state {
+        Some(mut tablet_apply_state) => match kv_apply_state {
+            Some(kv_apply_state) => {
+                if tablet_apply_state.get_truncated_state().get_index()
+                    >= kv_apply_state.get_truncated_state().get_index()
+                {
+                    assert!(
+                        tablet_apply_state.get_truncated_state().get_term()
+                            >= kv_apply_state.get_truncated_state().get_term()
+                    );
+                } else {
+                    assert!(
+                        tablet_apply_state.get_truncated_state().get_term()
+                            <= kv_apply_state.get_truncated_state().get_term()
+                    );
+                    tablet_apply_state
+                        .mut_truncated_state()
+                        .set_index(kv_apply_state.get_truncated_state().get_index());
+                    tablet_apply_state
+                        .mut_truncated_state()
+                        .set_term(kv_apply_state.get_truncated_state().get_term());
+                }
+                tablet_apply_state
             }
-            apply_state
-        }
+            None => tablet_apply_state,
+        },
+        None => match kv_apply_state {
+            Some(kv_apply_state) => kv_apply_state,
+            None => {
+                let mut apply_state = RaftApplyState::default();
+                if util::is_region_initialized(region) {
+                    apply_state.set_applied_index(RAFT_INIT_LOG_INDEX);
+                    let state = apply_state.mut_truncated_state();
+                    state.set_index(RAFT_INIT_LOG_INDEX);
+                    state.set_term(RAFT_INIT_LOG_TERM);
+                }
+                apply_state
+            }
+        },
     };
     Ok((Some((tablet, suffix)), apply_state))
 }
@@ -629,6 +662,9 @@ fn init_last_term<EK: KvEngine, ER: RaftEngine>(
     } else if last_idx == RAFT_INIT_LOG_INDEX {
         return Ok(RAFT_INIT_LOG_TERM);
     } else if last_idx == apply_state.get_truncated_state().get_index() {
+        info! ("last_index is same as apply_state's index";
+           "last_index" => last_idx,
+        );
         return Ok(apply_state.get_truncated_state().get_term());
     } else {
         assert!(last_idx > RAFT_INIT_LOG_INDEX);
@@ -636,9 +672,10 @@ fn init_last_term<EK: KvEngine, ER: RaftEngine>(
     let entry = engines.raft.get_entry(region.get_id(), last_idx)?;
     match entry {
         None => Err(box_err!(
-            "[region {}] entry at {} doesn't exist, may lose data.",
+            "[region {}] entry at {} doesn't exist, may lose data. last index in apply state {}",
             region.get_id(),
-            last_idx
+            last_idx,
+            apply_state.get_truncated_state().get_index()
         )),
         Some(e) => Ok(e.get_term()),
     }
@@ -659,6 +696,7 @@ fn validate_states<EK: KvEngine, ER: RaftEngine>(
             region_id, raft_state, apply_state
         )
     };
+
     // The commit index of raft state may be less than the recorded commit index.
     // If so, forward the commit index.
     if commit_index < recorded_commit_index {
