@@ -2,9 +2,18 @@
 use std::ops::Bound;
 use tikv_util::keybuilder::KeyBuilder;
 
+#[repr(i32)]
+#[derive(Clone, Copy)]
+pub enum ReadTier {
+    ReadAllTier = 0,
+    BlockCacheTier = 1,
+    PersistedTier = 2,
+}
+
 #[derive(Clone)]
 pub struct ReadOptions {
     fill_cache: bool,
+    read_tier: ReadTier,
 }
 
 impl ReadOptions {
@@ -21,11 +30,24 @@ impl ReadOptions {
     pub fn set_fill_cache(&mut self, v: bool) {
         self.fill_cache = v;
     }
+
+    #[inline]
+    pub fn read_tier(&self) -> ReadTier {
+        self.read_tier
+    }
+
+    #[inline]
+    pub fn set_read_tier(&mut self, v: ReadTier) {
+        self.read_tier = v;
+    }
 }
 
 impl Default for ReadOptions {
     fn default() -> ReadOptions {
-        ReadOptions { fill_cache: true }
+        ReadOptions {
+            fill_cache: true,
+            read_tier: ReadTier::ReadAllTier, // all tier
+        }
     }
 }
 
