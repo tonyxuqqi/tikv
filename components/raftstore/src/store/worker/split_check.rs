@@ -6,8 +6,7 @@ use std::fmt::{self, Display, Formatter};
 use std::mem;
 
 use engine_traits::{CfName, IterOptions, Iterable, Iterator, KvEngine, CF_WRITE, LARGE_CFS};
-use kvproto::metapb::Region;
-use kvproto::metapb::RegionEpoch;
+use kvproto::metapb::{Region, RegionBucket, RegionEpoch};
 use kvproto::pdpb::CheckPolicy;
 
 #[cfg(any(test, feature = "testexport"))]
@@ -207,10 +206,10 @@ where
         let mut host = self
             .coprocessor
             .new_split_checker_host(region, &tablet, auto_split, policy);
-        if host.skip() {
+        /*if host.skip() {
             debug!("skip split check"; "region_id" => region.get_id());
             return;
-        }
+        }*/
 
         let split_keys = match host.policy() {
             CheckPolicy::Scan => {
@@ -222,25 +221,58 @@ where
                     }
                 }
             }
-            CheckPolicy::Approximate => match host.approximate_split_keys(region, &tablet) {
-                Ok(keys) => keys
-                    .into_iter()
-                    .map(|k| keys::origin_key(&k).to_vec())
-                    .collect(),
-                Err(e) => {
-                    error!(%e;
-                        "failed to get approximate split key, try scan way";
-                        "region_id" => region_id,
-                    );
-                    match self.scan_split_keys(&mut host, &tablet, region, &start_key, &end_key) {
-                        Ok(keys) => keys,
+            CheckPolicy::Approximate => {
+                if host.enable_region_bucket() {
+                    let mut bucket_keys = match host.approximate_bucket_keys(region, &tablet) {
+                        Ok(keys) => keys.into_iter().map(|k| k.to_vec()).collect(),
                         Err(e) => {
-                            error!(%e; "failed to scan split key"; "region_id" => region_id,);
-                            return;
+                            error!(%e;
+                                "failed to get approximate bucket key";
+                                "region_id" => region_id,
+                            );
+                            vec![]
+                        }
+                    };
+                    info!("starting approximate_bucket_keys {}", bucket_keys.len());
+                    if bucket_keys.len() > 0 {
+                        bucket_keys.insert(0, start_key.clone()); //
+                        bucket_keys.push(end_key.clone());
+                        let mut i = 0;
+                        let mut region_buckets = vec![];
+                        while i < bucket_keys.len() - 1 {
+                            let mut region_bucket = RegionBucket::default();
+                            region_bucket.start_key = bucket_keys[i].clone();
+                            region_bucket.end_key = bucket_keys[i + 1].clone();
+                            region_buckets.push(region_bucket);
+                            i += 1;
+                        }
+                        let _ = self.router.send(
+                            region.get_id(),
+                            CasualMessage::RefreshRegionBuckets { region_buckets },
+                        );
+                    }
+                }
+                match host.approximate_split_keys(region, &tablet) {
+                    Ok(keys) => keys
+                        .into_iter()
+                        .map(|k| keys::origin_key(&k).to_vec())
+                        .collect(),
+                    Err(e) => {
+                        error!(%e;
+                            "failed to get approximate split key, try scan way";
+                            "region_id" => region_id,
+                        );
+                        match self.scan_split_keys(&mut host, &tablet, region, &start_key, &end_key)
+                        {
+                            Ok(keys) => keys,
+                            Err(e) => {
+                                error!(%e; "failed to scan split key"; "region_id" => region_id,);
+                                return;
+                            }
                         }
                     }
                 }
-            },
+            }
             CheckPolicy::Usekey => vec![], // Handled by pd worker directly.
         };
 
@@ -273,18 +305,36 @@ where
         end_key: &[u8],
     ) -> Result<Vec<Vec<u8>>> {
         let timer = CHECK_SPILT_HISTOGRAM.start_coarse_timer();
+        let mut region_buckets = vec![];
         MergedIterator::<<E as Iterable>::Iterator>::new(
             tablet, LARGE_CFS, start_key, end_key, false,
         )
         .map(|mut iter| {
             let mut size = 0;
             let mut keys = 0;
+            let mut bucket_size: u64 = 0;
+            let mut bucket_start_key = start_key.to_vec();
             while let Some(e) = iter.next() {
                 if host.on_kv(region, &e) {
                     return;
                 }
                 size += e.entry_size() as u64;
                 keys += 1;
+                if host.enable_region_bucket() {
+                    bucket_size += e.entry_size() as u64;
+                    if bucket_size >= host.region_bucket_size() {
+                        let mut region_bucket = RegionBucket::default();
+                        region_bucket.start_key = bucket_start_key;
+                        region_bucket.end_key = e.key().to_vec();
+                        region_buckets.push(region_bucket);
+                        bucket_size = 0;
+                        bucket_start_key = e.key().to_vec();
+                    }
+                }
+            }
+            let buckets_len = region_buckets.len();
+            if buckets_len > 1 {
+                region_buckets[buckets_len - 1].end_key = end_key.to_vec();
             }
 
             // if we scan the whole range, we can update approximate size and keys with accurate value.
@@ -293,6 +343,8 @@ where
                 "region_id" => region.get_id(),
                 "size" => size,
                 "keys" => keys,
+                "bucket_count" => region_buckets.len(),
+                "bucket_size" => bucket_size,
             );
             let _ = self.router.send(
                 region.get_id(),
@@ -302,6 +354,12 @@ where
                 region.get_id(),
                 CasualMessage::RegionApproximateKeys { keys },
             );
+            if host.enable_region_bucket() {
+                let _ = self.router.send(
+                    region.get_id(),
+                    CasualMessage::RefreshRegionBuckets { region_buckets },
+                );
+            }
         })?;
         timer.observe_duration();
 

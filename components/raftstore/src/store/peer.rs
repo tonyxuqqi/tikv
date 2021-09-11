@@ -521,6 +521,8 @@ where
     pub handled_proposals: usize,
 
     pub read_progress: Arc<RegionReadProgress>,
+
+    pub region_buckets: Vec<metapb::RegionBucket>,
 }
 
 impl<EK, ER> Peer<EK, ER>
@@ -623,6 +625,7 @@ where
                 tag,
             )),
             handled_proposals: 0,
+            region_buckets: vec![],
         };
 
         // If this region has only one peer and I am the one, campaign directly.
@@ -3520,9 +3523,19 @@ where
     }
 
     pub fn heartbeat_pd<T>(&mut self, ctx: &PollContext<EK, ER, T>) {
+        let mut region = self.region().clone();
+        let mut region_buckets = Vec::with_capacity(self.region_buckets.len());
+        region_buckets.clone_from_slice(&self.region_buckets); // TODO: remove the clone if possible
+        region.set_region_bucket(protobuf::RepeatedField::from(region_buckets));
+        if region.region_bucket.len() != 0 {
+            // TODO: change it to debug! later
+            info!("notifying pd with region_bucket";
+                "region_bucket size" => region.region_bucket.len(),
+            );
+        }
         let task = PdTask::Heartbeat(HeartbeatTask {
             term: self.term(),
-            region: self.region().clone(),
+            region: region,
             peer: self.peer.clone(),
             down_peers: self.collect_down_peers(ctx.cfg.max_peer_down_duration.0),
             pending_peers: self.collect_pending_peers(ctx),
