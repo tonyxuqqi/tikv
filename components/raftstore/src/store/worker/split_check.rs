@@ -224,7 +224,7 @@ where
             CheckPolicy::Approximate => {
                 if host.enable_region_bucket() {
                     let mut bucket_keys = match host.approximate_bucket_keys(region, &tablet) {
-                        Ok(keys) => keys.into_iter().map(|k| k.to_vec()).collect(),
+                        Ok(keys) => keys.into_iter().map(|k| keys::origin_key(&k).to_vec()).collect(),
                         Err(e) => {
                             error!(%e;
                                 "failed to get approximate bucket key";
@@ -235,8 +235,8 @@ where
                     };
                     info!("starting approximate_bucket_keys {}", bucket_keys.len());
                     if bucket_keys.len() > 0 {
-                        bucket_keys.insert(0, start_key.clone()); //
-                        bucket_keys.push(end_key.clone());
+                        bucket_keys.insert(0, keys::origin_key(&start_key).to_vec()); //
+                        bucket_keys.push(keys::origin_end_key(&end_key).to_vec());
                         let mut i = 0;
                         let mut region_buckets = vec![];
                         while i < bucket_keys.len() - 1 {
@@ -313,7 +313,7 @@ where
             let mut size = 0;
             let mut keys = 0;
             let mut bucket_size: u64 = 0;
-            let mut bucket_start_key = start_key.to_vec();
+            let mut bucket_start_key = keys::origin_key(&start_key).to_vec();
             while let Some(e) = iter.next() {
                 if host.on_kv(region, &e) {
                     return;
@@ -325,16 +325,16 @@ where
                     if bucket_size >= host.region_bucket_size() {
                         let mut region_bucket = RegionBucket::default();
                         region_bucket.start_key = bucket_start_key;
-                        region_bucket.end_key = e.key().to_vec();
+                        region_bucket.end_key = keys::origin_key(&e.key()).to_vec();
                         region_buckets.push(region_bucket);
                         bucket_size = 0;
-                        bucket_start_key = e.key().to_vec();
+                        bucket_start_key = keys::origin_key(&e.key()).to_vec();
                     }
                 }
             }
             let buckets_len = region_buckets.len();
-            if buckets_len > 1 {
-                region_buckets[buckets_len - 1].end_key = end_key.to_vec();
+            if buckets_len >= 1 {
+                region_buckets[buckets_len - 1].end_key = keys::origin_end_key(&end_key).to_vec();
             }
 
             // if we scan the whole range, we can update approximate size and keys with accurate value.

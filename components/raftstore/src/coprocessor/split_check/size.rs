@@ -488,7 +488,7 @@ pub mod tests {
             engine.put_cf(data_cf, &s, &s).unwrap();
             if i % 10 == 0 && i > 0 {
                 if i < 40 {
-                    exp_bucket_keys.push(s.clone());
+                    exp_bucket_keys.push(keys::origin_key(&s).to_vec());
                 }
                 engine.flush_cf(data_cf, true).unwrap();
             }

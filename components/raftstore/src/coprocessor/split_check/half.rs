@@ -236,9 +236,9 @@ mod tests {
         // so bucket key will be all these keys
         let mut exp_bucket_keys = vec![];
         for i in 0..11 {
-            let k = format!("{:04}", i).into_bytes();
+            let k = format!("{:04}", i).into_bytes(); 
+            exp_bucket_keys.push(Key::from_raw(&k).as_encoded().clone());
             let k = keys::data_key(Key::from_raw(&k).as_encoded());
-            exp_bucket_keys.push(k.clone());
             engine.put_cf(CF_DEFAULT, &k, &k).unwrap();
             // Flush for every key so that we can know the exact middle key.
             engine.flush_cf(CF_DEFAULT, true).unwrap();

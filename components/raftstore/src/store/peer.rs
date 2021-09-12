@@ -3524,7 +3524,7 @@ where
 
     pub fn heartbeat_pd<T>(&mut self, ctx: &PollContext<EK, ER, T>) {
         let mut region = self.region().clone();
-        let mut region_buckets = Vec::with_capacity(self.region_buckets.len());
+        let mut region_buckets = vec![metapb::RegionBucket::default();self.region_buckets.len()];
         region_buckets.clone_from_slice(&self.region_buckets); // TODO: remove the clone if possible
         region.set_region_bucket(protobuf::RepeatedField::from(region_buckets));
         if region.region_bucket.len() != 0 {
