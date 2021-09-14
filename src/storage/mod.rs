@@ -930,6 +930,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         }
     }
 
+    // [PerformanceCriticalPath]
     // The entry point of all transaction commands. It checks transaction-specific constraints.
     pub fn sched_txn_command<T: StorageCallbackType>(
         &self,
@@ -945,6 +946,7 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
         self.sched_command(cmd, callback)
     }
 
+    // [PerformanceCriticalPath]
     // The entry point of the storage scheduler. Not only transaction commands need to access keys serially.
     fn sched_command<T: StorageCallbackType>(
         &self,
