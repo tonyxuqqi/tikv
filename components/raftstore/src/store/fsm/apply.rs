@@ -2885,7 +2885,7 @@ pub fn compact_raft_log(
     compact_index: u64,
     compact_term: u64,
 ) -> Result<()> {
-    debug!("{} compact log entries to prior to {}", tag, compact_index);
+    info!("{} compact log entries to prior to {}", tag, compact_index);
 
     if compact_index <= state.get_truncated_state().get_index() {
         return Err(box_err!("try to truncate compacted entries"));

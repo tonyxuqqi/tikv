@@ -2245,7 +2245,17 @@ where
     fn on_ready_compact_log(&mut self, first_index: u64, state: RaftTruncatedState) {
         let total_cnt = self.fsm.peer.last_applying_idx - first_index;
 
-        let mut index = state.get_index();
+        let index = state.get_index();
+        // the size of current CompactLog command can be ignored.
+        let remain_cnt = self.fsm.peer.last_applying_idx - index - 1;
+        self.fsm.peer.raft_log_size_hint =
+            self.fsm.peer.raft_log_size_hint * remain_cnt / total_cnt;
+
+        let compact_to = index + 1;
+        let start_idx = self.fsm.peer.last_compacted_idx;
+        self.fsm.peer.last_compacted_idx = compact_to;
+        self.fsm.peer.mut_store().compact_to(compact_to);
+        let mut persisted_index = index;
         if self.fsm.check_truncated_idx_for_gc {
             let last_truncated_idx =
                 self.get_flushed_truncated_idx(self.fsm.peer.get_store().get_region_id());
@@ -2254,22 +2264,14 @@ where
                     "region" => self.fsm.peer.get_store().get_region_id(),
                     "original" => index,
                     "new value" => last_truncated_idx-1);
-                index = last_truncated_idx - 1;
+                persisted_index = last_truncated_idx - 1;
             }
         }
-        // the size of current CompactLog command can be ignored.
-        let remain_cnt = self.fsm.peer.last_applying_idx - index - 1;
-        self.fsm.peer.raft_log_size_hint =
-            self.fsm.peer.raft_log_size_hint * remain_cnt / total_cnt;
-        let compact_to = index + 1;
         let task = RaftlogGcTask::gc(
             self.fsm.peer.get_store().get_region_id(),
-            self.fsm.peer.last_compacted_idx,
-            compact_to,
+            start_idx,
+            persisted_index + 1,
         );
-        let start_idx = self.fsm.peer.last_compacted_idx;
-        self.fsm.peer.last_compacted_idx = compact_to;
-        self.fsm.peer.mut_store().compact_to(compact_to);
         if let Err(e) = self.ctx.raftlog_gc_scheduler.schedule(task) {
             error!(
                 "failed to schedule compact task";
@@ -2283,7 +2285,7 @@ where
                 "region_id" => self.fsm.region_id(),
                 "peer_id" => self.fsm.peer_id(),
                 "start_idx" => start_idx,
-                "end_idx" => compact_to,
+                "end_idx" => persisted_index,
             );
         }
     }
@@ -3632,6 +3634,15 @@ where
             // Raft log size ecceeds the limit.
             || (self.fsm.peer.raft_log_size_hint >= self.ctx.cfg.raft_log_gc_size_limit.0)
         {
+            info!(
+                "choosing applied index";
+                "region_id" => self.fsm.region_id(),
+                "peer_id" => self.fsm.peer.peer_id(),
+                "force_compact" => force_compact,
+                "applied_idx" => applied_idx,
+                "first_idx" => first_idx,
+                "raft_log_size_hint" => self.fsm.peer.raft_log_size_hint,
+            );
             applied_idx
         } else if replicated_idx < first_idx || last_idx - first_idx < 3 {
             // In the current implementation one compaction can't delete all stale Raft logs.
