@@ -154,6 +154,7 @@ where
         &self,
         region_id: u64,
         tablet_suffix: u64,
+        canceled: Arc<AtomicBool>,
         notifier: SyncSender<RaftSnapshot>,
         for_balance: bool,
     ) -> Result<()> {
@@ -164,6 +165,7 @@ where
             region_id,
             tablet_suffix,
             for_balance,
+            canceled,
         ));
         // Only enable the fail point when the region id is equal to 1, which is
         // the id of bootstrapped region in tests.
@@ -205,7 +207,9 @@ where
             IOType::Replication
         });
 
-        if let Err(e) = self.generate_snap(region_id, tablet_suffix, notifier, for_balance) {
+        if let Err(e) =
+            self.generate_snap(region_id, tablet_suffix, canceled, notifier, for_balance)
+        {
             error!(%e; "failed to generate snap!!!"; "region_id" => region_id,);
             return;
         }

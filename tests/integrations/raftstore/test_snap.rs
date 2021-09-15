@@ -574,7 +574,7 @@ fn test_gen_during_heavy_recv() {
     let mut snap_index = snap_apply_state.applied_index;
     let suffix = cluster.region_local_state(r2, 2).get_tablet_suffix();
 
-    let snap = do_snapshot(snap_mgr.clone(), &engine, r2, suffix, true).unwrap();
+    let snap = do_snapshot(snap_mgr.clone(), &engine, r2, suffix, true, Arc::default()).unwrap();
 
     // Keep sending snapshots to store 1.
     let s1_addr = cluster.sim.rl().get_addr(1);

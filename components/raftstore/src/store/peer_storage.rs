@@ -1250,13 +1250,6 @@ where
             )));
         }
 
-        info!(
-            "requesting snapshot";
-            "region_id" => self.region.get_id(),
-            "peer_id" => self.peer_id,
-            "request_index" => request_index,
-        );
-
         if !tried || !last_canceled {
             *tried_cnt += 1;
         }
@@ -1866,6 +1859,7 @@ pub fn do_snapshot<EK, ER>(
     region_id: u64,
     tablet_suffix: u64,
     for_balance: bool,
+    canceled: Arc<AtomicBool>,
 ) -> raft::Result<Snapshot>
 where
     EK: KvEngine,
@@ -1874,6 +1868,20 @@ where
     debug!(
         "begin to generate a snapshot";
         "region_id" => region_id,
+    );
+
+    if mgr.stats().sending_count >= 32 {
+        canceled.store(true, Ordering::Relaxed);
+        return Err(storage_error(format!(
+            "{} too many sending snapshots",
+            region_id
+        )));
+    }
+
+    info!(
+        "generating snapshot";
+        "region_id" => region_id,
+        "tablet_suffix" => tablet_suffix,
     );
 
     let path = mgr.get_temp_path_for_build(region_id);
