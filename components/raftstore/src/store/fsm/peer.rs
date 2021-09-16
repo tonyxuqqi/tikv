@@ -2252,7 +2252,7 @@ where
             }
         }
         // the size of current CompactLog command can be ignored.
-        let remain_cnt = self.fsm.peer.last_applying_idx - index - 1;
+        let remain_cnt = self.fsm.peer.last_applying_idx - state.get_index() - 1;
         self.fsm.peer.raft_log_size_hint =
             self.fsm.peer.raft_log_size_hint * remain_cnt / total_cnt;
         let compact_to = index + 1;
