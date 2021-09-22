@@ -1,7 +1,8 @@
-# Performance Critical Path of read or write requests
-There're some functions that are in the critical path of read or write requests. They're so important to the overall performance that any regression will directly impact user experience. We added a comment [PerformanceCriticalPath] to highlight these critical functions. Please note that not all functions in critical path are marked, for example many short but very common functions are not marked. So please pay special attention when you change code that is itself marked as [PerformanceCriticalPath] or called by functions marked as [PerformanceCriticalPath]. 
-Here're some typical mistakes that should be avoided in these functions.
-* Unnecessary synchronous I/O.
+# Performance Critical Path of user requests
+There're many files whose functions are in the critical path of read or write requests. They're so important to the overall performance that any regression will directly impact user experience. We added a comment #[PerformanceCriticalPath] to highlight these critical files. Please note that this is the best-effort work and it's not possible to mark all files in critical path, but when it's marked please pay special attention when you change its code.
+
+Here're some typical mistakes that should be avoided in the #[PerformanceCriticalPath] files.
+* Unnecessary synchronous I/O. Here 'unnecessary' means it's not a MUST for serving the current user request. For example, on_gc_snap() in peers.rs should not be in Fsm message handling.
 * Verbose logging with infor or above log level.
 * Global lock.
 * Long tasks that do not have to be synchronous.(Could be done in background thread instead.)
