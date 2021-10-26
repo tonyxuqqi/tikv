@@ -1267,6 +1267,7 @@ dependencies = [
  "time 0.1.42",
  "toml",
  "txn_types",
+ "uuid",
 ]
 
 [[package]]

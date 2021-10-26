@@ -27,6 +27,7 @@ use crate::{RocksEngineIterator, RocksSnapshot};
 pub struct RocksEngine {
     db: Arc<DB>,
     shared_block_cache: bool,
+    region_id: u64,
 }
 
 impl RocksEngine {
@@ -34,6 +35,7 @@ impl RocksEngine {
         RocksEngine {
             db,
             shared_block_cache: false,
+            region_id: 0,
         }
     }
 
@@ -71,6 +73,14 @@ impl RocksEngine {
 
     pub fn report_engine_properties(&self, instance: &str, target: &EngineProperties) {
         report_engine_properties(instance, self.shared_block_cache, &target);
+    }
+    
+    pub fn set_region_id(&mut self, region_id: u64) {
+        self.region_id = region_id;
+    }
+
+    pub fn get_region_id(&mut self) -> u64 {
+        self.region_id
     }
 }
 

@@ -2,17 +2,23 @@
 
 use crate::engine::RocksEngine;
 use crate::import::RocksIngestExternalFileOptions;
-use crate::sst::RocksSstWriterBuilder;
+use crate::sst::{RocksSstWriterBuilder, RocksSstReader};
 use crate::{util, RocksSstWriter, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES, ROCKSDB_ESTIMATE_NUM_KEYS};
 use engine_traits::{
     CFNamesExt, DeleteStrategy, ImportExt, IngestExternalFileOptions, IterOptions, Iterable,
     Iterator, MiscExt, Mutable, Range, Result, SstWriter, SstWriterBuilder, WriteBatch,
-    WriteBatchExt, ALL_CFS,
+    WriteBatchExt, ALL_CFS, Error,
 };
 use rocksdb::Range as RocksRange;
 use std::path::PathBuf;
 use tikv_util::box_try;
 use tikv_util::keybuilder::KeyBuilder;
+use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::path::Path;
+use std::string::String;
+use kvproto::import_sstpb::SstMeta;
+use uuid::{Uuid};
 
 pub const MAX_DELETE_COUNT_BY_KEY: usize = 2048;
 
@@ -128,6 +134,52 @@ impl RocksEngine {
         self.sync_wal()?;
         Ok(())
     }
+
+    fn import_sst(&mut self, cf: &str, file: &str, folder: &str, temp_folder: &str, start_key: &[u8], end_key: &[u8]) -> Result<String> {
+        let src_path = Path::new(folder);
+        let path_buf = src_path.join(file.to_string()); 
+        let src_file_path = path_buf.to_str().unwrap();
+        let dst_path = Path::new(temp_folder);
+        let path_buf = dst_path.join(file.to_string());
+        let dst_file_path = path_buf.to_str().unwrap();
+        let env = self.as_inner().env();
+        let sst_reader = RocksSstReader::open_with_env(&src_file_path, env)?;
+        let builder = RocksSstWriterBuilder::new().set_db(RocksEngine::from_ref(self.as_inner())).set_cf(cf);
+        let mut writer = builder.build(dst_file_path)?;
+        sst_reader.scan(start_key, end_key, false, |key, value| {
+            writer.put(key, value).unwrap();
+            Ok(true)
+        }).unwrap();
+        Ok(dst_file_path.to_string())
+    } 
+}
+
+fn path_to_sst_meta<P: AsRef<Path>>(path: P) -> Result<SstMeta> {
+    const SST_SUFFIX: &str = ".sst";
+    let path = path.as_ref();
+    let file_name = match path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => name,
+        None => return Err(Error::Other(format!("invalid file name").into())),
+    };
+
+    // A valid file name should be in the format:
+    // "{uuid}_{region_id}_{region_epoch.conf_ver}_{region_epoch.version}_{cf}.sst"
+    if !file_name.ends_with(SST_SUFFIX) {
+        return Err(Error::Other(format!("invalid file name. Not end with .sst").into()));
+    }
+    let elems: Vec<_> = file_name.trim_end_matches(SST_SUFFIX).split('_').collect();
+    if elems.len() != 5 {
+        return Err(Error::Other(format!("Invalid file name encoding.").into()));
+    }
+
+    let mut meta = SstMeta::default();
+    let uuid = Uuid::parse_str(elems[0]).unwrap();
+    meta.set_uuid(uuid.as_bytes().to_vec());
+    meta.set_region_id(elems[1].parse().unwrap());
+    meta.mut_region_epoch().set_conf_ver(elems[2].parse().unwrap());
+    meta.mut_region_epoch().set_version(elems[3].parse().unwrap());
+    meta.set_cf_name(elems[4].to_owned());
+    Ok(meta)
 }
 
 impl MiscExt for RocksEngine {
@@ -399,6 +451,67 @@ impl MiscExt for RocksEngine {
             checkpoint.create_at(p, u64::MAX)?;
         }
         Ok(())
+    }
+
+    // generate sst files from original sst files that have other region's data
+    // return a HashMap of <original file name : new file path>
+    fn filter_sst(&mut self, sst_folder: &str, start_key: &[u8], end_key: &[u8]) -> HashMap<String, String> {
+        let db = self.as_inner().clone();
+        let cfs = db.cf_names();
+        let mut sst_file_map: HashMap<String, String> = HashMap::new();
+        let mut temp_folder = sst_folder.to_string();
+        if temp_folder.len() == 0 {
+            temp_folder = db.path().to_string() + "/tmp"; 
+        } 
+        for cf in cfs.iter() {
+            let handle = db.cf_handle(cf).unwrap();
+            let column_family_meta = db.get_column_family_meta_data(handle);
+            let level_metas = column_family_meta.get_levels();
+            for level_meta in level_metas.iter() {
+                let sst_file_metas = level_meta.get_files();
+                for sst_file_meta in sst_file_metas.iter() {
+                    let smallest_key = sst_file_meta.get_smallestkey();
+                    let biggest_key = sst_file_meta.get_largestkey();
+                    if (smallest_key.cmp(start_key) != Ordering::Less &&
+                        biggest_key.cmp(end_key) != Ordering::Greater) ||
+                        (smallest_key.cmp(end_key) != Ordering::Less) ||
+                        biggest_key.cmp(start_key) == Ordering::Less {
+                            continue;
+                    }
+                    let file_name = sst_file_meta.get_name(); 
+                    if let Ok(new_sst_file) = self.import_sst(cf, &file_name, db.path(), &temp_folder, start_key, end_key) {
+                        sst_file_map.insert(file_name, new_sst_file); 
+                    }
+                }
+            }
+        }
+        sst_file_map
+    }
+
+    // TODO: add get_cf_files impl;
+    fn get_cf_files(&self, cf: &str, level: usize) -> Result<Vec<SstMeta>> {
+        let db = self.as_inner().clone();
+        let handle = db.cf_handle(cf).unwrap();
+        let column_family_meta = db.get_column_family_meta_data(handle);
+        let level_metas = column_family_meta.get_levels();
+        if level_metas.len() <= level {
+            return Err(Error::Other(
+                format!(
+                    "Invalid level '{}'. Total level is '{}'.",
+                    level, level_metas.len() 
+                )
+                .into(),
+            )); 
+        }
+        Ok(level_metas[level].get_files().iter().map(|sst_meta| path_to_sst_meta(sst_meta.get_name()).unwrap()).collect::<Vec<SstMeta>>())
+    }
+
+    fn get_cf_num_of_level(&self, cf: &str) -> usize {
+        let db = self.as_inner().clone();
+        let handle = db.cf_handle(cf).unwrap();
+        let column_family_meta = db.get_column_family_meta_data(handle);
+        let level_metas = column_family_meta.get_levels();
+        return level_metas.len(); 
     }
 }
 

@@ -49,6 +49,18 @@ pub trait CompactExt {
         max_subcompactions: u32,
         exclude_l0: bool,
     ) -> Result<()>;
+
+    fn set_compaction_filter_key_range(
+        &self,
+        region_id: u64,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+    );
+
+    fn clear_compaction_filter_key_range(
+        &self,
+        region_id: u64,
+    );
 }
 
 pub trait CompactedEvent: Send {

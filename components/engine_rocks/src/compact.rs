@@ -3,7 +3,14 @@
 use crate::engine::RocksEngine;
 use crate::util;
 use engine_traits::{CFNamesExt, CompactExt, Result};
-use rocksdb::{CompactOptions, CompactionOptions, DBCompressionType};
+use rocksdb::{new_compaction_filter_raw, CompactOptions, CompactionOptions, DBCompressionType, CompactionFilter, CompactionFilterContext, CompactionFilterDecision,
+    CompactionFilterFactory, CompactionFilterValueType, DBCompactionFilter};
+use std::ffi::CString;
+use std::vec::Vec;
+use lazy_static::*;
+use std::sync::{Arc, Mutex};
+use collections::HashMap;
+
 use std::cmp;
 
 impl CompactExt for RocksEngine {
@@ -131,6 +138,101 @@ impl CompactExt for RocksEngine {
 
         db.compact_files_cf(handle, &opts, &files, output_level)?;
         Ok(())
+    }
+
+    fn set_compaction_filter_key_range(
+        &self,
+        region_id: u64,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+    ) {
+        CompactionKeyRangeFilterFactory::update_range(region_id, start_key, end_key);
+    }
+
+    fn clear_compaction_filter_key_range(
+        &self,
+        region_id: u64,
+    ) {
+        CompactionKeyRangeFilterFactory::delete_range(region_id);
+    }
+}
+
+pub struct RegionKeyRange {
+    pub start_key: Vec<u8>,
+    pub end_key: Vec<u8>,
+}
+
+pub struct CompactionKeyRangeFilterFactory {
+    pub region_id: u64,
+}
+
+lazy_static! {
+    static ref REGIONS_KEY_RANGE: Arc<Mutex<HashMap<u64, RegionKeyRange>>> = Arc::new(Mutex::new(HashMap::default()));
+}
+
+pub struct CompactionKeyRangeFilter {
+    region_id: u64,
+    start_key: Vec<u8>,
+    end_key: Vec<u8>, 
+    enabled: bool,
+}
+
+impl CompactionFilterFactory for CompactionKeyRangeFilterFactory {
+    fn create_compaction_filter(
+        &self,
+        _context: &CompactionFilterContext,
+    ) -> *mut DBCompactionFilter {
+        
+        let key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
+        let mut start_key = keys::DATA_MIN_KEY.to_vec();
+        let mut end_key = keys::DATA_MAX_KEY.to_vec();
+        let mut enabled = false;
+        if key_range_map.contains_key(&self.region_id) {
+            let key_range = &key_range_map[&self.region_id];
+            enabled = true;
+            start_key = keys::data_key(&key_range.start_key);
+            end_key = keys::data_key(&key_range.end_key);
+        }
+
+        let name = CString::new("key_range_compaction_filter").unwrap();
+        let region_id = self.region_id;
+        let filter = Box::new(CompactionKeyRangeFilter { region_id,start_key, end_key, enabled});
+        unsafe { new_compaction_filter_raw(name, filter) }
+    }
+} 
+
+impl CompactionKeyRangeFilterFactory {
+    fn update_range(region_id: u64, start_key: Vec<u8>, end_key: Vec<u8>) {
+        if region_id == 0 {
+            return;
+        }
+        let mut key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
+        key_range_map.insert(region_id, RegionKeyRange{start_key, end_key});
+    }
+
+    fn delete_range(region_id: u64) {
+        let mut key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
+        key_range_map.remove(&region_id);
+    }
+} 
+
+impl CompactionFilter for CompactionKeyRangeFilter {
+    fn featured_filter(
+        &mut self,
+        _level: usize,
+        key: &[u8],
+        _sequence: u64,
+        _value: &[u8],
+        _value_type: CompactionFilterValueType,
+    ) -> CompactionFilterDecision {
+        if !self.enabled {
+            return CompactionFilterDecision::Keep;
+        }
+
+        if key < self.start_key.as_slice() || key >= self.end_key.as_slice() {
+            return CompactionFilterDecision::Remove;
+        }
+        CompactionFilterDecision::Keep
     }
 }
 

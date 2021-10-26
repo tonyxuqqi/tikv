@@ -9,6 +9,9 @@ use crate::cf_names::CFNamesExt;
 use crate::errors::Result;
 use crate::range::Range;
 use std::path::PathBuf;
+use std::collections::HashMap;
+use std::string::String;
+use kvproto::import_sstpb::SstMeta;
 
 #[derive(Clone, Debug)]
 pub enum DeleteStrategy {
@@ -95,4 +98,10 @@ pub trait MiscExt: CFNamesExt {
     fn is_stalled_or_stopped(&self) -> bool;
 
     fn checkpoint_to(&self, path: &[PathBuf], size_to_flush: u64) -> Result<()>;
+
+    fn filter_sst(&mut self, sst_folder: &str,  start_key: &[u8], end_key: &[u8]) -> HashMap<String, String>;
+
+    fn get_cf_files(&self, cf: &str, level: usize) -> Result<Vec<SstMeta>>;
+
+    fn get_cf_num_of_level(&self, cf: &str) -> usize;
 }

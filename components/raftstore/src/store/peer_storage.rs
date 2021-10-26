@@ -1702,6 +1702,8 @@ where
                 .tablets
                 .open_tablet(self.get_region_id(), self.tablet_suffix.unwrap()),
         );
+        let tablet = self.tablet.as_ref().unwrap().clone();
+        tablet.set_compaction_filter_key_range(self.region.get_id(), self.region.get_start_key().to_vec(), self.region.get_end_key().to_vec()); 
     }
 
     /// Save memory states to disk.

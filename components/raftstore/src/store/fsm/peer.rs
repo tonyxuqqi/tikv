@@ -1948,6 +1948,12 @@ where
         // We can't destroy a peer which is applying snapshot.
         assert!(!self.fsm.peer.is_applying_snapshot());
 
+        self.fsm.peer.get_store().tablet();
+        if let Some(tablet) = self.fsm.peer.get_store().tablet() {
+            let tablet = tablet.clone();
+            tablet.clear_compaction_filter_key_range(region_id); // remove the global compaction filter
+        }
+     
         // Mark itself as pending_remove
         self.fsm.peer.pending_remove = true;
 
@@ -2304,6 +2310,10 @@ where
         for new_region in &regions {
             let new_region_id = new_region.get_id();
 
+            if let Some(tablet) = self.fsm.peer.get_store().tablet() { // update the compaction filter range
+                let tablet = tablet.clone();
+                tablet.set_compaction_filter_key_range(new_region_id, new_region.get_start_key().to_vec(), new_region.get_end_key().to_vec()); 
+            }
             if new_region_id == region_id {
                 write_peer_state(
                     &mut kv_wb,
@@ -2920,6 +2930,16 @@ where
                 self.fsm.peer.tag, prev, meta.region_ranges
             );
         }
+
+        if let Some(tablet) = self.fsm.peer.get_store().tablet() {
+            let tablet = tablet.clone();
+            if region.get_end_key() == source.get_start_key() {
+                tablet.set_compaction_filter_key_range(region.get_id(), region.get_start_key().to_vec(), source.get_end_key().to_vec());
+            } else {
+                tablet.set_compaction_filter_key_range(region.get_id(), source.get_start_key().to_vec(), region.get_end_key().to_vec());
+            }
+        }
+
         meta.region_ranges
             .insert(enc_end_key(&region), region.get_id());
         assert!(meta.regions.remove(&source.get_id()).is_some());
@@ -2957,6 +2977,7 @@ where
             );
             self.fsm.peer.heartbeat_pd(self.ctx);
         }
+
         if let Err(e) = self.ctx.router.force_send(
             source.get_id(),
             PeerMsg::SignificantMsg(SignificantMsg::MergeResult {
@@ -3271,6 +3292,7 @@ where
                     // TODO: clean user properties?
                 }
                 ExecResult::IngestSst { ssts } => self.on_ingest_sst_result(ssts),
+                ExecResult::WaitingPrepareMerge { .. } => {},
             }
         }
 
@@ -3288,72 +3310,72 @@ where
         {
             return Ok(());
         }
-        Err(box_err!("{} merge is not supported", self.fsm.peer.tag))
+        //Err(box_err!("{} merge is not supported", self.fsm.peer.tag))
 
-        //let region = self.fsm.peer.region();
-        //if msg.get_admin_request().has_prepare_merge() {
-        //    // Just for simplicity, do not start region merge while in joint state
-        //    if self.fsm.peer.in_joint_state() {
-        //        return Err(box_err!(
-        //            "{} region in joint state, can not propose merge command, command: {:?}",
-        //            self.fsm.peer.tag,
-        //            msg.get_admin_request()
-        //        ));
-        //    }
-        //    let target_region = msg.get_admin_request().get_prepare_merge().get_target();
-        //    {
-        //        let meta = self.ctx.store_meta.lock().unwrap();
-        //        match meta.regions.get(&target_region.get_id()) {
-        //            Some(r) => {
-        //                if r != target_region {
-        //                    return Err(box_err!(
-        //                        "target region not matched, skip proposing: {:?} != {:?}",
-        //                        r,
-        //                        target_region
-        //                    ));
-        //                }
-        //            }
-        //            None => {
-        //                return Err(box_err!(
-        //                    "target region {} doesn't exist.",
-        //                    target_region.get_id()
-        //                ));
-        //            }
-        //        }
-        //    }
-        //    if !util::is_sibling_regions(target_region, region) {
-        //        return Err(box_err!(
-        //            "{:?} and {:?} are not sibling, skip proposing.",
-        //            target_region,
-        //            region
-        //        ));
-        //    }
-        //    if !util::region_on_same_stores(target_region, region) {
-        //        return Err(box_err!(
-        //            "peers doesn't match {:?} != {:?}, reject merge",
-        //            region.get_peers(),
-        //            target_region.get_peers()
-        //        ));
-        //    }
-        //} else {
-        //    let source_region = msg.get_admin_request().get_commit_merge().get_source();
-        //    if !util::is_sibling_regions(source_region, region) {
-        //        return Err(box_err!(
-        //            "{:?} and {:?} should be sibling",
-        //            source_region,
-        //            region
-        //        ));
-        //    }
-        //    if !util::region_on_same_stores(source_region, region) {
-        //        return Err(box_err!(
-        //            "peers not matched: {:?} {:?}",
-        //            source_region,
-        //            region
-        //        ));
-        //    }
-        //}
+        let region = self.fsm.peer.region();
+        if msg.get_admin_request().has_prepare_merge() {
+            // Just for simplicity, do not start region merge while in joint state
+            if self.fsm.peer.in_joint_state() {
+                return Err(box_err!(
+                    "{} region in joint state, can not propose merge command, command: {:?}",
+                    self.fsm.peer.tag,
+                    msg.get_admin_request()
+                ));
+            }
+            let target_region = msg.get_admin_request().get_prepare_merge().get_target();
+            {
+                let meta = self.ctx.store_meta.lock().unwrap();
+                match meta.regions.get(&target_region.get_id()) {
+                    Some(r) => {
+                        if r != target_region {
+                            return Err(box_err!(
+                                "target region not matched, skip proposing: {:?} != {:?}",
+                                r,
+                                target_region
+                            ));
+                        }
+                    }
+                    None => {
+                        return Err(box_err!(
+                            "target region {} doesn't exist.",
+                            target_region.get_id()
+                        ));
+                    }
+                }
+            }
+            if !util::is_sibling_regions(target_region, region) {
+                return Err(box_err!(
+                    "{:?} and {:?} are not sibling, skip proposing.",
+                    target_region,
+                    region
+                ));
+            }
+            if !util::region_on_same_stores(target_region, region) {
+                return Err(box_err!(
+                    "peers doesn't match {:?} != {:?}, reject merge",
+                    region.get_peers(),
+                    target_region.get_peers()
+                ));
+            }
+        } else {
+            let source_region = msg.get_admin_request().get_commit_merge().get_source();
+            if !util::is_sibling_regions(source_region, region) {
+                return Err(box_err!(
+                    "{:?} and {:?} should be sibling",
+                    source_region,
+                    region
+                ));
+            }
+            if !util::region_on_same_stores(source_region, region) {
+                return Err(box_err!(
+                    "peers not matched: {:?} {:?}",
+                    source_region,
+                    region
+                ));
+            }
+        }
 
-        //Ok(())
+        Ok(())
     }
 
     fn pre_propose_raft_command(

@@ -51,6 +51,22 @@ impl CompactExt for PanicEngine {
     ) -> Result<()> {
         panic!()
     }
+
+    fn set_compaction_filter_key_range(
+        &self,
+        region_id: u64,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+    ) {
+        panic!()
+    }
+
+    fn clear_compaction_filter_key_range(
+        &self,
+        region_id: u64,
+    ) {
+        panic!()
+    }
 }
 
 pub struct PanicCompactedEvent;

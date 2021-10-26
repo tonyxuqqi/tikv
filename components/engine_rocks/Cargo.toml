@@ -68,6 +68,7 @@ kvproto = { git = "https://github.com/busyjay/kvproto.git", branch = "test-cloud
 raft = { version = "0.6.0-alpha", default-features = false }
 protobuf = "2"
 fail = "0.4"
+uuid = { version = "0.8.1", features = ["serde", "v4"] }
 
 [dependencies.rocksdb]
 git = "https://github.com/busyjay/rust-rocksdb.git"

@@ -18,6 +18,7 @@ use tikv_util::time::Instant;
 use tikv_util::{box_err, box_try, defer, error, info, thd_name, warn};
 
 use crate::coprocessor::CoprocessorHost;
+use crate::store::fsm::apply::BgTaskResult;
 use crate::store::peer_storage::{
     JOB_STATUS_CANCELLED, JOB_STATUS_CANCELLING, JOB_STATUS_FAILED, JOB_STATUS_FINISHED,
     JOB_STATUS_PENDING, JOB_STATUS_RUNNING,
@@ -30,7 +31,10 @@ use crate::store::{
 use yatp::pool::{Builder, ThreadPool};
 use yatp::task::future::TaskCell;
 
+use engine_traits::DATA_CFS;
 use file_system::{IOType, WithIOType};
+use sst_importer::{sst_meta_to_path, Config as ImportConfig, SSTImporter};
+use std::path::Path;
 use tikv_util::worker::{Runnable, RunnableWithTimer};
 
 use super::metrics::*;
@@ -49,7 +53,7 @@ pub const STALE_PEER_CHECK_TICK: usize = 10; // 10000 milliseconds
 pub const PENDING_APPLY_CHECK_INTERVAL: u64 = 1_000; // 1000 milliseconds
 
 /// Region related task
-#[derive(Debug)]
+//#[derive(Debug)]
 pub enum Task {
     Gen {
         region_id: u64,
@@ -70,6 +74,31 @@ pub enum Task {
         tablet_suffix: u64,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
+    },
+    SourceRegionPrepareMerge {
+        region_id: u64,
+        tablet_suffix: u64,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        notifier: SyncSender<BgTaskResult>,
+        cb: Box<dyn FnOnce(u64) + Send>,
+    },
+    TargetRegionPrepareMerge {
+        region_id: u64,
+        tablet_suffix: u64,
+        start_key: Vec<u8>,
+        end_key: Vec<u8>,
+        notifier: SyncSender<BgTaskResult>,
+        cb: Box<dyn FnOnce(u64) + Send>,
+    },
+    TargetRegionIngestSST {
+        src_region_id: u64,
+        src_tablet_suffix: u64,
+        dst_region_id: u64,
+        dst_tablet_suffix: u64,
+        sst_file_maps: std::collections::HashMap<String, String>,
+        notifier: SyncSender<BgTaskResult>,
+        cb: Box<dyn FnOnce(u64) + Send>,
     },
 }
 
@@ -106,6 +135,24 @@ impl Display for Task {
                 tablet_suffix,
                 log_wrappers::Value::key(&start_key),
                 log_wrappers::Value::key(&end_key)
+            ),
+            Task::SourceRegionPrepareMerge { region_id, .. } => write!(
+                f,
+                "SourceRegionPrepareMerge for source region:{}",
+                region_id,
+            ),
+            Task::TargetRegionPrepareMerge { region_id, .. } => {
+                write!(f, "PrepareTargetMerge for {}", region_id)
+            }
+            Task::TargetRegionIngestSST {
+                src_region_id,
+                src_tablet_suffix: _,
+                dst_region_id,
+                ..
+            } => write!(
+                f,
+                "TargetRegionIngestSST for {} {}",
+                src_region_id, dst_region_id
             ),
         }
     }
@@ -619,6 +666,163 @@ where
                 // try to delete stale ranges if there are any
                 if !self.ctx.ingest_maybe_stall(&tablet) {
                     self.ctx.clean_stale_ranges();
+                }
+            }
+            Task::SourceRegionPrepareMerge {
+                region_id,
+                tablet_suffix,
+                start_key,
+                end_key,
+                notifier,
+                cb,
+            } => {
+                let mut tablet = match self
+                    .ctx
+                    .engines
+                    .tablets
+                    .open_tablet_cache(region_id, tablet_suffix)
+                {
+                    Some(t) => t,
+                    None => return,
+                };
+                let result = tablet.filter_sst("", &start_key, &end_key);
+                let result = BgTaskResult::SourceRegionPrepareMergeResult {
+                    region_id,
+                    tablet_suffix,
+                    sst_file_maps: result,
+                };
+
+                if let Err(e) = notifier.try_send(result) {
+                    info!(
+                        "failed to notify filter sst";
+                        "region_id" => region_id,
+                        "err" => %e,
+                    );
+                } else {
+                    cb(region_id);
+                }
+            }
+            Task::TargetRegionPrepareMerge {
+                region_id,
+                tablet_suffix,
+                start_key,
+                end_key,
+                notifier,
+                cb,
+            } => {
+                let tablet = match self
+                    .ctx
+                    .engines
+                    .tablets
+                    .open_tablet_cache(region_id, tablet_suffix)
+                {
+                    Some(t) => t,
+                    None => return,
+                };
+                for cf in DATA_CFS {
+                    tablet
+                        .compact_range(
+                            cf,
+                            Some(keys::DATA_MIN_KEY),
+                            Some(keys::data_key(start_key.as_slice()).as_slice()),
+                            false,
+                            1, /* threads */
+                        )
+                        .unwrap();
+                    tablet
+                        .compact_range(
+                            cf,
+                            Some(keys::data_key(end_key.as_slice()).as_slice()),
+                            Some(keys::DATA_MAX_KEY),
+                            false,
+                            1, /* threads */
+                        )
+                        .unwrap();
+                }
+                if let Err(e) = notifier.try_send(BgTaskResult::TargetRegionPrepareMergeResult {
+                    region_id,
+                    tablet_suffix,
+                }) {
+                    info!(
+                        "failed to notify filter sst";
+                        "region_id" => region_id,
+                        "err" => %e,
+                    );
+                } else {
+                    cb(region_id);
+                }
+            }
+            Task::TargetRegionIngestSST {
+                src_region_id,
+                src_tablet_suffix,
+                dst_region_id,
+                dst_tablet_suffix,
+                sst_file_maps,
+                notifier,
+                cb,
+            } => {
+                let src_tablet = match self
+                    .ctx
+                    .engines
+                    .tablets
+                    .open_tablet_cache(src_region_id, src_tablet_suffix)
+                {
+                    Some(t) => t,
+                    None => return,
+                };
+                let dst_tablet = match self
+                    .ctx
+                    .engines
+                    .tablets
+                    .open_tablet_cache(dst_region_id, dst_tablet_suffix)
+                {
+                    Some(t) => t,
+                    None => return,
+                };
+                let src_path = src_tablet.path();
+                let src_sst_importer =
+                    SSTImporter::new(&ImportConfig::default(), Path::new(src_path), None).unwrap();
+                let src_tmp_sst_importer = SSTImporter::new(
+                    &ImportConfig::default(),
+                    Path::new(&(src_path.to_string() + "/tmp")),
+                    None,
+                )
+                .unwrap();
+                for cf in src_tablet.cf_names() {
+                    let num_of_level = src_tablet.get_cf_num_of_level(cf);
+                    for i in 0..num_of_level {
+                        let level = num_of_level - i - 1;
+                        let sst_metas = src_tablet.get_cf_files(cf, level).unwrap();
+                        let mut valid_sst_metas: Vec<kvproto::import_sstpb::SstMeta> = vec![];
+                        let mut additional_sst_metas: Vec<kvproto::import_sstpb::SstMeta> = vec![];
+                        for sst_meta in &sst_metas {
+                            let file_name = sst_meta_to_path(sst_meta).unwrap();
+                            let file_name = file_name.to_str().unwrap();
+                            if sst_file_maps.contains_key(file_name) {
+                                additional_sst_metas.push(sst_meta.clone());
+                            } else {
+                                valid_sst_metas.push(sst_meta.clone());
+                            }
+                        }
+                        src_sst_importer
+                            .ingest(&valid_sst_metas, &dst_tablet)
+                            .unwrap(); // TODO: error handling
+                        src_tmp_sst_importer
+                            .ingest(&additional_sst_metas, &dst_tablet)
+                            .unwrap();
+                    }
+                }
+
+                if let Err(e) = notifier.try_send(BgTaskResult::TargetRegionIngestSSTResult {
+                    region_id: dst_region_id,
+                }) {
+                    info!(
+                        "failed to notify filter sst";
+                        "region_id" => dst_region_id,
+                        "err" => %e,
+                    );
+                } else {
+                    cb(dst_region_id);
                 }
             }
         }

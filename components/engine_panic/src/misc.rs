@@ -3,6 +3,9 @@
 use crate::engine::PanicEngine;
 use engine_traits::{DeleteStrategy, MiscExt, Range, Result};
 use std::path::PathBuf;
+use std::collections::HashMap;
+use std::string::String;
+use kvproto::import_sstpb::SstMeta;
 
 impl MiscExt for PanicEngine {
     fn flush(&self, sync: bool) -> Result<()> {
@@ -95,6 +98,18 @@ impl MiscExt for PanicEngine {
     }
 
     fn checkpoint_to(&self, path: &[PathBuf], size_to_flush: u64) -> Result<()> {
+        panic!()
+    }
+
+    fn filter_sst(&mut self, sst_folder: &str, start_key: &[u8], end_key: &[u8]) -> HashMap<String, String> {
+        panic!()
+    }
+
+    fn get_cf_files(&self, cf: &str, level: usize) -> Result<Vec<SstMeta>> {
+        panic!()
+    }
+
+    fn get_cf_num_of_level(&self, cf: &str) -> usize {
         panic!()
     }
 }

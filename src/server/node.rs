@@ -17,8 +17,8 @@ use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::raw::{Cache, Env, RateLimiter, WriteBufferManager};
 use engine_rocks::{
-    CompactionListener, RocksCompactedEvent, RocksCompactionJobInfo, RocksEngine, RocksdbLogger,
-    Statistics,
+    CompactionKeyRangeFilterFactory, CompactionListener, RocksCompactedEvent,
+    RocksCompactionJobInfo, RocksEngine, RocksdbLogger, Statistics,
 };
 use engine_traits::{
     CompactionJobInfo, Engines, Peekable, RaftEngine, TabletFactory, CF_DEFAULT, CF_WRITE,
@@ -178,10 +178,16 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
             self.inner.region_info_accessor.as_ref(),
             self.inner.enable_ttl,
         );
-        if readonly {
-            for cf_opt in &mut kv_cfs_opts {
+        for cf_opt in &mut kv_cfs_opts {
+            if readonly {
                 cf_opt.options_mut().set_disable_auto_compactions(true);
             }
+            cf_opt.options_mut().set_compaction_filter_factory(
+                "compaction_key_range_filter",
+                Box::new(CompactionKeyRangeFilterFactory {
+                    region_id: tablet_id,
+                })
+            ).unwrap();
         }
         let kv_engine = engine_rocks::raw_util::new_engine_opt(
             tablet_path.to_str().unwrap(),
@@ -192,6 +198,7 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
         let mut kv_engine = RocksEngine::from_db(Arc::new(kv_engine));
         let shared_block_cache = self.inner.block_cache.is_some();
         kv_engine.set_shared_block_cache(shared_block_cache);
+        kv_engine.set_region_id(tablet_id);
         kv_engine
     }
 
