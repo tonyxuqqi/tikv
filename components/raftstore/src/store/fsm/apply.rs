@@ -375,6 +375,12 @@ pub enum BgTaskResult {
     }
 }
 
+impl Debug for BgTaskResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", "BgTaskResult")
+    }
+}
+
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct PrepareMergeTaskResult {

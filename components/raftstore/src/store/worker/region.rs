@@ -1197,8 +1197,8 @@ mod tests {
         );
         worker.start_with_timer(runner);
 
-        let mut finished_region_id = 0;
-        let source_region_prepare_merge = |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
+        
+        let run_and_wait_prepare_merge_task = |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
             // construct snapshot
             let (tx, rx) = mpsc::sync_channel(1);
             sched
@@ -1208,184 +1208,25 @@ mod tests {
                     start_key,
                     end_key,
                     notifier: tx,
-                    cb: Box::new(move |region_id| {
-                        finished_region_id = region_id; 
+                    cb: Box::new(move|region_id| {
+                        assert_eq!(region_id, id);
                     }), 
                 })
                 .unwrap();
-            let task_result = rx.recv().unwrap();
-            match receiver.recv() {
+            let task_result = rx.recv();
+            match task_result {
                 Ok(BgTaskResult::SourceRegionPrepareMergeResult {
                     region_id,
                     tablet_suffix,
-                    sst_file_maps: result}) => {
-                    
+                    sst_file_maps}) => {
+                        assert_eq!(region_id, id);
+                        assert_eq!(tablet_suffix, 0);
+                        assert!(sst_file_maps.len() != 0);
                 }
                 msg => panic!("expected SourceRegionPrepareMergeResult, but got {:?}", msg),
             }
-            assert_eq!(task_result.region_id, region_id);
-            assert_eq!(task_result.tablet_suffix, )
-
-            // set applying state
-            let mut wb = engine.kv.write_batch();
-            let region_key = keys::region_state_key(id);
-            let mut region_state = engine
-                .kv
-                .get_msg_cf::<RegionLocalState>(CF_RAFT, &region_key)
-                .unwrap()
-                .unwrap();
-            region_state.set_state(PeerState::Applying);
-            wb.put_msg_cf(CF_RAFT, &region_key, &region_state).unwrap();
-            wb.write().unwrap();
-
-            // apply snapshot
-            let status = Arc::new(AtomicUsize::new(JOB_STATUS_PENDING));
-            sched
-                .schedule(Task::Apply {
-                    region_id: id,
-                    status,
-                })
-                .unwrap();
-        };
-        let wait_apply_finish = |id: u64| {
-            let region_key = keys::region_state_key(id);
-            loop {
-                thread::sleep(Duration::from_millis(100));
-                if engine
-                    .kv
-                    .get_msg_cf::<RegionLocalState>(CF_RAFT, &region_key)
-                    .unwrap()
-                    .unwrap()
-                    .get_state()
-                    == PeerState::Normal
-                {
-                    break;
-                }
-            }
         };
 
-        // snapshot will not ingest cause already write stall
-        gen_and_apply_snap(1);
-        assert_eq!(
-            engine
-                .kv
-                .get_cf_num_files_at_level(CF_DEFAULT, 0)
-                .unwrap()
-                .unwrap(),
-            6
-        );
-
-        // compact all files to the bottomest level
-        engine.kv.compact_files_in_range(None, None, None).unwrap();
-        assert_eq!(
-            engine
-                .kv
-                .get_cf_num_files_at_level(CF_DEFAULT, 0)
-                .unwrap()
-                .unwrap(),
-            0
-        );
-
-        wait_apply_finish(1);
-
-        // the pending apply task should be finished and snapshots are ingested.
-        // note that when ingest sst, it may flush memtable if overlap,
-        // so here will two level 0 files.
-        assert_eq!(
-            engine
-                .kv
-                .get_cf_num_files_at_level(CF_DEFAULT, 0)
-                .unwrap()
-                .unwrap(),
-            2
-        );
-
-        // no write stall, ingest without delay
-        gen_and_apply_snap(2);
-        wait_apply_finish(2);
-        assert_eq!(
-            engine
-                .kv
-                .get_cf_num_files_at_level(CF_DEFAULT, 0)
-                .unwrap()
-                .unwrap(),
-            4
-        );
-
-        // snapshot will not ingest cause it may cause write stall
-        gen_and_apply_snap(3);
-        assert_eq!(
-            engine
-                .kv
-                .get_cf_num_files_at_level(CF_DEFAULT, 0)
-                .unwrap()
-                .unwrap(),
-            4
-        );
-        gen_and_apply_snap(4);
-        assert_eq!(
-            engine
-                .kv
-                .get_cf_num_files_at_level(CF_DEFAULT, 0)
-                .unwrap()
-                .unwrap(),
-            4
-        );
-        gen_and_apply_snap(5);
-        assert_eq!(
-            engine
-                .kv
-                .get_cf_num_files_at_level(CF_DEFAULT, 0)
-                .unwrap()
-                .unwrap(),
-            4
-        );
-
-        // compact all files to the bottomest level
-        engine.kv.compact_files_in_range(None, None, None).unwrap();
-        assert_eq!(
-            engine
-                .kv
-                .get_cf_num_files_at_level(CF_DEFAULT, 0)
-                .unwrap()
-                .unwrap(),
-            0
-        );
-
-        // make sure have checked pending applies
-        wait_apply_finish(4);
-
-        // before two pending apply tasks should be finished and snapshots are ingested
-        // and one still in pending.
-        assert_eq!(
-            engine
-                .kv
-                .get_cf_num_files_at_level(CF_DEFAULT, 0)
-                .unwrap()
-                .unwrap(),
-            4
-        );
-
-        // make sure have checked pending applies
-        engine.kv.compact_files_in_range(None, None, None).unwrap();
-        assert_eq!(
-            engine
-                .kv
-                .get_cf_num_files_at_level(CF_DEFAULT, 0)
-                .unwrap()
-                .unwrap(),
-            0
-        );
-        wait_apply_finish(5);
-
-        // the last one pending task finished
-        assert_eq!(
-            engine
-                .kv
-                .get_cf_num_files_at_level(CF_DEFAULT, 0)
-                .unwrap()
-                .unwrap(),
-            2
-        );
+        run_and_wait_prepare_merge_task(1, vec![0], vec![1]);
     }
 }
