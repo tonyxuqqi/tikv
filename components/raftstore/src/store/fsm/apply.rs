@@ -4779,7 +4779,7 @@ mod tests {
         };
         match snapshot_rx.recv_timeout(Duration::from_secs(3)) {
             Ok(Some(RegionTask::Gen { .. })) => (),
-            e => panic!("unexpected apply result: {:?}", e),
+            e => panic!("unexpected apply result"),
         }
         assert_eq!(apply_res.region_id, 2);
         assert_eq!(apply_res.apply_state.get_applied_index(), 5);

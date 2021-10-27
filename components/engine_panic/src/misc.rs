@@ -1,7 +1,7 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
 
 use crate::engine::PanicEngine;
-use engine_traits::{DeleteStrategy, MiscExt, Range, Result};
+use engine_traits::{DeleteStrategy, MiscExt, Range, Result, SSTFile};
 use std::path::PathBuf;
 use std::collections::HashMap;
 use std::string::String;
@@ -105,7 +105,7 @@ impl MiscExt for PanicEngine {
         panic!()
     }
 
-    fn get_cf_files(&self, cf: &str, level: usize) -> Result<Vec<SstMeta>> {
+    fn get_cf_files(&self, cf: &str, level: usize) -> Result<Vec<SSTFile>> {
         panic!()
     }
 

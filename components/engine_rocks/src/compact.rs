@@ -182,7 +182,17 @@ impl CompactionFilterFactory for CompactionKeyRangeFilterFactory {
         &self,
         _context: &CompactionFilterContext,
     ) -> *mut DBCompactionFilter {
-        
+        let filter = self.create_filter();
+        let filter = Box::new(filter);
+        let name = CString::new("key_range_compaction_filter").unwrap();
+        unsafe { new_compaction_filter_raw(name, filter) }
+    }
+} 
+
+impl CompactionKeyRangeFilterFactory {
+    pub fn create_filter(
+        &self,
+    ) -> CompactionKeyRangeFilter {
         let key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
         let mut start_key = keys::DATA_MIN_KEY.to_vec();
         let mut end_key = keys::DATA_MAX_KEY.to_vec();
@@ -194,14 +204,10 @@ impl CompactionFilterFactory for CompactionKeyRangeFilterFactory {
             end_key = keys::data_key(&key_range.end_key);
         }
 
-        let name = CString::new("key_range_compaction_filter").unwrap();
         let region_id = self.region_id;
-        let filter = Box::new(CompactionKeyRangeFilter { region_id,start_key, end_key, enabled});
-        unsafe { new_compaction_filter_raw(name, filter) }
+        CompactionKeyRangeFilter { region_id,start_key, end_key, enabled}
     }
-} 
 
-impl CompactionKeyRangeFilterFactory {
     fn update_range(region_id: u64, start_key: Vec<u8>, end_key: Vec<u8>) {
         if region_id == 0 {
             return;
@@ -244,6 +250,7 @@ mod tests {
     use rocksdb::{ColumnFamilyOptions, Writable};
     use std::sync::Arc;
     use tempfile::Builder;
+    use super::*;
 
     #[test]
     fn test_compact_files_in_range() {
@@ -347,5 +354,36 @@ mod tests {
             assert_eq!(cf_levels[0].get_files().len(), 1);
             assert_eq!(cf_levels[3].get_files().len(), 1);
         }
+    }
+
+    #[test]
+    fn test_set_compaction_factory_update_range() {
+        let region_id = 1;
+        CompactionKeyRangeFilterFactory::update_range(region_id, b"k0".to_vec(), b"k5".to_vec()); 
+        {
+            let key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
+            assert!(key_range_map.contains_key(&region_id));
+        }
+        CompactionKeyRangeFilterFactory::delete_range(region_id);
+        {
+            let key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
+            assert!(!key_range_map.contains_key(&region_id));
+        }
+        CompactionKeyRangeFilterFactory::delete_range(region_id);
+        {
+            let key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
+            assert!(!key_range_map.contains_key(&region_id));
+        }
+    }
+
+    #[test]
+    fn test_create_compaction_key_range_filter() {
+        let region_id = 1;
+        let factory = CompactionKeyRangeFilterFactory {region_id};
+        CompactionKeyRangeFilterFactory::update_range(region_id, b"k0".to_vec(), b"k5".to_vec());
+        let filter = factory.create_filter();
+        assert_eq!(filter.region_id, region_id);
+        assert_eq!(filter.start_key, keys::data_key(b"k0"));
+        assert_eq!(filter.end_key, keys::data_key(b"k5"));
     }
 }

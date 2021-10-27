@@ -2,23 +2,21 @@
 
 use crate::engine::RocksEngine;
 use crate::import::RocksIngestExternalFileOptions;
-use crate::sst::{RocksSstWriterBuilder, RocksSstReader};
+use crate::sst::{RocksSstReader, RocksSstWriterBuilder};
 use crate::{util, RocksSstWriter, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES, ROCKSDB_ESTIMATE_NUM_KEYS};
 use engine_traits::{
-    CFNamesExt, DeleteStrategy, ImportExt, IngestExternalFileOptions, IterOptions, Iterable,
-    Iterator, MiscExt, Mutable, Range, Result, SstWriter, SstWriterBuilder, WriteBatch,
-    WriteBatchExt, ALL_CFS, Error,
+    CFNamesExt, DeleteStrategy, Error, ImportExt, IngestExternalFileOptions, IterOptions, Iterable,
+    Iterator, MiscExt, Mutable, Range, Result, SSTFile, SstWriter, SstWriterBuilder, WriteBatch,
+    WriteBatchExt, ALL_CFS,
 };
 use rocksdb::Range as RocksRange;
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
+use std::string::String;
 use tikv_util::box_try;
 use tikv_util::keybuilder::KeyBuilder;
-use std::collections::HashMap;
-use std::cmp::Ordering;
-use std::path::Path;
-use std::string::String;
-use kvproto::import_sstpb::SstMeta;
-use uuid::{Uuid};
 
 pub const MAX_DELETE_COUNT_BY_KEY: usize = 2048;
 
@@ -135,51 +133,37 @@ impl RocksEngine {
         Ok(())
     }
 
-    fn import_sst(&mut self, cf: &str, file: &str, folder: &str, temp_folder: &str, start_key: &[u8], end_key: &[u8]) -> Result<String> {
-        let src_path = Path::new(folder);
-        let path_buf = src_path.join(file.to_string()); 
-        let src_file_path = path_buf.to_str().unwrap();
-        let dst_path = Path::new(temp_folder);
-        let path_buf = dst_path.join(file.to_string());
-        let dst_file_path = path_buf.to_str().unwrap();
+    fn import_sst(
+        &mut self,
+        cf: &str,
+        file: &str,
+        folder: &str,
+        temp_folder: &str,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Result<String> {
+        let src_file_path = folder.to_string() + file;
+        let dst_file_path = temp_folder.to_string() + file;
+        println!(
+            "file:{}, folder:{}, temp_folder:{}, src file path {}, dst file path {}",
+            file, folder, temp_folder, src_file_path, dst_file_path
+        );
         let env = self.as_inner().env();
         let sst_reader = RocksSstReader::open_with_env(&src_file_path, env)?;
-        let builder = RocksSstWriterBuilder::new().set_db(RocksEngine::from_ref(self.as_inner())).set_cf(cf);
-        let mut writer = builder.build(dst_file_path)?;
-        sst_reader.scan(start_key, end_key, false, |key, value| {
-            writer.put(key, value).unwrap();
-            Ok(true)
-        }).unwrap();
-        Ok(dst_file_path.to_string())
-    } 
-}
-
-fn path_to_sst_meta<P: AsRef<Path>>(path: P) -> Result<SstMeta> {
-    const SST_SUFFIX: &str = ".sst";
-    let path = path.as_ref();
-    let file_name = match path.file_name().and_then(|n| n.to_str()) {
-        Some(name) => name,
-        None => return Err(Error::Other(format!("invalid file name").into())),
-    };
-
-    // A valid file name should be in the format:
-    // "{uuid}_{region_id}_{region_epoch.conf_ver}_{region_epoch.version}_{cf}.sst"
-    if !file_name.ends_with(SST_SUFFIX) {
-        return Err(Error::Other(format!("invalid file name. Not end with .sst").into()));
+        fs::create_dir_all(temp_folder)?;
+        let builder = RocksSstWriterBuilder::new()
+            .set_db(RocksEngine::from_ref(self.as_inner()))
+            .set_cf(cf);
+        let mut writer = builder.build(&dst_file_path)?;
+        sst_reader
+            .scan(start_key, end_key, false, |key, value| {
+                writer.put(key, value).unwrap();
+                Ok(true)
+            })
+            .unwrap();
+        writer.finish().unwrap();
+        Ok(dst_file_path)
     }
-    let elems: Vec<_> = file_name.trim_end_matches(SST_SUFFIX).split('_').collect();
-    if elems.len() != 5 {
-        return Err(Error::Other(format!("Invalid file name encoding.").into()));
-    }
-
-    let mut meta = SstMeta::default();
-    let uuid = Uuid::parse_str(elems[0]).unwrap();
-    meta.set_uuid(uuid.as_bytes().to_vec());
-    meta.set_region_id(elems[1].parse().unwrap());
-    meta.mut_region_epoch().set_conf_ver(elems[2].parse().unwrap());
-    meta.mut_region_epoch().set_version(elems[3].parse().unwrap());
-    meta.set_cf_name(elems[4].to_owned());
-    Ok(meta)
 }
 
 impl MiscExt for RocksEngine {
@@ -455,32 +439,57 @@ impl MiscExt for RocksEngine {
 
     // generate sst files from original sst files that have other region's data
     // return a HashMap of <original file name : new file path>
-    fn filter_sst(&mut self, sst_folder: &str, start_key: &[u8], end_key: &[u8]) -> HashMap<String, String> {
+    fn filter_sst(
+        &mut self,
+        sst_folder: &str,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> HashMap<String, String> {
         let db = self.as_inner().clone();
         let cfs = db.cf_names();
         let mut sst_file_map: HashMap<String, String> = HashMap::new();
         let mut temp_folder = sst_folder.to_string();
         if temp_folder.len() == 0 {
-            temp_folder = db.path().to_string() + "/tmp"; 
-        } 
+            temp_folder = db.path().to_string() + "/tmp";
+        }
         for cf in cfs.iter() {
             let handle = db.cf_handle(cf).unwrap();
             let column_family_meta = db.get_column_family_meta_data(handle);
             let level_metas = column_family_meta.get_levels();
             for level_meta in level_metas.iter() {
                 let sst_file_metas = level_meta.get_files();
+                println!("sst files for cf {} {}", cf, sst_file_metas.len());
                 for sst_file_meta in sst_file_metas.iter() {
                     let smallest_key = sst_file_meta.get_smallestkey();
                     let biggest_key = sst_file_meta.get_largestkey();
-                    if (smallest_key.cmp(start_key) != Ordering::Less &&
-                        biggest_key.cmp(end_key) != Ordering::Greater) ||
-                        (smallest_key.cmp(end_key) != Ordering::Less) ||
-                        biggest_key.cmp(start_key) == Ordering::Less {
-                            continue;
+                    if smallest_key.cmp(start_key) != Ordering::Less
+                        && biggest_key.cmp(end_key) != Ordering::Greater
+                    {
+                        println!("skipping {}", sst_file_meta.get_name());
+                        continue;
+                    } else if (smallest_key.cmp(end_key) != Ordering::Less)
+                        || (biggest_key.cmp(start_key) == Ordering::Less)
+                    {
+                        sst_file_map.insert(sst_file_meta.get_name(), "".to_string());
+                        continue;
                     }
-                    let file_name = sst_file_meta.get_name(); 
-                    if let Ok(new_sst_file) = self.import_sst(cf, &file_name, db.path(), &temp_folder, start_key, end_key) {
-                        sst_file_map.insert(file_name, new_sst_file); 
+                    let file_name = sst_file_meta.get_name();
+                    let result = self.import_sst(
+                        cf,
+                        &file_name,
+                        db.path(),
+                        &temp_folder,
+                        start_key,
+                        end_key,
+                    );
+                    match result {
+                        Ok(new_sst_file) => {
+                            println!("sst_file_map insert {}", &new_sst_file);
+                            sst_file_map.insert(file_name, new_sst_file);
+                        }
+                        Err(err) => {
+                            println!("import_sst failed {:?}", err);
+                        }
                     }
                 }
             }
@@ -489,7 +498,7 @@ impl MiscExt for RocksEngine {
     }
 
     // TODO: add get_cf_files impl;
-    fn get_cf_files(&self, cf: &str, level: usize) -> Result<Vec<SstMeta>> {
+    fn get_cf_files(&self, cf: &str, level: usize) -> Result<Vec<SSTFile>> {
         let db = self.as_inner().clone();
         let handle = db.cf_handle(cf).unwrap();
         let column_family_meta = db.get_column_family_meta_data(handle);
@@ -498,12 +507,21 @@ impl MiscExt for RocksEngine {
             return Err(Error::Other(
                 format!(
                     "Invalid level '{}'. Total level is '{}'.",
-                    level, level_metas.len() 
+                    level,
+                    level_metas.len()
                 )
                 .into(),
-            )); 
+            ));
         }
-        Ok(level_metas[level].get_files().iter().map(|sst_meta| path_to_sst_meta(sst_meta.get_name()).unwrap()).collect::<Vec<SstMeta>>())
+        Ok(level_metas[level]
+            .get_files()
+            .iter()
+            .map(|sst_meta| SSTFile {
+                cf_name: cf.to_string(),
+                file_name: sst_meta.get_name(),
+                file_size: sst_meta.get_size(),
+            })
+            .collect::<Vec<SSTFile>>())
     }
 
     fn get_cf_num_of_level(&self, cf: &str) -> usize {
@@ -511,7 +529,7 @@ impl MiscExt for RocksEngine {
         let handle = db.cf_handle(cf).unwrap();
         let column_family_meta = db.get_column_family_meta_data(handle);
         let level_metas = column_family_meta.get_levels();
-        return level_metas.len(); 
+        return level_metas.len();
     }
 }
 
@@ -595,6 +613,47 @@ mod tests {
                 .collect();
         }
         check_data(&db, ALL_CFS, kvs_left.as_slice());
+    }
+
+    fn prepare_db(path_str: &str, origin_keys: &[Vec<u8>]) -> Arc<DB> {
+        let cfs_opts = ALL_CFS
+            .iter()
+            .map(|cf| CFOptions::new(cf, ColumnFamilyOptions::new()))
+            .collect();
+        let db = new_engine_opt(path_str, DBOptions::new(), cfs_opts).unwrap();
+        let db = Arc::new(db);
+        let db_return = db.clone();
+        write_data(&db, origin_keys, true);
+        return db_return;
+    }
+
+    fn write_data(db: &Arc<DB>, origin_keys: &[Vec<u8>], run_check_data: bool) {
+        let db = RocksEngine::from_db(db.clone());
+        let mut wb = db.write_batch();
+        let ts: u8 = 12;
+        let keys: Vec<_> = origin_keys
+            .iter()
+            .map(|k| {
+                let mut k2 = k.clone();
+                k2.append(&mut vec![ts; 8]);
+                k2
+            })
+            .collect();
+
+        let mut kvs: Vec<(&[u8], &[u8])> = vec![];
+        for (_, key) in keys.iter().enumerate() {
+            kvs.push((key.as_slice(), b"value"));
+        }
+        for &(k, v) in kvs.as_slice() {
+            for cf in ALL_CFS {
+                wb.put_cf(cf, k, v).unwrap();
+            }
+        }
+        wb.write().unwrap();
+        if run_check_data {
+            check_data(&db, ALL_CFS, kvs.as_slice());
+        }
+        db.flush(true).unwrap();
     }
 
     #[test]
@@ -782,5 +841,89 @@ mod tests {
         )
         .unwrap();
         check_data(&db, &[cf], kvs_left.as_slice());
+    }
+
+    #[test]
+    fn test_get_cf_files() {
+        let path = Builder::new().prefix("engine_misc").tempdir().unwrap();
+        let path_str = path.path().to_str().unwrap();
+        let data = vec![
+            b"k0".to_vec(),
+            b"k1".to_vec(),
+            b"k2".to_vec(),
+            b"k3".to_vec(),
+            b"k4".to_vec(),
+        ];
+        let db = prepare_db(path_str, &data);
+        let db = RocksEngine::from_db(db);
+        for cf in db.cf_names() {
+            let max_level = db.get_cf_num_of_level(cf);
+            for i in 0..max_level {
+                let level = max_level - i - 1;
+                let result = db.get_cf_files(cf, level);
+                println!("sts meta count {}", result.unwrap().len());
+            }
+        }
+    }
+    #[test]
+    fn test_filter_sst() {
+        let path = Builder::new().prefix("engine_misc").tempdir().unwrap();
+        let path_str = path.path().to_str().unwrap();
+        let all_range = vec![
+            b"k0".to_vec(),
+            b"k1".to_vec(),
+            b"k2".to_vec(),
+            b"k3".to_vec(),
+            b"k4".to_vec(),
+        ];
+        let left_range = vec![b"k00".to_vec(), b"k11".to_vec()];
+        let right_range = vec![b"k22".to_vec(), b"k33".to_vec(), b"k44".to_vec()];
+        let db = prepare_db(path_str, &all_range);
+        write_data(&db, &left_range, false);
+        write_data(&db, &right_range, false);
+        let mut db = RocksEngine::from_db(db);
+        let files = db.filter_sst("", b"k2", b"k5");
+        println!("result1 {}", files.len());
+        assert!(files.len() == 8);
+        files
+            .into_iter()
+            .map(|(file_name, new_path)| {
+                println!("file_name:{}, new path: {}", file_name, new_path);
+                if !new_path.is_empty() {
+                    let mut key_count = 0;
+                    let sst_reader = RocksSstReader::open_with_env(&new_path, None).unwrap();
+                    sst_reader
+                        .scan(b"k2", b"k5", false, |_key, _value| {
+                            key_count += 1;
+                            Ok(true)
+                        })
+                        .unwrap();
+                    assert!(key_count == 3); // key2, key3, key4
+                }
+                file_name
+            })
+            .for_each(drop);
+
+        let files = db.filter_sst("", b"k0", b"k3");
+        println!("result2 {}", files.len());
+        assert!(files.len() == 8);
+        files
+            .into_iter()
+            .map(|(file_name, new_path)| {
+                println!("file_name:{}, new path: {}", file_name, new_path);
+                if !new_path.is_empty() {
+                    let mut key_count = 0;
+                    let sst_reader = RocksSstReader::open_with_env(&new_path, None).unwrap();
+                    sst_reader
+                        .scan(b"k0", b"k3", false, |_key, _value| {
+                            key_count += 1;
+                            Ok(true)
+                        })
+                        .unwrap();
+                    assert!(key_count == 3 || key_count == 1); // key0, key1, key2 or key22
+                }
+                file_name
+            })
+            .for_each(drop);
     }
 }

@@ -24,7 +24,7 @@ use engine_rocks::{
 };
 use engine_traits::{
     name_to_cf, EncryptionKeyManager, IngestExternalFileOptions, Iterator, KvEngine, SSTMetaInfo,
-    SeekKey, SstExt, SstReader, SstWriter, SstWriterBuilder, CF_DEFAULT, CF_WRITE,
+    SeekKey, SstExt, SstReader, SstWriter, SstWriterBuilder, CF_DEFAULT, CF_WRITE, SSTFile,
 };
 use file_system::{get_io_rate_limiter, sync_dir, File, OpenOptions};
 use tikv_util::time::{Instant, Limiter};
@@ -97,6 +97,19 @@ impl SSTImporter {
 
     pub fn ingest<E: KvEngine>(&self, metas: &[SstMeta], engine: &E) -> Result<()> {
         match self.dir.ingest(metas, engine, self.key_manager.clone()) {
+            Ok(..) => {
+                info!("ingest"; "metas" => ?metas);
+                Ok(())
+            }
+            Err(e) => {
+                error!(%e; "ingest failed"; "metas" => ?metas, );
+                Err(e)
+            }
+        }
+    }
+
+    pub fn ingest2<E: KvEngine>(&self, metas: &[SSTFile], engine: &E) -> Result<()> {
+        match self.dir.ingest2(metas, engine, self.key_manager.clone()) {
             Ok(..) => {
                 info!("ingest"; "metas" => ?metas);
                 Ok(())
@@ -598,6 +611,18 @@ impl ImportDir {
         })
     }
 
+    fn join2(&self, meta: &SSTFile) -> ImportPath {
+        let file_name = meta.get_file_name();
+        let save_path = self.root_dir.join(file_name);
+        let temp_path = self.temp_dir.join(file_name);
+        let clone_path = self.clone_dir.join(file_name);
+        ImportPath {
+            save: save_path,
+            temp: temp_path,
+            clone: clone_path,
+        }
+    }
+
     fn create(
         &self,
         meta: &SstMeta,
@@ -676,6 +701,39 @@ impl ImportDir {
             engine.ingest_external_file_cf(cf, &opts, &files)?;
         }
         INPORTER_INGEST_COUNT.observe(metas.len() as _);
+        IMPORTER_INGEST_BYTES.observe(ingest_bytes as _);
+        IMPORTER_INGEST_DURATION
+            .with_label_values(&["ingest"])
+            .observe(start.saturating_elapsed().as_secs_f64());
+        Ok(())
+    }
+
+    fn ingest2<E: KvEngine>(
+        &self,
+        sst_files: &[SSTFile],
+        engine: &E,
+        key_manager: Option<Arc<DataKeyManager>>,
+    ) -> Result<()> {
+        let start = Instant::now();
+
+        let mut paths = HashMap::new();
+        let mut ingest_bytes = 0;
+        for sst_file in sst_files {
+            let path = self.join2(sst_file);
+            let cf = sst_file.get_cf_name();
+            super::prepare_sst_for_ingestion(&path.save, &path.clone, key_manager.as_deref())?;
+            ingest_bytes += sst_file.get_file_size();
+            engine.reset_global_seq(cf, &path.clone)?;
+            paths.entry(cf).or_insert_with(Vec::new).push(path);
+        }
+
+        let mut opts = E::IngestExternalFileOptions::new();
+        opts.move_files(true);
+        for (cf, cf_paths) in paths {
+            let files: Vec<&str> = cf_paths.iter().map(|p| p.clone.to_str().unwrap()).collect();
+            engine.ingest_external_file_cf(cf, &opts, &files)?;
+        }
+        INPORTER_INGEST_COUNT.observe(sst_files.len() as _);
         IMPORTER_INGEST_BYTES.observe(ingest_bytes as _);
         IMPORTER_INGEST_DURATION
             .with_label_values(&["ingest"])

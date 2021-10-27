@@ -9,8 +9,8 @@ use std::time::Duration;
 use std::u64;
 
 use collections::HashMap;
-use engine_traits::{DeleteStrategy, Range, CF_LOCK, CF_RAFT};
-use engine_traits::{Engines, KvEngine, Mutable, RaftEngine, WriteBatch};
+use engine_traits::{DeleteStrategy, Range, CF_LOCK, CF_RAFT, DATA_CFS};
+use engine_traits::{Engines, KvEngine, Mutable, RaftEngine, WriteBatch, SSTFile};
 use fail::fail_point;
 use kvproto::raft_serverpb::{PeerState, RaftApplyState, RegionLocalState};
 use raft::eraftpb::Snapshot as RaftSnapshot;
@@ -31,9 +31,8 @@ use crate::store::{
 use yatp::pool::{Builder, ThreadPool};
 use yatp::task::future::TaskCell;
 
-use engine_traits::DATA_CFS;
 use file_system::{IOType, WithIOType};
-use sst_importer::{sst_meta_to_path, Config as ImportConfig, SSTImporter};
+use sst_importer::{Config as ImportConfig, SSTImporter};
 use std::path::Path;
 use tikv_util::worker::{Runnable, RunnableWithTimer};
 
@@ -792,24 +791,31 @@ where
                     let num_of_level = src_tablet.get_cf_num_of_level(cf);
                     for i in 0..num_of_level {
                         let level = num_of_level - i - 1;
-                        let sst_metas = src_tablet.get_cf_files(cf, level).unwrap();
-                        let mut valid_sst_metas: Vec<kvproto::import_sstpb::SstMeta> = vec![];
-                        let mut additional_sst_metas: Vec<kvproto::import_sstpb::SstMeta> = vec![];
-                        for sst_meta in &sst_metas {
-                            let file_name = sst_meta_to_path(sst_meta).unwrap();
-                            let file_name = file_name.to_str().unwrap();
+                        let sst_files = src_tablet.get_cf_files(cf, level).unwrap();
+                        let mut valid_sst_files: Vec<SSTFile> = vec![];
+                        let mut additional_sst_files: Vec<SSTFile> = vec![];
+                        for sst_file in &sst_files {
+                            let file_name = sst_file.get_file_name();
                             if sst_file_maps.contains_key(file_name) {
-                                additional_sst_metas.push(sst_meta.clone());
+                                // empty means the file data is not in the region's range and should be skipped
+                                if !sst_file_maps[file_name].is_empty() { 
+                                    additional_sst_files.push(sst_file.clone());
+                                }
                             } else {
-                                valid_sst_metas.push(sst_meta.clone());
+                                valid_sst_files.push(sst_file.clone());
                             }
                         }
-                        src_sst_importer
-                            .ingest(&valid_sst_metas, &dst_tablet)
-                            .unwrap(); // TODO: error handling
-                        src_tmp_sst_importer
-                            .ingest(&additional_sst_metas, &dst_tablet)
-                            .unwrap();
+                        if valid_sst_files.len() != 0 {
+                            src_sst_importer
+                                .ingest2(&valid_sst_files, &dst_tablet)
+                                .unwrap(); // TODO: error handling
+                        }
+
+                        if additional_sst_files.len() != 0 {
+                            src_tmp_sst_importer
+                                .ingest2(&additional_sst_files, &dst_tablet)
+                                .unwrap();
+                        }
                     }
                 }
 
@@ -966,6 +972,259 @@ mod tests {
             let mut s3 = mgr.get_snapshot_for_receiving(&key, data).unwrap();
             io::copy(&mut s2, &mut s3).unwrap();
             s3.save().unwrap();
+
+            // set applying state
+            let mut wb = engine.kv.write_batch();
+            let region_key = keys::region_state_key(id);
+            let mut region_state = engine
+                .kv
+                .get_msg_cf::<RegionLocalState>(CF_RAFT, &region_key)
+                .unwrap()
+                .unwrap();
+            region_state.set_state(PeerState::Applying);
+            wb.put_msg_cf(CF_RAFT, &region_key, &region_state).unwrap();
+            wb.write().unwrap();
+
+            // apply snapshot
+            let status = Arc::new(AtomicUsize::new(JOB_STATUS_PENDING));
+            sched
+                .schedule(Task::Apply {
+                    region_id: id,
+                    status,
+                })
+                .unwrap();
+        };
+        let wait_apply_finish = |id: u64| {
+            let region_key = keys::region_state_key(id);
+            loop {
+                thread::sleep(Duration::from_millis(100));
+                if engine
+                    .kv
+                    .get_msg_cf::<RegionLocalState>(CF_RAFT, &region_key)
+                    .unwrap()
+                    .unwrap()
+                    .get_state()
+                    == PeerState::Normal
+                {
+                    break;
+                }
+            }
+        };
+
+        // snapshot will not ingest cause already write stall
+        gen_and_apply_snap(1);
+        assert_eq!(
+            engine
+                .kv
+                .get_cf_num_files_at_level(CF_DEFAULT, 0)
+                .unwrap()
+                .unwrap(),
+            6
+        );
+
+        // compact all files to the bottomest level
+        engine.kv.compact_files_in_range(None, None, None).unwrap();
+        assert_eq!(
+            engine
+                .kv
+                .get_cf_num_files_at_level(CF_DEFAULT, 0)
+                .unwrap()
+                .unwrap(),
+            0
+        );
+
+        wait_apply_finish(1);
+
+        // the pending apply task should be finished and snapshots are ingested.
+        // note that when ingest sst, it may flush memtable if overlap,
+        // so here will two level 0 files.
+        assert_eq!(
+            engine
+                .kv
+                .get_cf_num_files_at_level(CF_DEFAULT, 0)
+                .unwrap()
+                .unwrap(),
+            2
+        );
+
+        // no write stall, ingest without delay
+        gen_and_apply_snap(2);
+        wait_apply_finish(2);
+        assert_eq!(
+            engine
+                .kv
+                .get_cf_num_files_at_level(CF_DEFAULT, 0)
+                .unwrap()
+                .unwrap(),
+            4
+        );
+
+        // snapshot will not ingest cause it may cause write stall
+        gen_and_apply_snap(3);
+        assert_eq!(
+            engine
+                .kv
+                .get_cf_num_files_at_level(CF_DEFAULT, 0)
+                .unwrap()
+                .unwrap(),
+            4
+        );
+        gen_and_apply_snap(4);
+        assert_eq!(
+            engine
+                .kv
+                .get_cf_num_files_at_level(CF_DEFAULT, 0)
+                .unwrap()
+                .unwrap(),
+            4
+        );
+        gen_and_apply_snap(5);
+        assert_eq!(
+            engine
+                .kv
+                .get_cf_num_files_at_level(CF_DEFAULT, 0)
+                .unwrap()
+                .unwrap(),
+            4
+        );
+
+        // compact all files to the bottomest level
+        engine.kv.compact_files_in_range(None, None, None).unwrap();
+        assert_eq!(
+            engine
+                .kv
+                .get_cf_num_files_at_level(CF_DEFAULT, 0)
+                .unwrap()
+                .unwrap(),
+            0
+        );
+
+        // make sure have checked pending applies
+        wait_apply_finish(4);
+
+        // before two pending apply tasks should be finished and snapshots are ingested
+        // and one still in pending.
+        assert_eq!(
+            engine
+                .kv
+                .get_cf_num_files_at_level(CF_DEFAULT, 0)
+                .unwrap()
+                .unwrap(),
+            4
+        );
+
+        // make sure have checked pending applies
+        engine.kv.compact_files_in_range(None, None, None).unwrap();
+        assert_eq!(
+            engine
+                .kv
+                .get_cf_num_files_at_level(CF_DEFAULT, 0)
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        wait_apply_finish(5);
+
+        // the last one pending task finished
+        assert_eq!(
+            engine
+                .kv
+                .get_cf_num_files_at_level(CF_DEFAULT, 0)
+                .unwrap()
+                .unwrap(),
+            2
+        );
+    }
+
+
+    #[test]
+    fn test_source_region_prepare_merge_task() {
+        let temp_dir = Builder::new()
+            .prefix("test_source_region_prepare_merge")
+            .tempdir()
+            .unwrap();
+
+        let mut cf_opts = ColumnFamilyOptions::new();
+        cf_opts.set_level_zero_slowdown_writes_trigger(5);
+        cf_opts.set_disable_auto_compactions(true);
+        let kv_cfs_opts = vec![
+            CFOptions::new("default", cf_opts.clone()),
+            CFOptions::new("write", cf_opts.clone()),
+            CFOptions::new("lock", cf_opts.clone()),
+            CFOptions::new("raft", cf_opts.clone()),
+        ];
+        let raft_cfs_opt = CFOptions::new(CF_DEFAULT, cf_opts);
+        let engine = get_test_db_for_regions(
+            &temp_dir,
+            None,
+            Some(raft_cfs_opt),
+            None,
+            Some(kv_cfs_opts),
+            &[1],
+        )
+        .unwrap();
+
+        for cf_name in engine.kv.cf_names() {
+            for i in 0..6 {
+                engine.kv.put_cf(cf_name, &[i], &[i]).unwrap();
+                engine.kv.put_cf(cf_name, &[i + 1], &[i + 1]).unwrap();
+                engine.kv.flush_cf(cf_name, true).unwrap();
+                // check level 0 files
+                assert_eq!(
+                    engine
+                        .kv
+                        .get_cf_num_files_at_level(cf_name, 0)
+                        .unwrap()
+                        .unwrap(),
+                    u64::from(i) + 1
+                );
+            }
+        }
+
+        let snap_dir = Builder::new().prefix("snap_dir").tempdir().unwrap();
+        let mgr = SnapManager::new(snap_dir.path().to_str().unwrap());
+        let bg_worker = Worker::new("source_region_prepare_merge");
+        let mut worker = bg_worker.lazy_build("source_region_prepare_merge");
+        let sched = worker.scheduler();
+        let (router, receiver) = mpsc::sync_channel(1);
+        let runner = RegionRunner::new(
+            engine.clone(),
+            mgr,
+            0,
+            true,
+            CoprocessorHost::<KvTestEngine>::default(),
+            router,
+        );
+        worker.start_with_timer(runner);
+
+        let mut finished_region_id = 0;
+        let source_region_prepare_merge = |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
+            // construct snapshot
+            let (tx, rx) = mpsc::sync_channel(1);
+            sched
+                .schedule(Task::SourceRegionPrepareMerge {
+                    region_id: id,
+                    tablet_suffix: 0,
+                    start_key,
+                    end_key,
+                    notifier: tx,
+                    cb: Box::new(move |region_id| {
+                        finished_region_id = region_id; 
+                    }), 
+                })
+                .unwrap();
+            let task_result = rx.recv().unwrap();
+            match receiver.recv() {
+                Ok(BgTaskResult::SourceRegionPrepareMergeResult {
+                    region_id,
+                    tablet_suffix,
+                    sst_file_maps: result}) => {
+                    
+                }
+                msg => panic!("expected SourceRegionPrepareMergeResult, but got {:?}", msg),
+            }
+            assert_eq!(task_result.region_id, region_id);
+            assert_eq!(task_result.tablet_suffix, )
 
             // set applying state
             let mut wb = engine.kv.write_batch();

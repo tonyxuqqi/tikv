@@ -11,7 +11,6 @@ use crate::range::Range;
 use std::path::PathBuf;
 use std::collections::HashMap;
 use std::string::String;
-use kvproto::import_sstpb::SstMeta;
 
 #[derive(Clone, Debug)]
 pub enum DeleteStrategy {
@@ -20,6 +19,27 @@ pub enum DeleteStrategy {
     DeleteByKey,
     DeleteByRange,
     DeleteByWriter { sst_path: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct SSTFile {
+    pub cf_name: String,
+    pub file_name: String,
+    pub file_size: usize,
+}
+
+impl SSTFile {
+    pub fn get_cf_name(&self) -> &str {
+        self.cf_name.as_str()
+    }
+
+    pub fn get_file_name(&self) -> &str {
+        self.file_name.as_str()
+    }
+
+    pub fn get_file_size(&self) -> usize {
+        self.file_size
+    }
 }
 
 pub trait MiscExt: CFNamesExt {
@@ -101,7 +121,7 @@ pub trait MiscExt: CFNamesExt {
 
     fn filter_sst(&mut self, sst_folder: &str,  start_key: &[u8], end_key: &[u8]) -> HashMap<String, String>;
 
-    fn get_cf_files(&self, cf: &str, level: usize) -> Result<Vec<SstMeta>>;
+    fn get_cf_files(&self, cf: &str, level: usize) -> Result<Vec<SSTFile>>;
 
     fn get_cf_num_of_level(&self, cf: &str) -> usize;
 }
