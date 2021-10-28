@@ -42,30 +42,60 @@ pub trait TabletFactory<EK> {
     }
 }
 
-pub struct DummyFactory;
+pub struct DummyFactory<EK>
+where
+    EK: KvEngine,
+{
+    pub engine: Option<EK>,
+    pub root_path: String,
+}
 
-impl<EK> TabletFactory<EK> for DummyFactory {
+impl<EK> TabletFactory<EK> for DummyFactory<EK>
+where
+    EK: KvEngine,
+{
     fn create_tablet(&self, _id: u64, _suffix: u64) -> EK {
-        unimplemented!()
+        return self.engine.as_ref().unwrap().clone();
     }
     fn open_tablet_raw(&self, _path: &Path, _readonly: bool) -> EK {
-        unimplemented!()
+        return self.engine.as_ref().unwrap().clone();
     }
     fn create_root_db(&self) -> EK {
-        unimplemented!()
+        return self.engine.as_ref().unwrap().clone();
     }
     fn exists_raw(&self, _path: &Path) -> bool {
-        unimplemented!()
+        return true;
     }
     fn tablet_path(&self, _id: u64, _suffix: u64) -> PathBuf {
-        unimplemented!()
+        return PathBuf::from(&self.root_path);
     }
     fn tablets_path(&self) -> PathBuf {
-        unimplemented!()
+        return PathBuf::from(&self.root_path);
     }
 
     fn clone(&self) -> Box<dyn TabletFactory<EK> + Send> {
-        Box::new(DummyFactory)
+        if self.engine.is_none() {
+            return Box::<DummyFactory<EK>>::new(DummyFactory {
+                engine: None,
+                root_path: self.root_path.clone(),
+            });
+        }
+        Box::<DummyFactory<EK>>::new(DummyFactory {
+            engine: Some(self.engine.as_ref().unwrap().clone()),
+            root_path: self.root_path.clone(),
+        })
+    }
+}
+
+impl<EK> DummyFactory<EK>
+where
+    EK: KvEngine,
+{
+    pub fn new() -> DummyFactory<EK> {
+        DummyFactory {
+            engine: None,
+            root_path: "/dummy_root".to_string(),
+        }
     }
 }
 
@@ -77,10 +107,14 @@ pub struct Engines<K, R> {
 
 impl<K: KvEngine, R: RaftEngine> Engines<K, R> {
     pub fn new(kv_engine: K, raft_engine: R) -> Self {
+        let path = kv_engine.path().to_string();
         Engines {
-            kv: kv_engine,
+            kv: kv_engine.clone(),
             raft: raft_engine,
-            tablets: Box::new(DummyFactory),
+            tablets: Box::<DummyFactory<K>>::new(DummyFactory {
+                engine: Some(kv_engine),
+                root_path: path,
+            }),
         }
     }
 

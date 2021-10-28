@@ -870,7 +870,7 @@ mod tests {
 
     use crate::coprocessor::CoprocessorHost;
     use crate::store::peer_storage::JOB_STATUS_PENDING;
-    use crate::store::snap::tests::get_test_db_for_regions;
+    use crate::store::snap::tests::{get_test_db_for_regions, get_test_tablets_for_regions};
     use crate::store::worker::RegionRunner;
     use crate::store::{CasualMessage, SnapKey, SnapManager};
     use engine_test::ctor::CFOptions;
@@ -1229,4 +1229,187 @@ mod tests {
 
         run_and_wait_prepare_merge_task(1, vec![0], vec![1]);
     }
+
+    #[test]
+    fn test_target_region_prepare_merge_task() {
+        let temp_dir = Builder::new()
+            .prefix("test_target_region_prepare_merge")
+            .tempdir()
+            .unwrap();
+
+        let mut cf_opts = ColumnFamilyOptions::new();
+        cf_opts.set_level_zero_slowdown_writes_trigger(5);
+        cf_opts.set_disable_auto_compactions(true);
+        let kv_cfs_opts = vec![
+            CFOptions::new("default", cf_opts.clone()),
+            CFOptions::new("write", cf_opts.clone()),
+            CFOptions::new("lock", cf_opts.clone()),
+            CFOptions::new("raft", cf_opts.clone()),
+        ];
+        let raft_cfs_opt = CFOptions::new(CF_DEFAULT, cf_opts);
+        let engine = get_test_tablets_for_regions(
+            &temp_dir,
+            None,
+            Some(raft_cfs_opt),
+            None,
+            Some(kv_cfs_opts),
+            &[1],
+            &[0],
+        )
+        .unwrap();
+        let tablet = engine.tablets.open_tablet(1, 0);
+        for cf_name in tablet.cf_names() {
+            for i in 0..6 {
+                tablet.put_cf(cf_name, &[i], &[i]).unwrap();
+                tablet.put_cf(cf_name, &[i + 1], &[i + 1]).unwrap();
+                tablet.flush_cf(cf_name, true).unwrap();
+                // check level 0 files
+                assert_eq!(
+                    tablet
+                        .get_cf_num_files_at_level(cf_name, 0)
+                        .unwrap()
+                        .unwrap(),
+                    u64::from(i) + 1
+                );
+            }
+        }
+
+        let snap_dir = Builder::new().prefix("snap_dir").tempdir().unwrap();
+        let mgr = SnapManager::new(snap_dir.path().to_str().unwrap());
+        let bg_worker = Worker::new("target_region_prepare_merge");
+        let mut worker = bg_worker.lazy_build("target_region_prepare_merge");
+        let sched = worker.scheduler();
+        let (router, receiver) = mpsc::sync_channel(1);
+        let runner = RegionRunner::new(
+            engine.clone(),
+            mgr,
+            0,
+            true,
+            CoprocessorHost::<KvTestEngine>::default(),
+            router,
+        );
+        worker.start_with_timer(runner);
+
+        
+        let run_and_wait_prepare_merge_task = |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
+            // construct snapshot
+            let (tx, rx) = mpsc::sync_channel(1);
+            sched
+                .schedule(Task::TargetRegionPrepareMerge {
+                    region_id: id,
+                    tablet_suffix: 0,
+                    start_key,
+                    end_key,
+                    notifier: tx,
+                    cb: Box::new(move|region_id| {
+                        assert_eq!(region_id, id);
+                    }), 
+                })
+                .unwrap();
+            let task_result = rx.recv();
+            match task_result {
+                Ok(BgTaskResult::TargetRegionPrepareMergeResult {
+                    region_id,
+                    tablet_suffix}) => {
+                        assert_eq!(region_id, id);
+                        assert_eq!(tablet_suffix, 0);
+                }
+                msg => panic!("expected TargetRegionPrepareMergeResult, but got {:?}", msg),
+            }
+        };
+
+        run_and_wait_prepare_merge_task(1, vec![0], vec![1]);
+    }
+
+    /*
+    #[test]
+    fn test_target_region_ingest_task() {
+        let temp_dir = Builder::new()
+            .prefix("test_target_region_prepare_merge")
+            .tempdir()
+            .unwrap();
+
+        let mut cf_opts = ColumnFamilyOptions::new();
+        cf_opts.set_level_zero_slowdown_writes_trigger(5);
+        cf_opts.set_disable_auto_compactions(true);
+        let kv_cfs_opts = vec![
+            CFOptions::new("default", cf_opts.clone()),
+            CFOptions::new("write", cf_opts.clone()),
+            CFOptions::new("lock", cf_opts.clone()),
+            CFOptions::new("raft", cf_opts.clone()),
+        ];
+        let raft_cfs_opt = CFOptions::new(CF_DEFAULT, cf_opts);
+        let engine = get_test_tablets_for_regions(
+            &temp_dir,
+            None,
+            Some(raft_cfs_opt),
+            None,
+            Some(kv_cfs_opts),
+            &[1],
+            &[0],
+        )
+        .unwrap();
+        let tablet = engine.tablets.open_tablet(1, 0);
+        for cf_name in tablet.cf_names() {
+            for i in 0..6 {
+                tablet.put_cf(cf_name, &[i], &[i]).unwrap();
+                tablet.put_cf(cf_name, &[i + 1], &[i + 1]).unwrap();
+                tablet.flush_cf(cf_name, true).unwrap();
+                // check level 0 files
+                assert_eq!(
+                    tablet
+                        .get_cf_num_files_at_level(cf_name, 0)
+                        .unwrap()
+                        .unwrap(),
+                    u64::from(i) + 1
+                );
+            }
+        }
+
+        let snap_dir = Builder::new().prefix("snap_dir").tempdir().unwrap();
+        let mgr = SnapManager::new(snap_dir.path().to_str().unwrap());
+        let bg_worker = Worker::new("target_region_prepare_merge");
+        let mut worker = bg_worker.lazy_build("target_region_prepare_merge");
+        let sched = worker.scheduler();
+        let (router, receiver) = mpsc::sync_channel(1);
+        let runner = RegionRunner::new(
+            engine.clone(),
+            mgr,
+            0,
+            true,
+            CoprocessorHost::<KvTestEngine>::default(),
+            router,
+        );
+        worker.start_with_timer(runner);
+
+        
+        let run_and_wait_prepare_merge_task = |src_id: u64, dst_id: u64, sst_file_maps: std::collections::HashMap<String, String>| {
+            // construct snapshot
+            let (tx, rx) = mpsc::sync_channel(1);
+            sched
+                .schedule(Task::TargetRegionIngestSST {
+                    src_region_id: id,
+                    src_tablet_suffix: 0,
+                    dst_region_id: dst_id,
+                    dst_tablet_suffix: 0,
+                    notifier: tx,
+                    cb: Box::new(move|region_id| {
+                        assert_eq!(region_id, id);
+                    }), 
+                })
+                .unwrap();
+            let task_result = rx.recv();
+            match task_result {
+                Ok(BgTaskResult::TargetRegionPrepareMergeResult {
+                    region_id,
+                    tablet_suffix}) => {
+                        assert_eq!(region_id, id);
+                        assert_eq!(tablet_suffix, 0);
+                }
+                msg => panic!("expected TargetRegionPrepareMergeResult, but got {:?}", msg),
+            }
+        };
+
+        run_and_wait_prepare_merge_task(1, vec![0], vec![1]);
+    }*/
 }

@@ -1554,7 +1554,8 @@ pub mod tests {
     use std::io::{self, Read, Seek, SeekFrom, Write};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, AtomicUsize};
-    use std::sync::{Arc, RwLock};
+    use std::sync::{Arc, RwLock, Mutex};
+    use std::collections::HashMap;
 
     use encryption::{EncryptionConfig, FileConfig, MasterKeyConfig};
     use encryption_export::data_key_manager_from_config;
@@ -1564,7 +1565,7 @@ pub mod tests {
     use engine_traits::Engines;
     use engine_traits::SyncMutable;
     use engine_traits::{ExternalSstFileInfo, SstExt, SstWriter, SstWriterBuilder};
-    use engine_traits::{KvEngine, Snapshot as EngineSnapshot};
+    use engine_traits::{KvEngine, Snapshot as EngineSnapshot, TabletFactory};
     use engine_traits::{ALL_CFS, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE};
     use kvproto::encryptionpb::EncryptionMethod;
     use kvproto::metapb::{Peer, Region};
@@ -1587,7 +1588,7 @@ pub mod tests {
     use crate::store::peer_storage::JOB_STATUS_RUNNING;
     use crate::store::{INIT_EPOCH_CONF_VER, INIT_EPOCH_VER};
     use crate::Result;
-
+ 
     const TEST_STORE_ID: u64 = 1;
     const TEST_KEY: &[u8] = b"akey";
     const TEST_WRITE_BATCH_SIZE: usize = 10 * 1024 * 1024;
@@ -1596,6 +1597,67 @@ pub mod tests {
 
     type DBBuilder<E> =
         fn(p: &Path, db_opt: Option<DBOptions>, cf_opts: Option<Vec<CFOptions<'_>>>) -> Result<E>;
+
+
+    pub struct TestTabletFactory<EK>
+    {
+        pub root_path: PathBuf,
+        pub kv_db_opt: Option<DBOptions>,
+        pub db_instances: Arc<Mutex<HashMap<String, EK>>>,
+    }
+    
+    impl<EK> TabletFactory<EK> for TestTabletFactory<EK>
+    where
+        EK: KvEngine + EngineConstructorExt, 
+    {
+        fn create_tablet(&self, id: u64, suffix: u64) -> EK {
+            let path = self.root_path.join(format!("tablets/{}_{}", id, suffix));
+            return self.open_tablet_raw(path.as_path(), false);
+        }
+        fn open_tablet_raw(&self, path: &Path, _readonly: bool) -> EK {
+            let path_str = path.to_str().unwrap().to_string();
+            
+            let mut reg = self.db_instances.lock().unwrap();
+            if let Some(db) = reg.get(&path_str) {
+                return db.clone();
+            }
+            println!("opening tablet {}", &path_str);
+            let mut cf_opts = ColumnFamilyOptions::new();
+            cf_opts.set_level_zero_slowdown_writes_trigger(5);
+            cf_opts.set_disable_auto_compactions(true);
+            let kv_cfs_opts = vec![
+                CFOptions::new("default", cf_opts.clone()),
+                CFOptions::new("write", cf_opts.clone()),
+                CFOptions::new("lock", cf_opts.clone()),
+                CFOptions::new("raft", cf_opts.clone()),
+            ];
+            let db: EK = open_test_empty_db(path, self.kv_db_opt.clone(), Some(kv_cfs_opts)).unwrap();
+            let db_copy = db.clone();
+            reg.insert(path_str, db_copy);
+            return db;
+        }
+        fn create_root_db(&self) -> EK {
+            return self.create_tablet(0, 0); 
+        }
+        fn exists_raw(&self, _path: &Path) -> bool {
+            return true;
+        }
+        fn tablet_path(&self, id: u64, suffix: u64) -> PathBuf {
+            return self.root_path.join(format!("tablets/{}_{}", id, suffix));
+        }
+        fn tablets_path(&self) -> PathBuf {
+            return self.root_path.clone();
+        }
+    
+        fn clone(&self) -> Box<dyn TabletFactory<EK> + Send> {
+            let map: HashMap<String, EK> = HashMap::default();
+            return Box::new(TestTabletFactory::<EK> {
+                root_path: self.root_path.clone(),
+                kv_db_opt: self.kv_db_opt.clone(),
+                db_instances: Arc::new(Mutex::new(map)),
+            });
+        }
+    } 
 
     pub fn open_test_empty_db<E>(
         path: &Path,
@@ -1664,6 +1726,52 @@ pub mod tests {
             kv.put_msg_cf(CF_RAFT, &keys::region_state_key(region_id), &region_state)?;
         }
         Ok(Engines::new(kv, raft))
+    }
+
+    pub fn get_test_tablets_for_regions(
+        path: &TempDir,
+        raft_db_opt: Option<DBOptions>,
+        raft_cf_opt: Option<CFOptions<'_>>,
+        kv_db_opt: Option<DBOptions>,
+        kv_cf_opts: Option<Vec<CFOptions<'_>>>,
+        regions: &[u64],
+        tablet_suffix: &[u64],
+    ) -> Result<Engines<KvTestEngine, RaftTestEngine>> {
+        let p = path.path();
+        let kv: KvTestEngine = open_test_db(p.join("kv").as_path(), kv_db_opt.clone(), kv_cf_opts)?;
+        let raft: RaftTestEngine = open_test_db(
+            p.join("raft").as_path(),
+            raft_db_opt,
+            raft_cf_opt.map(|opt| vec![opt]),
+        )?;
+        let map: HashMap<String, KvTestEngine> = HashMap::default();
+        let factory = TestTabletFactory {
+            root_path: PathBuf::from(path.path().to_str().unwrap().to_string()),
+            kv_db_opt: kv_db_opt.clone(),
+            db_instances: Arc::new(Mutex::new(map)),
+        };
+        for &region_id in regions {
+            // Put apply state into kv engine.
+            let mut apply_state = RaftApplyState::default();
+            let mut apply_entry = Entry::default();
+            apply_state.set_applied_index(10);
+            apply_entry.set_index(10);
+            apply_entry.set_term(0);
+            apply_state.mut_truncated_state().set_index(10);
+            kv.put_msg_cf(CF_RAFT, &keys::apply_state_key(region_id), &apply_state)?;
+            raft.put_msg(&keys::raft_log_key(region_id, 10), &apply_entry)?;
+
+            // Put region info into kv engine.
+            let region = gen_test_region(region_id, 1, 1);
+            let mut region_state = RegionLocalState::default();
+            region_state.set_region(region);
+            kv.put_msg_cf(CF_RAFT, &keys::region_state_key(region_id), &region_state)?;
+        }
+        Ok(Engines {
+            kv, 
+            raft,
+            tablets: Box::new(factory),
+        })
     }
 
     pub fn get_kv_count(snap: &impl EngineSnapshot) -> usize {

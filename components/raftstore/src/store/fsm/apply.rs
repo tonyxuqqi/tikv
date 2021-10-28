@@ -4701,7 +4701,7 @@ mod tests {
             _phantom: Default::default(),
             store_id: 1,
             pending_create_peers,
-            tablet_factory: Box::new(DummyFactory),
+            tablet_factory: Box::new(DummyFactory::new()),
         };
         system.spawn("test-basic".to_owned(), builder);
 
@@ -5032,7 +5032,7 @@ mod tests {
             _phantom: Default::default(),
             store_id: 1,
             pending_create_peers,
-            tablet_factory: Box::new(DummyFactory),
+            tablet_factory: Box::new(DummyFactory::new()),
         };
         system.spawn("test-handle-raft".to_owned(), builder);
 
@@ -5377,7 +5377,7 @@ mod tests {
             _phantom: Default::default(),
             store_id: 1,
             pending_create_peers,
-            tablet_factory: Box::new(DummyFactory),
+            tablet_factory: Box::new(DummyFactory::new()),
         };
         system.spawn("test-ingest".to_owned(), builder);
 
@@ -5548,7 +5548,7 @@ mod tests {
             _phantom: Default::default(),
             store_id: 1,
             pending_create_peers,
-            tablet_factory: Box::new(DummyFactory),
+            tablet_factory: Box::new(DummyFactory::new()),
         };
         system.spawn("test-handle-raft".to_owned(), builder);
 
@@ -5838,7 +5838,7 @@ mod tests {
             _phantom: Default::default(),
             store_id: 2,
             pending_create_peers,
-            tablet_factory: Box::new(DummyFactory),
+            tablet_factory: Box::new(DummyFactory::new()),
         };
         system.spawn("test-split".to_owned(), builder);
 
