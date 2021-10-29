@@ -1650,11 +1650,10 @@ pub mod tests {
         }
     
         fn clone(&self) -> Box<dyn TabletFactory<EK> + Send> {
-            let map: HashMap<String, EK> = HashMap::default();
             return Box::new(TestTabletFactory::<EK> {
                 root_path: self.root_path.clone(),
                 kv_db_opt: self.kv_db_opt.clone(),
-                db_instances: Arc::new(Mutex::new(map)),
+                db_instances: self.db_instances.clone(),
             });
         }
     } 
@@ -1735,7 +1734,6 @@ pub mod tests {
         kv_db_opt: Option<DBOptions>,
         kv_cf_opts: Option<Vec<CFOptions<'_>>>,
         regions: &[u64],
-        tablet_suffix: &[u64],
     ) -> Result<Engines<KvTestEngine, RaftTestEngine>> {
         let p = path.path();
         let kv: KvTestEngine = open_test_db(p.join("kv").as_path(), kv_db_opt.clone(), kv_cf_opts)?;

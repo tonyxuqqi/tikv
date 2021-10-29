@@ -325,8 +325,9 @@ pub mod ctor {
         use engine_rocks::util::{
             new_engine as rocks_new_engine, new_engine_opt as rocks_new_engine_opt, RocksCFOptions,
         };
-        use engine_rocks::{RocksColumnFamilyOptions, RocksDBOptions};
+        use engine_rocks::{RocksColumnFamilyOptions, RocksDBOptions, CompactionKeyRangeFilterFactory};
         use std::sync::Arc;
+        use std::path::Path;
 
         impl EngineConstructorExt for engine_rocks::RocksEngine {
             // FIXME this is duplicating behavior from engine_rocks::raw_util in order to
@@ -351,10 +352,25 @@ pub mod ctor {
                         default_cfs_opts
                     }
                 };
+                let mut tablet_id:i64 = -1;
+                let root_path = Path::new(path);
+                println!("new_engine root path {}", path);
+                if let Some(s) = root_path.file_name().map(|s| s.to_string_lossy()) {
+                    let mut split = s.split('_');
+                    tablet_id = split.next().and_then(|s| s.parse().ok()).unwrap_or(-1);
+                }
                 let rocks_cfs_opts = cfs_opts
                     .iter()
                     .map(|cf_opts| {
                         let mut rocks_cf_opts = RocksColumnFamilyOptions::new();
+                        if tablet_id != -1 {
+                            rocks_cf_opts.as_raw_mut().set_compaction_filter_factory(
+                                "compaction_key_range_filter",
+                                Box::new(CompactionKeyRangeFilterFactory {
+                                    region_id: tablet_id as u64,
+                                })
+                            ).unwrap();
+                        }
                         set_standard_cf_opts(rocks_cf_opts.as_raw_mut(), &cf_opts.options);
                         set_cf_opts(&mut rocks_cf_opts, &cf_opts.options);
                         RocksCFOptions::new(cf_opts.cf, rocks_cf_opts)
@@ -368,11 +384,26 @@ pub mod ctor {
                 db_opt: DBOptions,
                 cfs_opts: Vec<CFOptions>,
             ) -> Result<Self> {
+                let mut tablet_id:i64 = -1;
+                println!("new_engine_opt root path {}", path);
+                let root_path = Path::new(path);
+                if let Some(s) = root_path.file_name().map(|s| s.to_string_lossy()) {
+                    let mut split = s.split('_');
+                    tablet_id = split.next().and_then(|s| s.parse().ok()).unwrap_or(-1);
+                }
                 let rocks_db_opts = get_rocks_db_opts(db_opt)?;
                 let rocks_cfs_opts = cfs_opts
                     .iter()
                     .map(|cf_opts| {
                         let mut rocks_cf_opts = RocksColumnFamilyOptions::new();
+                        if tablet_id != -1 {
+                            rocks_cf_opts.as_raw_mut().set_compaction_filter_factory(
+                                "compaction_key_range_filter",
+                                Box::new(CompactionKeyRangeFilterFactory {
+                                    region_id: tablet_id as u64,
+                                })
+                            ).unwrap();
+                        }
                         set_standard_cf_opts(rocks_cf_opts.as_raw_mut(), &cf_opts.options);
                         set_cf_opts(&mut rocks_cf_opts, &cf_opts.options);
                         RocksCFOptions::new(cf_opts.cf, rocks_cf_opts)

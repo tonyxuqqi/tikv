@@ -152,7 +152,7 @@ impl RocksEngine {
         let sst_reader = RocksSstReader::open_with_env(&src_file_path, env)?;
         fs::create_dir_all(temp_folder)?;
         let builder = RocksSstWriterBuilder::new()
-            .set_db(RocksEngine::from_ref(self.as_inner()))
+            .set_db(self)
             .set_cf(cf);
         let mut writer = builder.build(&dst_file_path)?;
         sst_reader
@@ -462,12 +462,12 @@ impl MiscExt for RocksEngine {
                 for sst_file_meta in sst_file_metas.iter() {
                     let smallest_key = sst_file_meta.get_smallestkey();
                     let biggest_key = sst_file_meta.get_largestkey();
-                    if smallest_key.cmp(start_key) != Ordering::Less
+                    /*if smallest_key.cmp(start_key) != Ordering::Less
                         && biggest_key.cmp(end_key) != Ordering::Greater
                     {
                         println!("skipping {}", sst_file_meta.get_name());
                         continue;
-                    } else if (smallest_key.cmp(end_key) != Ordering::Less)
+                    } else*/ if (smallest_key.cmp(end_key) != Ordering::Less)
                         || (biggest_key.cmp(start_key) == Ordering::Less)
                     {
                         sst_file_map.insert(sst_file_meta.get_name(), "".to_string());

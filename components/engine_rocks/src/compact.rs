@@ -2,14 +2,17 @@
 
 use crate::engine::RocksEngine;
 use crate::util;
-use engine_traits::{CFNamesExt, CompactExt, Result};
-use rocksdb::{new_compaction_filter_raw, CompactOptions, CompactionOptions, DBCompressionType, CompactionFilter, CompactionFilterContext, CompactionFilterDecision,
-    CompactionFilterFactory, CompactionFilterValueType, DBCompactionFilter};
-use std::ffi::CString;
-use std::vec::Vec;
-use lazy_static::*;
-use std::sync::{Arc, Mutex};
 use collections::HashMap;
+use engine_traits::{CFNamesExt, CompactExt, Result};
+use lazy_static::*;
+use rocksdb::{
+    new_compaction_filter_raw, CompactOptions, CompactionFilter, CompactionFilterContext,
+    CompactionFilterDecision, CompactionFilterFactory, CompactionFilterValueType,
+    CompactionOptions, DBCompactionFilter, DBCompressionType,
+};
+use std::ffi::CString;
+use std::sync::{Arc, Mutex};
+use std::vec::Vec;
 
 use std::cmp;
 
@@ -149,10 +152,7 @@ impl CompactExt for RocksEngine {
         CompactionKeyRangeFilterFactory::update_range(region_id, start_key, end_key);
     }
 
-    fn clear_compaction_filter_key_range(
-        &self,
-        region_id: u64,
-    ) {
+    fn clear_compaction_filter_key_range(&self, region_id: u64) {
         CompactionKeyRangeFilterFactory::delete_range(region_id);
     }
 }
@@ -167,13 +167,14 @@ pub struct CompactionKeyRangeFilterFactory {
 }
 
 lazy_static! {
-    static ref REGIONS_KEY_RANGE: Arc<Mutex<HashMap<u64, RegionKeyRange>>> = Arc::new(Mutex::new(HashMap::default()));
+    static ref REGIONS_KEY_RANGE: Arc<Mutex<HashMap<u64, RegionKeyRange>>> =
+        Arc::new(Mutex::new(HashMap::default()));
 }
 
 pub struct CompactionKeyRangeFilter {
     region_id: u64,
     start_key: Vec<u8>,
-    end_key: Vec<u8>, 
+    end_key: Vec<u8>,
     enabled: bool,
 }
 
@@ -187,12 +188,10 @@ impl CompactionFilterFactory for CompactionKeyRangeFilterFactory {
         let name = CString::new("key_range_compaction_filter").unwrap();
         unsafe { new_compaction_filter_raw(name, filter) }
     }
-} 
+}
 
 impl CompactionKeyRangeFilterFactory {
-    pub fn create_filter(
-        &self,
-    ) -> CompactionKeyRangeFilter {
+    pub fn create_filter(&self) -> CompactionKeyRangeFilter {
         let key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
         let mut start_key = keys::DATA_MIN_KEY.to_vec();
         let mut end_key = keys::DATA_MAX_KEY.to_vec();
@@ -205,7 +204,16 @@ impl CompactionKeyRangeFilterFactory {
         }
 
         let region_id = self.region_id;
-        CompactionKeyRangeFilter { region_id,start_key, end_key, enabled}
+        println!(
+            "create_filter region_id {} start_key {:?} end_key {:?}",
+            self.region_id, &start_key, &end_key
+        );
+        CompactionKeyRangeFilter {
+            region_id,
+            start_key,
+            end_key,
+            enabled,
+        }
     }
 
     fn update_range(region_id: u64, start_key: Vec<u8>, end_key: Vec<u8>) {
@@ -213,14 +221,14 @@ impl CompactionKeyRangeFilterFactory {
             return;
         }
         let mut key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
-        key_range_map.insert(region_id, RegionKeyRange{start_key, end_key});
+        key_range_map.insert(region_id, RegionKeyRange { start_key, end_key });
     }
 
     fn delete_range(region_id: u64) {
         let mut key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
         key_range_map.remove(&region_id);
     }
-} 
+}
 
 impl CompactionFilter for CompactionKeyRangeFilter {
     fn featured_filter(
@@ -244,13 +252,13 @@ impl CompactionFilter for CompactionKeyRangeFilter {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::raw_util::{new_engine, CFOptions};
     use crate::Compat;
     use engine_traits::CompactExt;
     use rocksdb::{ColumnFamilyOptions, Writable};
     use std::sync::Arc;
     use tempfile::Builder;
-    use super::*;
 
     #[test]
     fn test_compact_files_in_range() {
@@ -359,7 +367,7 @@ mod tests {
     #[test]
     fn test_set_compaction_factory_update_range() {
         let region_id = 1;
-        CompactionKeyRangeFilterFactory::update_range(region_id, b"k0".to_vec(), b"k5".to_vec()); 
+        CompactionKeyRangeFilterFactory::update_range(region_id, b"k0".to_vec(), b"k5".to_vec());
         {
             let key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
             assert!(key_range_map.contains_key(&region_id));
@@ -379,7 +387,7 @@ mod tests {
     #[test]
     fn test_create_compaction_key_range_filter() {
         let region_id = 1;
-        let factory = CompactionKeyRangeFilterFactory {region_id};
+        let factory = CompactionKeyRangeFilterFactory { region_id };
         CompactionKeyRangeFilterFactory::update_range(region_id, b"k0".to_vec(), b"k5".to_vec());
         let filter = factory.create_filter();
         assert_eq!(filter.region_id, region_id);

@@ -10,7 +10,7 @@ use std::u64;
 
 use collections::HashMap;
 use engine_traits::{DeleteStrategy, Range, CF_LOCK, CF_RAFT, DATA_CFS};
-use engine_traits::{Engines, KvEngine, Mutable, RaftEngine, WriteBatch, SSTFile};
+use engine_traits::{Engines, KvEngine, Mutable, RaftEngine, SSTFile, WriteBatch, ImportExt, IngestExternalFileOptions};
 use fail::fail_point;
 use kvproto::raft_serverpb::{PeerState, RaftApplyState, RegionLocalState};
 use raft::eraftpb::Snapshot as RaftSnapshot;
@@ -684,7 +684,7 @@ where
                     Some(t) => t,
                     None => return,
                 };
-                let result = tablet.filter_sst("", &start_key, &end_key);
+                let result = tablet.filter_sst("", &keys::data_key(&start_key), &keys::data_key(&end_key));
                 let result = BgTaskResult::SourceRegionPrepareMergeResult {
                     region_id,
                     tablet_suffix,
@@ -787,24 +787,40 @@ where
                     None,
                 )
                 .unwrap();
+                println!("file maps {:?}", &sst_file_maps);
                 for cf in src_tablet.cf_names() {
                     let num_of_level = src_tablet.get_cf_num_of_level(cf);
                     for i in 0..num_of_level {
                         let level = num_of_level - i - 1;
                         let sst_files = src_tablet.get_cf_files(cf, level).unwrap();
-                        let mut valid_sst_files: Vec<SSTFile> = vec![];
-                        let mut additional_sst_files: Vec<SSTFile> = vec![];
+                        //let mut valid_sst_files: Vec<SSTFile> = vec![];
+                        //let mut additional_sst_files: Vec<SSTFile> = vec![];
                         for sst_file in &sst_files {
                             let file_name = sst_file.get_file_name();
+                            let mut file_to_injest = "";
+                            let full_file_name = src_tablet.path().to_string() + file_name;
                             if sst_file_maps.contains_key(file_name) {
                                 // empty means the file data is not in the region's range and should be skipped
-                                if !sst_file_maps[file_name].is_empty() { 
-                                    additional_sst_files.push(sst_file.clone());
+                                if !sst_file_maps[file_name].is_empty() {
+                                    println!("level {} file name {} not empty, added in additional sst files",  level, file_name);
+                                    //additional_sst_files.push(sst_file.clone());
+                                    file_to_injest = &sst_file_maps[file_name]; 
+                                } else {
+                                    println!("level {} file name {} is empty, skip",  level, file_name); 
                                 }
                             } else {
-                                valid_sst_files.push(sst_file.clone());
+                                println!("level {} file name {} not in map, added in valid_sst_files sst files",  level, file_name);
+                                //valid_sst_files.push(sst_file.clone());
+                                file_to_injest = &full_file_name; 
+                            }
+                            if file_to_injest.len() != 0 {
+                                let mut ingest_opt = <EK as ImportExt>::IngestExternalFileOptions::new();
+                                ingest_opt.move_files(true);
+                                println!("file to ingest {}", &file_to_injest);
+                                dst_tablet.ingest_external_file_cf(cf, &ingest_opt, &[file_to_injest]).unwrap();
                             }
                         }
+                        /*
                         if valid_sst_files.len() != 0 {
                             src_sst_importer
                                 .ingest2(&valid_sst_files, &dst_tablet)
@@ -815,7 +831,7 @@ where
                             src_tmp_sst_importer
                                 .ingest2(&additional_sst_files, &dst_tablet)
                                 .unwrap();
-                        }
+                        }*/
                     }
                 }
 
@@ -877,7 +893,8 @@ mod tests {
     use engine_test::ctor::ColumnFamilyOptions;
     use engine_test::kv::KvTestEngine;
     use engine_traits::{
-        CFNamesExt, CompactExt, MiscExt, Mutable, Peekable, SyncMutable, WriteBatch, WriteBatchExt,
+        CFNamesExt, CompactExt, Iterable, MiscExt, Mutable, Peekable, SyncMutable, WriteBatch,
+        WriteBatchExt,
     };
     use engine_traits::{CF_DEFAULT, CF_RAFT};
     use kvproto::raft_serverpb::{PeerState, RegionLocalState};
@@ -1136,7 +1153,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_source_region_prepare_merge_task() {
         let temp_dir = Builder::new()
@@ -1154,7 +1170,7 @@ mod tests {
             CFOptions::new("raft", cf_opts.clone()),
         ];
         let raft_cfs_opt = CFOptions::new(CF_DEFAULT, cf_opts);
-        let engine = get_test_db_for_regions(
+        let engine = get_test_tablets_for_regions(
             &temp_dir,
             None,
             Some(raft_cfs_opt),
@@ -1164,15 +1180,17 @@ mod tests {
         )
         .unwrap();
 
-        for cf_name in engine.kv.cf_names() {
+        let tablet = engine.tablets.open_tablet(1, 0);
+        for cf_name in tablet.cf_names() {
             for i in 0..6 {
-                engine.kv.put_cf(cf_name, &[i], &[i]).unwrap();
-                engine.kv.put_cf(cf_name, &[i + 1], &[i + 1]).unwrap();
-                engine.kv.flush_cf(cf_name, true).unwrap();
+                tablet.put_cf(cf_name, &keys::data_key(&[i]), &[i]).unwrap();
+                tablet
+                    .put_cf(cf_name, &keys::data_key(&[i + 1]), &[i + 1])
+                    .unwrap();
+                tablet.flush_cf(cf_name, true).unwrap();
                 // check level 0 files
                 assert_eq!(
-                    engine
-                        .kv
+                    tablet
                         .get_cf_num_files_at_level(cf_name, 0)
                         .unwrap()
                         .unwrap(),
@@ -1180,13 +1198,18 @@ mod tests {
                 );
             }
         }
+        tablet.set_compaction_filter_key_range(
+            1,
+            [0].to_vec(),
+            [1].to_vec(),
+        );
 
         let snap_dir = Builder::new().prefix("snap_dir").tempdir().unwrap();
         let mgr = SnapManager::new(snap_dir.path().to_str().unwrap());
         let bg_worker = Worker::new("source_region_prepare_merge");
         let mut worker = bg_worker.lazy_build("source_region_prepare_merge");
         let sched = worker.scheduler();
-        let (router, receiver) = mpsc::sync_channel(1);
+        let (router, _receiver) = mpsc::sync_channel(1);
         let runner = RegionRunner::new(
             engine.clone(),
             mgr,
@@ -1197,7 +1220,6 @@ mod tests {
         );
         worker.start_with_timer(runner);
 
-        
         let run_and_wait_prepare_merge_task = |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
             // construct snapshot
             let (tx, rx) = mpsc::sync_channel(1);
@@ -1208,9 +1230,9 @@ mod tests {
                     start_key,
                     end_key,
                     notifier: tx,
-                    cb: Box::new(move|region_id| {
+                    cb: Box::new(move |region_id| {
                         assert_eq!(region_id, id);
-                    }), 
+                    }),
                 })
                 .unwrap();
             let task_result = rx.recv();
@@ -1218,16 +1240,33 @@ mod tests {
                 Ok(BgTaskResult::SourceRegionPrepareMergeResult {
                     region_id,
                     tablet_suffix,
-                    sst_file_maps}) => {
-                        assert_eq!(region_id, id);
-                        assert_eq!(tablet_suffix, 0);
-                        assert!(sst_file_maps.len() != 0);
+                    sst_file_maps,
+                }) => {
+                    assert_eq!(region_id, id);
+                    assert_eq!(tablet_suffix, 0);
+                    //assert!(sst_file_maps.len() != 0);
                 }
                 msg => panic!("expected SourceRegionPrepareMergeResult, but got {:?}", msg),
             }
         };
 
         run_and_wait_prepare_merge_task(1, vec![0], vec![1]);
+        let tablet = engine.tablets.open_tablet_cache(1, 0).unwrap();
+        for cf_name in DATA_CFS {
+            tablet
+                .scan_cf(
+                    cf_name,
+                    keys::MIN_KEY,
+                    keys::MAX_KEY,
+                    false,
+                    |key, value| {
+                        //assert!(key[0] == 0);
+                        println!("{:?} {:?}", key, value);
+                        Ok(true)
+                    },
+                )
+                .unwrap();
+        }
     }
 
     #[test]
@@ -1254,14 +1293,15 @@ mod tests {
             None,
             Some(kv_cfs_opts),
             &[1],
-            &[0],
         )
         .unwrap();
         let tablet = engine.tablets.open_tablet(1, 0);
         for cf_name in tablet.cf_names() {
             for i in 0..6 {
-                tablet.put_cf(cf_name, &[i], &[i]).unwrap();
-                tablet.put_cf(cf_name, &[i + 1], &[i + 1]).unwrap();
+                tablet.put_cf(cf_name, &keys::data_key(&[i]), &[i]).unwrap();
+                tablet
+                    .put_cf(cf_name, &keys::data_key(&[i + 1]), &[i + 1])
+                    .unwrap();
                 tablet.flush_cf(cf_name, true).unwrap();
                 // check level 0 files
                 assert_eq!(
@@ -1273,13 +1313,18 @@ mod tests {
                 );
             }
         }
+        tablet.set_compaction_filter_key_range(
+            1,
+            [0].to_vec(),
+            [1].to_vec(),
+        );
 
         let snap_dir = Builder::new().prefix("snap_dir").tempdir().unwrap();
         let mgr = SnapManager::new(snap_dir.path().to_str().unwrap());
         let bg_worker = Worker::new("target_region_prepare_merge");
         let mut worker = bg_worker.lazy_build("target_region_prepare_merge");
         let sched = worker.scheduler();
-        let (router, receiver) = mpsc::sync_channel(1);
+        let (router, _receiver) = mpsc::sync_channel(1);
         let runner = RegionRunner::new(
             engine.clone(),
             mgr,
@@ -1290,7 +1335,6 @@ mod tests {
         );
         worker.start_with_timer(runner);
 
-        
         let run_and_wait_prepare_merge_task = |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
             // construct snapshot
             let (tx, rx) = mpsc::sync_channel(1);
@@ -1301,27 +1345,43 @@ mod tests {
                     start_key,
                     end_key,
                     notifier: tx,
-                    cb: Box::new(move|region_id| {
+                    cb: Box::new(move |region_id| {
                         assert_eq!(region_id, id);
-                    }), 
+                    }),
                 })
                 .unwrap();
             let task_result = rx.recv();
             match task_result {
                 Ok(BgTaskResult::TargetRegionPrepareMergeResult {
                     region_id,
-                    tablet_suffix}) => {
-                        assert_eq!(region_id, id);
-                        assert_eq!(tablet_suffix, 0);
+                    tablet_suffix,
+                }) => {
+                    assert_eq!(region_id, id);
+                    assert_eq!(tablet_suffix, 0);
                 }
                 msg => panic!("expected TargetRegionPrepareMergeResult, but got {:?}", msg),
             }
         };
 
         run_and_wait_prepare_merge_task(1, vec![0], vec![1]);
+        let tablet = engine.tablets.open_tablet_cache(1, 0).unwrap();
+        for cf_name in DATA_CFS {
+            tablet
+                .scan_cf(
+                    cf_name,
+                    keys::MIN_KEY,
+                    keys::MAX_KEY,
+                    false,
+                    |key, value| {
+                        //assert!(key[0] == 0);
+                        println!("{:?} {:?}", key, value);
+                        Ok(true)
+                    },
+                )
+                .unwrap();
+        }
     }
 
-    /*
     #[test]
     fn test_target_region_ingest_task() {
         let temp_dir = Builder::new()
@@ -1345,25 +1405,33 @@ mod tests {
             Some(raft_cfs_opt),
             None,
             Some(kv_cfs_opts),
-            &[1],
-            &[0],
+            &[1, 2],
         )
         .unwrap();
-        let tablet = engine.tablets.open_tablet(1, 0);
-        for cf_name in tablet.cf_names() {
-            for i in 0..6 {
-                tablet.put_cf(cf_name, &[i], &[i]).unwrap();
-                tablet.put_cf(cf_name, &[i + 1], &[i + 1]).unwrap();
-                tablet.flush_cf(cf_name, true).unwrap();
-                // check level 0 files
-                assert_eq!(
+        for region_id in 1..3 {
+            let tablet = engine.tablets.open_tablet(region_id, 0);
+            for cf_name in tablet.cf_names() {
+                for i in 0..6 {
+                    tablet.put_cf(cf_name, &keys::data_key(&[i]), &[i]).unwrap();
                     tablet
-                        .get_cf_num_files_at_level(cf_name, 0)
-                        .unwrap()
-                        .unwrap(),
-                    u64::from(i) + 1
-                );
+                        .put_cf(cf_name, &keys::data_key(&[i + 1]), &[i + 1])
+                        .unwrap();
+                    tablet.flush_cf(cf_name, true).unwrap();
+                    // check level 0 files
+                    assert_eq!(
+                        tablet
+                            .get_cf_num_files_at_level(cf_name, 0)
+                            .unwrap()
+                            .unwrap(),
+                        u64::from(i) + 1
+                    );
+                }
             }
+            tablet.set_compaction_filter_key_range(
+                region_id,
+                [(region_id - 1) as u8].to_vec(),
+                [region_id as u8].to_vec(),
+            );
         }
 
         let snap_dir = Builder::new().prefix("snap_dir").tempdir().unwrap();
@@ -1371,7 +1439,7 @@ mod tests {
         let bg_worker = Worker::new("target_region_prepare_merge");
         let mut worker = bg_worker.lazy_build("target_region_prepare_merge");
         let sched = worker.scheduler();
-        let (router, receiver) = mpsc::sync_channel(1);
+        let (router, _receiver) = mpsc::sync_channel(1);
         let runner = RegionRunner::new(
             engine.clone(),
             mgr,
@@ -1381,35 +1449,122 @@ mod tests {
             router,
         );
         worker.start_with_timer(runner);
+        let mut sst_file_maps_recv: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut run_and_wait_prepare_source_region_merge_task =
+            |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
+                // construct snapshot
+                let (tx, rx) = mpsc::sync_channel(1);
+                sched
+                    .schedule(Task::SourceRegionPrepareMerge {
+                        region_id: id,
+                        tablet_suffix: 0,
+                        start_key,
+                        end_key,
+                        notifier: tx,
+                        cb: Box::new(move |region_id| {
+                            assert_eq!(region_id, id);
+                        }),
+                    })
+                    .unwrap();
+                let task_result = rx.recv();
+                match task_result {
+                    Ok(BgTaskResult::SourceRegionPrepareMergeResult {
+                        region_id: _,
+                        tablet_suffix: _,
+                        sst_file_maps,
+                    }) => {
+                        sst_file_maps_recv = sst_file_maps;
+                    }
+                    msg => panic!("expected SourceRegionPrepareMergeResult, but got {:?}", msg),
+                }
+            };
 
-        
-        let run_and_wait_prepare_merge_task = |src_id: u64, dst_id: u64, sst_file_maps: std::collections::HashMap<String, String>| {
+        run_and_wait_prepare_source_region_merge_task(1, vec![0], vec![1]); // filter region 1 from key 0 to 1
+        //assert!(sst_file_maps_recv.len() != 0);
+
+        let run_and_wait_prepare_merge_task = |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
             // construct snapshot
             let (tx, rx) = mpsc::sync_channel(1);
             sched
-                .schedule(Task::TargetRegionIngestSST {
-                    src_region_id: id,
-                    src_tablet_suffix: 0,
-                    dst_region_id: dst_id,
-                    dst_tablet_suffix: 0,
+                .schedule(Task::TargetRegionPrepareMerge {
+                    region_id: id,
+                    tablet_suffix: 0,
+                    start_key,
+                    end_key,
                     notifier: tx,
-                    cb: Box::new(move|region_id| {
+                    cb: Box::new(move |region_id| {
                         assert_eq!(region_id, id);
-                    }), 
+                    }),
                 })
                 .unwrap();
-            let task_result = rx.recv();
-            match task_result {
-                Ok(BgTaskResult::TargetRegionPrepareMergeResult {
-                    region_id,
-                    tablet_suffix}) => {
-                        assert_eq!(region_id, id);
-                        assert_eq!(tablet_suffix, 0);
-                }
-                msg => panic!("expected TargetRegionPrepareMergeResult, but got {:?}", msg),
-            }
+            rx.recv().unwrap();
         };
 
-        run_and_wait_prepare_merge_task(1, vec![0], vec![1]);
-    }*/
+        run_and_wait_prepare_merge_task(2, vec![1], vec![2]); // filter region 2 from key 1 to 2
+
+        let tablet = engine.tablets.open_tablet_cache(2, 0).unwrap();
+        for cf_name in DATA_CFS {
+            let mut sum = 0;
+            tablet
+                .scan_cf(
+                    cf_name,
+                    keys::MIN_KEY,
+                    keys::MAX_KEY,
+                    false,
+                    |key, value| {
+                        sum += key[1] + 1;
+                        println!("check before ingest {:?} {:?}", key, value);
+                        Ok(true)
+                    },
+                )
+                .unwrap();
+        }
+
+        let run_and_wait_sst_ingest_task =
+            |src_id: u64, dst_id: u64, sst_file_maps: std::collections::HashMap<String, String>| {
+                // construct snapshot
+                let (tx, rx) = mpsc::sync_channel(1);
+                sched
+                    .schedule(Task::TargetRegionIngestSST {
+                        src_region_id: src_id,
+                        src_tablet_suffix: 0,
+                        dst_region_id: dst_id,
+                        dst_tablet_suffix: 0,
+                        sst_file_maps,
+                        notifier: tx,
+                        cb: Box::new(move |region_id| {
+                            assert_eq!(region_id, dst_id);
+                        }),
+                    })
+                    .unwrap();
+                let task_result = rx.recv();
+                match task_result {
+                    Ok(BgTaskResult::TargetRegionIngestSSTResult { region_id }) => {
+                        assert_eq!(region_id, dst_id);
+                    }
+                    msg => panic!("expected TargetRegionPrepareMergeResult, but got {:?}", msg),
+                }
+            };
+
+        run_and_wait_sst_ingest_task(1, 2, sst_file_maps_recv);
+        let tablet = engine.tablets.open_tablet_cache(2, 0).unwrap();
+        for cf_name in DATA_CFS {
+            let mut sum = 0;
+            tablet
+                .scan_cf(
+                    cf_name,
+                    keys::MIN_KEY,
+                    keys::MAX_KEY,
+                    false,
+                    |key, value| {
+                        sum += key[1] + 1;
+                        println!("{:?} {:?}", key, value);
+                        Ok(true)
+                    },
+                )
+                .unwrap();
+            assert_eq!(sum, 3);
+        }
+    }
 }

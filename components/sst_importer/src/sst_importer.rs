@@ -612,7 +612,10 @@ impl ImportDir {
     }
 
     fn join2(&self, meta: &SSTFile) -> ImportPath {
-        let file_name = meta.get_file_name();
+        let mut file_name = meta.get_file_name();
+        if file_name.starts_with("/") {
+            file_name = &file_name[1..];
+        }
         let save_path = self.root_dir.join(file_name);
         let temp_path = self.temp_dir.join(file_name);
         let clone_path = self.clone_dir.join(file_name);
@@ -721,16 +724,20 @@ impl ImportDir {
         for sst_file in sst_files {
             let path = self.join2(sst_file);
             let cf = sst_file.get_cf_name();
+            println!("before prepare_sst_for_ingestion {:?}", path);
             super::prepare_sst_for_ingestion(&path.save, &path.clone, key_manager.as_deref())?;
+            println!("after prepare_sst_for_ingestion");
             ingest_bytes += sst_file.get_file_size();
             engine.reset_global_seq(cf, &path.clone)?;
             paths.entry(cf).or_insert_with(Vec::new).push(path);
         }
+        println!("after prepare sst");
 
         let mut opts = E::IngestExternalFileOptions::new();
         opts.move_files(true);
         for (cf, cf_paths) in paths {
             let files: Vec<&str> = cf_paths.iter().map(|p| p.clone.to_str().unwrap()).collect();
+            println!("before ingest_external_file_cf {:?}", files);
             engine.ingest_external_file_cf(cf, &opts, &files)?;
         }
         INPORTER_INGEST_COUNT.observe(sst_files.len() as _);
