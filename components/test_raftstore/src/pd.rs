@@ -1068,7 +1068,7 @@ impl TestPdClient {
     pub fn must_merge(&self, from: u64, target: u64) {
         self.merge_region(from, target);
 
-        self.check_merged_timeout(from, Duration::from_secs(5));
+        self.check_merged_timeout(from, Duration::from_secs(300));
     }
 
     pub fn check_merged(&self, from: u64) -> bool {

@@ -10,7 +10,10 @@ use std::u64;
 
 use collections::HashMap;
 use engine_traits::{DeleteStrategy, Range, CF_LOCK, CF_RAFT, DATA_CFS};
-use engine_traits::{Engines, KvEngine, Mutable, RaftEngine, SSTFile, WriteBatch, ImportExt, IngestExternalFileOptions};
+use engine_traits::{
+    Engines, ImportExt, IngestExternalFileOptions, KvEngine, Mutable, RaftEngine,
+    WriteBatch,
+};
 use fail::fail_point;
 use kvproto::raft_serverpb::{PeerState, RaftApplyState, RegionLocalState};
 use raft::eraftpb::Snapshot as RaftSnapshot;
@@ -684,7 +687,8 @@ where
                     Some(t) => t,
                     None => return,
                 };
-                let result = tablet.filter_sst("", &keys::data_key(&start_key), &keys::data_key(&end_key));
+                let result =
+                    tablet.filter_sst("", &keys::data_key(&start_key), &keys::data_key(&end_key));
                 let result = BgTaskResult::SourceRegionPrepareMergeResult {
                     region_id,
                     tablet_suffix,
@@ -697,9 +701,15 @@ where
                         "region_id" => region_id,
                         "err" => %e,
                     );
+                    println!("failed to notify source region result {}", region_id);
                 } else {
                     cb(region_id);
                 }
+                info!(
+                    "SourceRegionPrepareMerge finished";
+                    "region_id" => region_id
+                );
+                println!("SourceRegionPrepareMerge finished {}", region_id);
             }
             Task::TargetRegionPrepareMerge {
                 region_id,
@@ -747,9 +757,15 @@ where
                         "region_id" => region_id,
                         "err" => %e,
                     );
+                    println!("failed to notify target region result {}", region_id);
                 } else {
                     cb(region_id);
                 }
+                info!(
+                    "TargetRegionPrepareMerge finished";
+                    "region_id" => region_id
+                );
+                println!("TargetRegionPrepareMerge finished {}", region_id);
             }
             Task::TargetRegionIngestSST {
                 src_region_id,
@@ -778,22 +794,22 @@ where
                     Some(t) => t,
                     None => return,
                 };
-                let src_path = src_tablet.path();
-                let src_sst_importer =
+                //let src_path = src_tablet.path();
+                /*let src_sst_importer =
                     SSTImporter::new(&ImportConfig::default(), Path::new(src_path), None).unwrap();
                 let src_tmp_sst_importer = SSTImporter::new(
                     &ImportConfig::default(),
                     Path::new(&(src_path.to_string() + "/tmp")),
                     None,
                 )
-                .unwrap();
+                .unwrap();*/
                 println!("file maps {:?}", &sst_file_maps);
                 for cf in src_tablet.cf_names() {
                     let num_of_level = src_tablet.get_cf_num_of_level(cf);
                     for i in 0..num_of_level {
                         let level = num_of_level - i - 1;
                         let sst_files = src_tablet.get_cf_files(cf, level).unwrap();
-                        //let mut valid_sst_files: Vec<SSTFile> = vec![];
+                        let mut valid_sst_files: Vec<String> = vec![];
                         //let mut additional_sst_files: Vec<SSTFile> = vec![];
                         for sst_file in &sst_files {
                             let file_name = sst_file.get_file_name();
@@ -802,31 +818,40 @@ where
                             if sst_file_maps.contains_key(file_name) {
                                 // empty means the file data is not in the region's range and should be skipped
                                 if !sst_file_maps[file_name].is_empty() {
-                                    println!("level {} file name {} not empty, added in additional sst files",  level, file_name);
+                                    println!(
+                                        "level {} file name {} not empty, added in additional sst files",
+                                        level, file_name
+                                    );
                                     //additional_sst_files.push(sst_file.clone());
-                                    file_to_injest = &sst_file_maps[file_name]; 
+                                    file_to_injest = &sst_file_maps[file_name];
                                 } else {
-                                    println!("level {} file name {} is empty, skip",  level, file_name); 
+                                    println!(
+                                        "level {} file name {} is empty, skip",
+                                        level, file_name
+                                    );
                                 }
                             } else {
-                                println!("level {} file name {} not in map, added in valid_sst_files sst files",  level, file_name);
+                                println!(
+                                    "level {} file name {} not in map, added in valid_sst_files sst files",
+                                    level, file_name
+                                );
                                 //valid_sst_files.push(sst_file.clone());
-                                file_to_injest = &full_file_name; 
+                                file_to_injest = &full_file_name;
                             }
                             if file_to_injest.len() != 0 {
-                                let mut ingest_opt = <EK as ImportExt>::IngestExternalFileOptions::new();
-                                ingest_opt.move_files(true);
-                                println!("file to ingest {}", &file_to_injest);
-                                dst_tablet.ingest_external_file_cf(cf, &ingest_opt, &[file_to_injest]).unwrap();
+                                valid_sst_files.push(file_to_injest.to_string()); 
                             }
                         }
-                        /*
                         if valid_sst_files.len() != 0 {
-                            src_sst_importer
-                                .ingest2(&valid_sst_files, &dst_tablet)
-                                .unwrap(); // TODO: error handling
+                            let mut ingest_opt =
+                                <EK as ImportExt>::IngestExternalFileOptions::new();
+                            ingest_opt.move_files(true);
+                            let v: Vec<&str> = valid_sst_files.iter().map(|x| x.as_ref()).collect();
+                            dst_tablet
+                                .ingest_external_file_cf(cf, &ingest_opt, &v)
+                                .unwrap();
                         }
-
+                        /*
                         if additional_sst_files.len() != 0 {
                             src_tmp_sst_importer
                                 .ingest2(&additional_sst_files, &dst_tablet)
@@ -843,9 +868,17 @@ where
                         "region_id" => dst_region_id,
                         "err" => %e,
                     );
+                    println!(
+                        "failed to notify filter sst {} {}",
+                        src_region_id, dst_region_id
+                    );
                 } else {
                     cb(dst_region_id);
                 }
+                println!(
+                    "TargetRegionIngestSST finished {} {}",
+                    src_region_id, dst_region_id
+                );
             }
         }
     }
@@ -1198,11 +1231,7 @@ mod tests {
                 );
             }
         }
-        tablet.set_compaction_filter_key_range(
-            1,
-            [0].to_vec(),
-            [1].to_vec(),
-        );
+        tablet.set_compaction_filter_key_range(1, [0].to_vec(), [1].to_vec());
 
         let snap_dir = Builder::new().prefix("snap_dir").tempdir().unwrap();
         let mgr = SnapManager::new(snap_dir.path().to_str().unwrap());
@@ -1313,11 +1342,7 @@ mod tests {
                 );
             }
         }
-        tablet.set_compaction_filter_key_range(
-            1,
-            [0].to_vec(),
-            [1].to_vec(),
-        );
+        tablet.set_compaction_filter_key_range(1, [0].to_vec(), [1].to_vec());
 
         let snap_dir = Builder::new().prefix("snap_dir").tempdir().unwrap();
         let mgr = SnapManager::new(snap_dir.path().to_str().unwrap());

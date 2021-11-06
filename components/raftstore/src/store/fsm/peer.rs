@@ -2682,10 +2682,19 @@ where
 
     fn schedule_merge(&mut self) -> Result<()> {
         fail_point!("on_schedule_merge", |_| Ok(()));
+        info!(
+            "schedule_merge";
+            "store_id" => self.store_id()
+        );
         let (request, target_id) = {
             let state = self.fsm.peer.pending_merge_state.as_ref().unwrap();
             let expect_region = state.get_target();
             if !self.validate_merge_peer(expect_region)? {
+                info!(
+                    "validate_merge_peer return false";
+                    "store_id" => self.store_id(),
+                    "expect_region" => expect_region.get_id()
+                );
                 // Wait till next round.
                 return Ok(());
             }

@@ -31,13 +31,13 @@ fn test_node_base_merge() {
 
     cluster.must_put(b"k1", b"v1");
     cluster.must_put(b"k3", b"v3");
-    for i in 0..3 {
-        must_get_equal(&cluster.get_engine(i + 1), b"k1", b"v1");
-        must_get_equal(&cluster.get_engine(i + 1), b"k3", b"v3");
-    }
-
     let pd_client = Arc::clone(&cluster.pd_client);
     let region = pd_client.get_region(b"k1").unwrap();
+    for i in 0..3 {
+        must_get_equal_in(&cluster.engine(i + 1), region.get_id(), b"k1", b"v1");
+        must_get_equal_in(&cluster.engine(i + 1), region.get_id(), b"k3", b"v3");
+    }
+
     cluster.must_split(&region, b"k2");
     let left = pd_client.get_region(b"k1").unwrap();
     let right = pd_client.get_region(b"k2").unwrap();
