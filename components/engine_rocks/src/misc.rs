@@ -7,7 +7,7 @@ use crate::{util, RocksSstWriter, ROCKSDB_CUR_SIZE_ALL_MEM_TABLES, ROCKSDB_ESTIM
 use engine_traits::{
     CFNamesExt, DeleteStrategy, Error, ImportExt, IngestExternalFileOptions, IterOptions, Iterable,
     Iterator, MiscExt, Mutable, Range, Result, SSTFile, SstWriter, SstWriterBuilder, WriteBatch,
-    WriteBatchExt, ALL_CFS,
+    WriteBatchExt, ALL_CFS, DATA_CFS,CF_DEFAULT,
 };
 use rocksdb::Range as RocksRange;
 use std::cmp::Ordering;
@@ -155,14 +155,20 @@ impl RocksEngine {
             .set_db(self)
             .set_cf(cf);
         let mut writer = builder.build(&dst_file_path)?;
+        let mut has_data = false;
         sst_reader
             .scan(start_key, end_key, false, |key, value| {
                 writer.put(key, value).unwrap();
+                has_data = true;
                 Ok(true)
             })
             .unwrap();
-        writer.finish().unwrap();
-        Ok(dst_file_path)
+        if has_data {
+            writer.finish().unwrap();
+            return Ok(dst_file_path);
+        } else {
+            return Err(Error::EntriesUnavailable);
+        } 
     }
 }
 
@@ -446,28 +452,31 @@ impl MiscExt for RocksEngine {
         end_key: &[u8],
     ) -> HashMap<String, String> {
         let db = self.as_inner().clone();
-        let cfs = db.cf_names();
+        db.flush(true).unwrap(); // make sure out-of-range data is flushed into SST.
+        db.pause_bg_work(); // pause background jobs (including compactions)
         let mut sst_file_map: HashMap<String, String> = HashMap::new();
         let mut temp_folder = sst_folder.to_string();
         if temp_folder.len() == 0 {
             temp_folder = db.path().to_string() + "/tmp";
         }
-        for cf in cfs.iter() {
+        for cf in DATA_CFS {
             let handle = db.cf_handle(cf).unwrap();
             let column_family_meta = db.get_column_family_meta_data(handle);
             let level_metas = column_family_meta.get_levels();
+            let mut level_0 = true; // TO ADD back
             for level_meta in level_metas.iter() {
                 let sst_file_metas = level_meta.get_files();
                 println!("sst files for cf {} {}", cf, sst_file_metas.len());
                 for sst_file_meta in sst_file_metas.iter() {
                     let smallest_key = sst_file_meta.get_smallestkey();
                     let biggest_key = sst_file_meta.get_largestkey();
-                    /*if smallest_key.cmp(start_key) != Ordering::Less
+                    // TODO Add it back
+                    if !level_0 && smallest_key.cmp(start_key) != Ordering::Less
                         && biggest_key.cmp(end_key) != Ordering::Greater
                     {
                         println!("skipping {}", sst_file_meta.get_name());
                         continue;
-                    } else*/ if (smallest_key.cmp(end_key) != Ordering::Less)
+                    } else if (smallest_key.cmp(end_key) != Ordering::Less)
                         || (biggest_key.cmp(start_key) == Ordering::Less)
                     {
                         sst_file_map.insert(sst_file_meta.get_name(), "".to_string());
@@ -487,13 +496,15 @@ impl MiscExt for RocksEngine {
                             println!("sst_file_map insert {}", &new_sst_file);
                             sst_file_map.insert(file_name, new_sst_file);
                         }
-                        Err(err) => {
-                            println!("import_sst failed {:?}", err);
+                        Err(_err) => {
+                            sst_file_map.insert(file_name, "".to_string());
                         }
                     }
                 }
+                level_0 = false;
             }
         }
+        db.continue_bg_work();
         sst_file_map
     }
 
@@ -520,6 +531,10 @@ impl MiscExt for RocksEngine {
                 cf_name: cf.to_string(),
                 file_name: sst_meta.get_name(),
                 file_size: sst_meta.get_size(),
+                smallest_key: sst_meta.get_smallestkey().to_vec(),
+                largest_key: sst_meta.get_largestkey().to_vec(),
+                smallest_seqno: 0,
+                largest_seqno: 0,
             })
             .collect::<Vec<SSTFile>>())
     }

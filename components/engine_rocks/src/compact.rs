@@ -13,6 +13,7 @@ use rocksdb::{
 use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 use std::vec::Vec;
+use tikv_util::{info};
 
 use std::cmp;
 
@@ -192,15 +193,23 @@ impl CompactionFilterFactory for CompactionKeyRangeFilterFactory {
 
 impl CompactionKeyRangeFilterFactory {
     pub fn create_filter(&self) -> CompactionKeyRangeFilter {
-        let key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
         let mut start_key = keys::DATA_MIN_KEY.to_vec();
         let mut end_key = keys::DATA_MAX_KEY.to_vec();
         let mut enabled = false;
-        if key_range_map.contains_key(&self.region_id) {
-            let key_range = &key_range_map[&self.region_id];
-            enabled = true;
-            start_key = keys::data_key(&key_range.start_key);
-            end_key = keys::data_key(&key_range.end_key);
+        {
+            let key_range_map = REGIONS_KEY_RANGE.lock().unwrap();
+            if key_range_map.contains_key(&self.region_id) {
+                let key_range = &key_range_map[&self.region_id];
+                if key_range.start_key.len() != 0 || key_range.end_key.len() != 0 { 
+                    enabled = true;
+                    if key_range.start_key.len() != 0 {
+                        start_key = keys::data_key(&key_range.start_key);
+                    }
+                    if key_range.end_key.len() != 0 {
+                        end_key = keys::data_key(&key_range.end_key);
+                    }
+                }
+            }
         }
 
         let region_id = self.region_id;
@@ -208,6 +217,7 @@ impl CompactionKeyRangeFilterFactory {
             "create_filter region_id {} start_key {:?} end_key {:?}",
             self.region_id, &start_key, &end_key
         );
+        info!("create compaction filter. region_id {}, enable {}, start_key {:?} end_key {:?}", region_id, enabled, &start_key, &end_key);
         CompactionKeyRangeFilter {
             region_id,
             start_key,
@@ -237,9 +247,14 @@ impl CompactionFilter for CompactionKeyRangeFilter {
         key: &[u8],
         _sequence: u64,
         _value: &[u8],
-        _value_type: CompactionFilterValueType,
+        value_type: CompactionFilterValueType,
     ) -> CompactionFilterDecision {
-        if !self.enabled {
+        if value_type != CompactionFilterValueType::Value {
+            return CompactionFilterDecision::Keep;
+        }
+
+        // only consider data keys or compaction filter is disabled
+        if !self.enabled || !key.starts_with(keys::DATA_PREFIX_KEY) {
             return CompactionFilterDecision::Keep;
         }
 

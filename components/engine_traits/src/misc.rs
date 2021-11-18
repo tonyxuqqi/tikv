@@ -26,6 +26,10 @@ pub struct SSTFile {
     pub cf_name: String,
     pub file_name: String,
     pub file_size: usize,
+    pub smallest_key: Vec<u8>,
+    pub largest_key: Vec<u8>,
+    pub smallest_seqno: u64,
+    pub largest_seqno: u64,
 }
 
 impl SSTFile {
@@ -39,6 +43,19 @@ impl SSTFile {
 
     pub fn get_file_size(&self) -> usize {
         self.file_size
+    }
+
+    pub fn get_smallest_key(&self) -> &[u8] {
+        &self.smallest_key
+    }
+    pub fn get_largest_key(&self) -> &[u8] {
+        &self.largest_key
+    }
+    pub fn get_smallest_seqno(&self) -> u64 {
+        self.smallest_seqno
+    }
+    pub fn get_largest_seqno(&self) -> u64 {
+        self.largest_seqno
     }
 }
 

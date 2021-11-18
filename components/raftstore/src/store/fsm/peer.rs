@@ -2633,6 +2633,12 @@ where
             let expect_epoch = target_region.get_region_epoch();
             // exist_epoch > expect_epoch
             if util::is_epoch_stale(expect_epoch, exist_epoch) {
+                info!(
+                    "target region changed";
+                    "region_id" => target_region.get_id(),
+                    "target_region" => ?target_region,
+                    "exist_region" => ?r
+                );
                 return Err(box_err!(
                     "target region changed {:?} -> {:?}",
                     target_region,
@@ -2739,8 +2745,18 @@ where
             admin.mut_commit_merge().set_commit(state.get_commit());
             admin.mut_commit_merge().set_entries(entries.into());
             request.set_admin_request(admin);
+            info!(
+                "sending commit merge";
+                "store_id" => self.store_id(),
+                "target_id" => target_id,
+                "source_id" => self.fsm.peer.region().get_id()
+            );
             (request, target_id)
         };
+        info!(
+            "sent commit merge";
+            "store_id" => self.store_id()
+        );
         // Please note that, here assumes that the unit of network isolation is store rather than
         // peer. So a quorum stores of source region should also be the quorum stores of target
         // region. Otherwise we need to enable proposal forwarding.
@@ -2796,7 +2812,7 @@ where
                     .prs()
                     .has_quorum(&self.fsm.peer.want_rollback_merge_peers)
                 {
-                    info!(
+                    error!(
                         "failed to schedule merge, rollback";
                         "region_id" => self.fsm.region_id(),
                         "peer_id" => self.fsm.peer_id(),
@@ -2922,7 +2938,27 @@ where
         merge_index: u64,
         region: metapb::Region,
         source: metapb::Region,
+        target_suffix: u64,
+        source_suffix: u64,
     ) {
+        let mut kv_wb = self.ctx.engines.kv.write_batch();
+        write_peer_state(&mut kv_wb, &region, PeerState::Normal, None, merge_index, target_suffix).unwrap();
+       
+        let mut merging_state = MergeState::default();
+        merging_state.set_target(region.clone());
+        write_peer_state(
+            &mut kv_wb,
+            &source,
+            PeerState::Tombstone,
+            Some(merging_state),
+            u64::MAX,
+            source_suffix,
+        ).unwrap();
+
+        let mut write_opts = WriteOptions::new();
+        write_opts.set_sync(true);
+        kv_wb.write_opt(&write_opts).unwrap();
+
         self.register_split_region_check_tick();
         let mut meta = self.ctx.store_meta.lock().unwrap();
 
@@ -3282,7 +3318,9 @@ where
                     index,
                     region,
                     source,
-                } => self.on_ready_commit_merge(index, region, source),
+                    target_suffix,
+                    source_suffix,
+                } => self.on_ready_commit_merge(index, region, source, target_suffix, source_suffix),
                 ExecResult::RollbackMerge { region, commit } => {
                     self.on_ready_rollback_merge(commit, Some(region))
                 }
@@ -3301,7 +3339,7 @@ where
                     // TODO: clean user properties?
                 }
                 ExecResult::IngestSst { ssts } => self.on_ingest_sst_result(ssts),
-                ExecResult::WaitingPrepareMerge { .. } => {},
+                ExecResult::FailedPrepareMerge { .. } => {},
             }
         }
 

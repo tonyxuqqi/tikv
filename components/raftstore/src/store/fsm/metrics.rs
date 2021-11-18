@@ -4,11 +4,18 @@ use lazy_static::lazy_static;
 use prometheus::{exponential_buckets, register_histogram, Histogram};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use tikv_util::time::Instant;
 
 lazy_static! {
     pub static ref APPLY_PROPOSAL: Histogram = register_histogram!(
         "tikv_raftstore_apply_proposal",
         "The count of proposals sent by a region at once",
+        exponential_buckets(1.0, 2.0, 20).unwrap()
+    )
+    .unwrap();
+    pub static ref REGION_MERGE_DURATION_IN_US: Histogram = register_histogram!(
+        "tikv_raftstore_merge_time",
+        "The total merge time in us",
         exponential_buckets(1.0, 2.0, 20).unwrap()
     )
     .unwrap();
@@ -85,4 +92,8 @@ impl LocalStoreStat {
             self.is_busy = false;
         }
     }
+}
+
+pub struct MergeTaskStat {
+    pub source_region_prepare_start: Instant,
 }

@@ -28,6 +28,10 @@ impl<'a> CFOptions<'a> {
     pub fn options_mut(&mut self) -> &mut ColumnFamilyOptions {
         &mut self.options
     }
+
+    pub fn cf(&self) -> &'a str {
+        self.cf
+    }
 }
 
 pub fn new_engine(

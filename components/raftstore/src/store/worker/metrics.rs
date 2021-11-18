@@ -117,4 +117,25 @@ lazy_static! {
         "Total number of requests directly executed by local reader."
     )
     .unwrap();
+
+    pub static ref MERGE_SOURCE_REGION_HISTOGRAM: Histogram = register_histogram!(
+        "tikv_source_region_prepare_merge_duration_seconds",
+        "Bucketed histogram of source region prepare merge duration",
+        exponential_buckets(0.0005, 2.0, 20).unwrap()
+    )
+    .unwrap();
+    
+    pub static ref MERGE_TARGET_REGION_HISTOGRAM: Histogram = register_histogram!(
+        "tikv_target_prepare_merge_duration_seconds",
+        "Bucketed histogram of target region prepare merge duration",
+        exponential_buckets(0.0005, 2.0, 20).unwrap()
+    )
+    .unwrap();
+    
+    pub static ref MERGE_SST_INGEST_HISTOGRAM: Histogram = register_histogram!(
+        "tikv_merge_sst_ingest_duration_seconds",
+        "Bucketed histogram of merge sst ingest duration",
+        exponential_buckets(0.0005, 2.0, 20).unwrap()
+    )
+    .unwrap();
 }

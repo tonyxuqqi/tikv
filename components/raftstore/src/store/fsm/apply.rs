@@ -251,6 +251,8 @@ pub enum ExecResult<S> {
         index: u64,
         region: Region,
         source: Region,
+        target_suffix: u64,
+        source_suffix: u64,
     },
     RollbackMerge {
         region: Region,
@@ -273,7 +275,7 @@ pub enum ExecResult<S> {
     IngestSst {
         ssts: Vec<SSTMetaInfo>,
     },
-    WaitingPrepareMerge {
+    FailedPrepareMerge {
         region: Region,
         state: MergeState,
     },
@@ -369,9 +371,15 @@ pub enum BgTaskResult {
     TargetRegionPrepareMergeResult {
         region_id: u64,
         tablet_suffix: u64,
+        source_region_id: u64,
     },
     TargetRegionIngestSSTResult {
         region_id: u64,
+        success: bool, // TODO: handle failure case
+        source_region_id: u64,
+    },
+    CancelMerge {
+        source_region_id: u64,
     },
 }
 
@@ -386,6 +394,7 @@ impl Debug for BgTaskResult {
 pub struct PrepareMergeTaskResult {
     finish_target_region: bool,
     finish_source_region: bool,
+    triggered_ingest_sst: bool,
     finish_ingest_sst: bool,
     //merge_result_stat: Option<MergeTaskResult>,
     source_region_id: u64,
@@ -393,6 +402,8 @@ pub struct PrepareMergeTaskResult {
     target_region_id: u64,
     target_tablet_suffix: u64,
     sst_file_maps: Option<std::collections::HashMap<String, String>>,
+    sourcce_start_key: Vec<u8>,
+    source_end_key: Vec<u8>,
 }
 
 impl PrepareMergeTaskResult {
@@ -400,6 +411,7 @@ impl PrepareMergeTaskResult {
         PrepareMergeTaskResult {
             finish_target_region: false,
             finish_source_region: false,
+            triggered_ingest_sst: false,
             finish_ingest_sst: false,
             source_region_id: 0,
             source_tablet_suffix: 0,
@@ -407,6 +419,8 @@ impl PrepareMergeTaskResult {
             target_tablet_suffix: 0,
             // merge_result_stat: None,
             sst_file_maps: None,
+            sourcce_start_key: vec![],
+            source_end_key: vec![],
         }
     }
 }
@@ -467,6 +481,8 @@ where
         >,
     >,
 
+    pending_merge_task_stats: Arc<Mutex<HashMap<(u64, u64), MergeTaskStat>>>,
+
     /// We must delete the ingested file before calling `callback` so that any ingest-request reaching this
     /// peer could see this update if leader had changed. We must also delete them after the applied-index
     /// has been persisted to kvdb because this entry may replay because of panic or power-off, which
@@ -514,6 +530,7 @@ where
                 >,
             >,
         >,
+        pending_merge_task_stats: Arc<Mutex<HashMap<(u64, u64), MergeTaskStat>>>,
     ) -> ApplyContext<EK, W> {
         ApplyContext {
             tag,
@@ -539,6 +556,7 @@ where
             store_id,
             pending_create_peers,
             pending_merge_task_channel,
+            pending_merge_task_stats,
             priority,
             yield_high_latency_operation: cfg.apply_batch_system.low_priority_pool_size > 0,
             pending_ssts: vec![],
@@ -740,7 +758,7 @@ where
 
     fn get_sender(&mut self, region_id: u64) -> Option<SyncSender<BgTaskResult>> {
         let mut pending_merge_task_channel = self.pending_merge_task_channel.lock().unwrap();
-        if let Some((send, recv)) = pending_merge_task_channel.get(&region_id) {
+        if let Some((send, _recv)) = pending_merge_task_channel.get(&region_id) {
             return Some((*send).clone());
         }
         let (tx, rx) = std::sync::mpsc::sync_channel(100); // TODO: use a config
@@ -1003,7 +1021,7 @@ where
     raft_engine: Box<dyn RaftEngineReadOnly>,
 
     bg_job_recv: Option<std::sync::mpsc::Receiver<BgTaskResult>>,
-    prepare_merge_task_result: Option<PrepareMergeTaskResult>,
+    prepare_merge_task_result: Vec<PrepareMergeTaskResult>,
 
     trace: ApplyMemoryTrace,
 }
@@ -1039,7 +1057,7 @@ where
             priority: Priority::Normal,
             raft_engine: reg.raft_engine,
             bg_job_recv: None,
-            prepare_merge_task_result: None,
+            prepare_merge_task_result: vec![],
             trace: ApplyMemoryTrace::default(),
         }
     }
@@ -1095,18 +1113,6 @@ where
 
             match res {
                 ApplyResult::None => {}
-                /*ApplyResult::Res(ExecResult::WaitingPrepareMerge { .. }) => {
-                    let region_id = self.region_id();
-                    let prepare_merge_task_result = self.prepare_merge_task_result.as_mut().unwrap();
-                    let merge_result_stat = prepare_merge_task_result.merge_result_stat.as_mut().unwrap();
-                    self.prepare_merge_res = Some(ApplyRes {
-                        region_id,
-                        apply_state: self.apply_state.clone(),
-                        exec_res: VecDeque::with_capacity(1),
-                        metrics: self.metrics.clone(),
-                        applied_index_term: self.applied_index_term,
-                    });
-                }*/
                 ApplyResult::Res(res) => results.push_back(res),
                 ApplyResult::Yield | ApplyResult::WaitMergeSource(_) => {
                     // Both cancel and merge will yield current processing.
@@ -1422,7 +1428,7 @@ where
                     self.region = region.clone();
                     self.is_merging = false;
                 }
-                ExecResult::WaitingPrepareMerge { ref region, .. } => {
+                ExecResult::FailedPrepareMerge { ref region, .. } => {
                     self.region = region.clone();
                     self.is_merging = true;
                 }
@@ -2575,7 +2581,11 @@ where
             "store_id" => ctx.store_id,
             "region_id" => self.region.get_id()
         );
-        println!("exec_prepare_merge on store store_id {} region_id {}", ctx.store_id, self.region.get_id());
+        println!(
+            "exec_prepare_merge on store store_id {} region_id {}",
+            ctx.store_id,
+            self.region.get_id()
+        );
         fail_point!("apply_before_prepare_merge");
         fail_point!(
             "apply_before_prepare_merge_2_3",
@@ -2631,9 +2641,30 @@ where
         fail_point!("apply_after_prepare_merge");
         PEER_ADMIN_CMD_COUNTER.prepare_merge.success.inc();
 
+        {
+            let mut pending_merge_task_stat = ctx.pending_merge_task_stats.lock().unwrap();
+            let merge_task_stat = MergeTaskStat {source_region_prepare_start: Instant::now()};
+            pending_merge_task_stat.insert((target_region_id, self.region.get_id()), merge_task_stat);
+        }
+
         let tablet = self.tablet.as_ref().unwrap();
         let path = Path::new(tablet.path());
-        let mailbox = ctx.router.mailbox(target_region_id).unwrap();
+        let mailbox = ctx.router.mailbox(target_region_id);
+        if mailbox.is_none() {
+            // target region is destroyed
+            info!(
+                "Target Region {} is destroyed, stop merge.",
+                target_region_id
+            );
+            return Ok((
+                AdminResponse::default(),
+                ApplyResult::Res(ExecResult::FailedPrepareMerge {
+                    region,
+                    state: merging_state,
+                }),
+            ));
+        }
+        let mailbox = mailbox.unwrap();
         if let Some(s) = path.file_name().map(|s| s.to_string_lossy()) {
             let mut split = s.split('_');
             let tablet_id = split.next().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -2660,6 +2691,38 @@ where
         ))
     }
 
+    fn get_or_add_prepare_merge_task_result(
+        &mut self,
+        source_region_id: u64,
+    ) -> &mut PrepareMergeTaskResult {
+        let mut idx = self.prepare_merge_task_result.len();
+        for i in 0..self.prepare_merge_task_result.len() {
+            let elem = self.prepare_merge_task_result.get(i).unwrap();
+            if elem.source_region_id == source_region_id {
+                idx = i;
+                break;
+            }
+        }
+        if idx < self.prepare_merge_task_result.len() {
+            return self.prepare_merge_task_result.get_mut(idx).unwrap();
+        }
+        let mut prepare_merge_task_result = PrepareMergeTaskResult::default();
+        prepare_merge_task_result.source_region_id = source_region_id;
+        self.prepare_merge_task_result
+            .push(prepare_merge_task_result);
+        return self.prepare_merge_task_result.get_mut(idx).unwrap();
+    }
+
+    fn remove_prepare_merge_task_result(&mut self, source_region_id: u64) {
+        for i in 0..self.prepare_merge_task_result.len() {
+            let elem = self.prepare_merge_task_result.get(i).unwrap();
+            if elem.source_region_id == source_region_id {
+                self.prepare_merge_task_result.remove(i);
+                break;
+            }
+        }
+    }
+
     // The target peer should send missing log entries to the source peer.
     //
     // So, the merge process order would be:
@@ -2677,12 +2740,11 @@ where
         ctx: &mut ApplyContext<EK, W>,
         req: &AdminRequest,
     ) -> Result<(AdminResponse, ApplyResult<EK::Snapshot>)> {
-        info!(
-            "exec_commit_merge on store";
-            "store_id" => ctx.store_id,
-            "region_id" =>  self.region_id()
+        println!(
+            "exec_commit_merge on store {} region_id {} ",
+            ctx.store_id,
+            self.region_id()
         );
-        println!("exec_commit_merge on store {} region_id {} ", ctx.store_id, self.region_id());
         {
             fail_point!("apply_before_commit_merge");
             let apply_before_commit_merge = || {
@@ -2700,6 +2762,12 @@ where
         let merge = req.get_commit_merge();
         let source_region = merge.get_source();
         let source_region_id = source_region.get_id();
+        info!(
+            "exec_commit_merge on store";
+            "store_id" => ctx.store_id,
+            "region_id" =>  self.region_id(),
+            "source_region_id" => source_region_id
+        );
 
         // No matter whether the source peer has applied to the required index,
         // it's a race to write apply state in both source delegate and target
@@ -2728,29 +2796,30 @@ where
             ctx.notifier
                 .notify_one(source_region_id, PeerMsg::SignificantMsg(msg));
 
-            if self.prepare_merge_task_result.is_none() {
-                self.prepare_merge_task_result = Some(PrepareMergeTaskResult::default());
-            }
             let path = Path::new(self.tablet.as_ref().unwrap().path());
             if let Some(s) = path.file_name().map(|s| s.to_string_lossy()) {
                 let mut split = s.split('_');
                 let tablet_id = split.next().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let tablet_suffix = split.next().and_then(|s| s.parse().ok()).unwrap_or(1);
-                if self.prepare_merge_task_result.as_ref().unwrap().target_region_id != tablet_id {
-                    let mailbox = ctx.router.mailbox(self.region_id()).unwrap();
+                let start_key = self.region.get_start_key().to_vec();
+                let end_key = self.region.get_end_key().to_vec();
+                let prepare_merge_task_result =
+                    self.get_or_add_prepare_merge_task_result(source_region_id);
+                if prepare_merge_task_result.target_region_id != tablet_id {
+                    let mailbox = ctx.router.mailbox(tablet_id).unwrap();
                     let bg_job_send = ctx.get_sender(tablet_id);
                     let notifier = bg_job_send.unwrap();
                     let target_region_task = RegionTask::TargetRegionPrepareMerge {
                         region_id: tablet_id,
                         tablet_suffix,
-                        start_key: self.region.get_start_key().to_vec(),
-                        end_key: self.region.get_end_key().to_vec(),
+                        source_region_id,
+                        start_key,
+                        end_key,
                         notifier,
                         cb: Box::new(move |_region_id| {
                             let _ = mailbox.force_send(Msg::Noop);
                         }),
                     };
-                    let prepare_merge_task_result = self.prepare_merge_task_result.as_mut().unwrap();
                     prepare_merge_task_result.target_tablet_suffix = tablet_suffix;
                     prepare_merge_task_result.target_region_id = tablet_id;
                     ctx.region_scheduler.schedule(target_region_task).unwrap();
@@ -2776,11 +2845,9 @@ where
         self.ready_source_region_id = 0;
 
         let region_state_key = keys::region_state_key(source_region_id);
-        let source_tablet_suffix = self
-            .prepare_merge_task_result
-            .as_mut()
-            .unwrap()
-            .source_tablet_suffix;
+        let prepare_merge_task_result = self.get_or_add_prepare_merge_task_result(source_region_id);
+        let source_tablet_suffix = prepare_merge_task_result.source_tablet_suffix;
+        let target_tablet_suffix = prepare_merge_task_result.target_tablet_suffix;
         let source_tablet = ctx
             .tablet_factory
             .open_tablet_cache(source_region_id, source_tablet_suffix);
@@ -2821,7 +2888,7 @@ where
         }
         let cur_index = ctx.exec_ctx.as_ref().unwrap().index;
         let kv_wb_mut = ctx.kv_wb_mut(self);
-        write_peer_state(kv_wb_mut, &region, PeerState::Normal, None, cur_index, 0)
+        write_peer_state(kv_wb_mut, &region, PeerState::Normal, None, cur_index, target_tablet_suffix)
             .and_then(|_| {
                 // TODO: maybe all information needs to be filled?
                 let mut merging_state = MergeState::default();
@@ -2832,7 +2899,7 @@ where
                     PeerState::Tombstone,
                     Some(merging_state),
                     u64::MAX,
-                    0,
+                    source_tablet_suffix,
                 )
             })
             .unwrap_or_else(|e| {
@@ -2845,13 +2912,26 @@ where
         PEER_ADMIN_CMD_COUNTER.commit_merge.success.inc();
         // update the region's range map
         let tablet = self.tablet.as_ref().unwrap().clone();
+
         tablet.set_compaction_filter_key_range(
             self.region_id(),
             region.get_start_key().to_vec(),
             region.get_end_key().to_vec(),
         );
 
-        self.prepare_merge_task_result = None; // finished merge , reset the prepare_merge_task_result; 
+        {
+            let mut pending_merge_task_stat = ctx.pending_merge_task_stats.lock().unwrap();
+            let region_id = self.region_id();
+            let merge_task_stat = pending_merge_task_stat.remove(&(region_id, source_region_id)).unwrap();
+            REGION_MERGE_DURATION_IN_US.observe(
+                merge_task_stat
+                    .source_region_prepare_start
+                    .saturating_elapsed()
+                    .as_micros() as f64,
+            );
+        }
+
+        self.remove_prepare_merge_task_result(source_region_id); // finished merge , reset the prepare_merge_task_result; 
         let resp = AdminResponse::default();
         Ok((
             resp,
@@ -2859,6 +2939,8 @@ where
                 index: ctx.exec_ctx.as_ref().unwrap().index,
                 region,
                 source: source_region.to_owned(),
+                target_suffix: target_tablet_suffix, 
+                source_suffix: source_tablet_suffix,
             }),
         ))
     }
@@ -2890,11 +2972,22 @@ where
             "{}",
             self.tag
         );
+
+        let target_region_id = state.get_merge_state().get_target().get_id();
+        let sender = ctx.get_sender(target_region_id).unwrap();
+        let _ = sender.send(BgTaskResult::CancelMerge {
+            source_region_id: self.region_id(),
+        }); // notify target region that the merge is canceled;
+
         let mut region = self.region.clone();
         let version = region.get_region_epoch().get_version();
         // Update version to avoid duplicated rollback requests.
         region.mut_region_epoch().set_version(version + 1);
         let cur_index = ctx.exec_ctx.as_ref().unwrap().index;
+        info!(
+            "apply exec_rollback_merge write_peer_state update local state {:?}",
+            &region
+        );
         write_peer_state(
             ctx.kv_wb_mut(self),
             &region,
@@ -2911,7 +3004,6 @@ where
         });
 
         PEER_ADMIN_CMD_COUNTER.rollback_merge.success.inc();
-        self.prepare_merge_task_result = None;
         let resp = AdminResponse::default();
         Ok((
             resp,
@@ -3624,87 +3716,96 @@ where
             }
             let result = self.delegate.bg_job_recv.as_ref().unwrap().try_recv();
             match result {
-                Ok(bg_task_result) => {
-                    match bg_task_result {
-                        BgTaskResult::SourceRegionPrepareMergeResult {
-                            region_id,
-                            tablet_suffix,
-                            sst_file_maps,
-                        } => {
-                            if self.delegate.prepare_merge_task_result.is_none() {
-                                self.delegate.prepare_merge_task_result =
-                                    Some(PrepareMergeTaskResult::default());
-                            }
-                            let prepare_merge_task_result =
-                                self.delegate.prepare_merge_task_result.as_mut().unwrap();
-                            prepare_merge_task_result.finish_source_region = true;
-                            prepare_merge_task_result.sst_file_maps = Some(sst_file_maps);
-                            prepare_merge_task_result.source_region_id = region_id;
-                            prepare_merge_task_result.source_tablet_suffix = tablet_suffix;
-                            info!(
-                                "Getting source region prepare merge result";
-                                "store_id" => ctx.store_id,
-                                "region_id" => region_id
-                            );
-                            println!(
-                                "Getting source region prepare merge result. StoreId: {} RegionId: {}",
-                                ctx.store_id, region_id
-                            );
-                        }
-                        BgTaskResult::TargetRegionPrepareMergeResult {
-                            region_id,
-                            tablet_suffix,
-                        } => {
-                            info!(
-                                "Getting target region prepare merge result";
-                                "store_id" => ctx.store_id,
-                                "region_id" => region_id
-                            );
-                            println!(
-                                "Getting target region prepare merge result. StoreId: {} RegionId: {}",
-                                ctx.store_id, region_id
-                            );
-                            let prepare_merge_task_result =
-                                self.delegate.prepare_merge_task_result.as_mut().unwrap();
-                            prepare_merge_task_result.finish_target_region = true;
-                            prepare_merge_task_result.target_tablet_suffix = tablet_suffix;
-                        }
-                        BgTaskResult::TargetRegionIngestSSTResult { region_id} => {
-                            info!(
-                                "Getting target region sst ingest result";
-                                "store_id" => ctx.store_id,
-                                "target_region_id" => region_id
-                            );
-                            println!(
-                                "Getting target region sst ingest result. StoreId {}",
-                                ctx.store_id
-                            );
-                            //self.delegate.prepare_merge_task_result = None; // reset prepare_merge_task_result
-                            let prepare_merge_task_result =
-                                self.delegate.prepare_merge_task_result.as_mut().unwrap();
-                            prepare_merge_task_result.finish_ingest_sst = true;
-                            break;
-                        }
+                Ok(bg_task_result) => match bg_task_result {
+                    BgTaskResult::SourceRegionPrepareMergeResult {
+                        region_id,
+                        tablet_suffix,
+                        sst_file_maps,
+                    } => {
+                        let prepare_merge_task_result = self
+                            .delegate
+                            .get_or_add_prepare_merge_task_result(region_id);
+                        prepare_merge_task_result.finish_source_region = true;
+                        prepare_merge_task_result.sst_file_maps = Some(sst_file_maps);
+                        prepare_merge_task_result.source_region_id = region_id;
+                        prepare_merge_task_result.source_tablet_suffix = tablet_suffix;
+
+                        info!(
+                            "Getting source region prepare merge result";
+                            "store_id" => ctx.store_id,
+                            "region_id" => region_id
+                        );
+                        println!(
+                            "Getting source region prepare merge result. StoreId: {} RegionId: {}",
+                            ctx.store_id, region_id
+                        );
                     }
-                }
+                    BgTaskResult::TargetRegionPrepareMergeResult {
+                        region_id,
+                        tablet_suffix,
+                        source_region_id,
+                    } => {
+                        info!(
+                            "Getting target region prepare merge result";
+                            "store_id" => ctx.store_id,
+                            "region_id" => region_id
+                        );
+                        println!(
+                            "Getting target region prepare merge result. StoreId: {} RegionId: {}",
+                            ctx.store_id, region_id
+                        );
+                        let prepare_merge_task_result = self
+                            .delegate
+                            .get_or_add_prepare_merge_task_result(source_region_id);
+                        prepare_merge_task_result.finish_target_region = true;
+                        prepare_merge_task_result.target_tablet_suffix = tablet_suffix;
+                    }
+                    BgTaskResult::TargetRegionIngestSSTResult {
+                        region_id,
+                        success,
+                        source_region_id,
+                    } => {
+                        info!(
+                            "Getting target region sst ingest result";
+                            "store_id" => ctx.store_id,
+                            "target_region_id" => region_id,
+                            "source_region_id" => source_region_id,
+                            "success" => success,
+                        );
+                        println!(
+                            "Getting target region sst ingest result. StoreId {}",
+                            ctx.store_id
+                        );
+                        let prepare_merge_task_result = self
+                            .delegate
+                            .get_or_add_prepare_merge_task_result(source_region_id);
+                        prepare_merge_task_result.finish_ingest_sst = true;
+                    }
+                    BgTaskResult::CancelMerge { source_region_id } => {
+                        self.delegate
+                            .remove_prepare_merge_task_result(source_region_id);
+                    }
+                },
                 Err(_err) => {
                     break;
                 }
             }
         }
 
-        if !self.delegate.prepare_merge_task_result.is_none() {
+        let mut ret = false;
+        for i in 0..self.delegate.prepare_merge_task_result.len() {
             let region_id = self.delegate.region_id();
             let prepare_merge_task_result =
-                self.delegate.prepare_merge_task_result.as_mut().unwrap();
+                self.delegate.prepare_merge_task_result.get_mut(i).unwrap();
             if !prepare_merge_task_result.finish_ingest_sst {
                 if prepare_merge_task_result.finish_source_region
                     && prepare_merge_task_result.finish_target_region
+                    && !prepare_merge_task_result.triggered_ingest_sst
                 {
                     // schedule ingest sst
                     info!(
                         "scheduling sst ingest task";
-                        "store_id " => ctx.store_id,
+                        "store_id" => ctx.store_id,
                         "source_region_id" => prepare_merge_task_result.source_region_id,
                         "target_region_id" => region_id
                     );
@@ -3726,11 +3827,24 @@ where
                         }),
                     };
                     ctx.region_scheduler.schedule(ingest_sst_task).unwrap();
+                    prepare_merge_task_result.triggered_ingest_sst = true;
+                } else if prepare_merge_task_result.finish_source_region
+                    && prepare_merge_task_result.target_region_id == 0
+                    && prepare_merge_task_result.target_tablet_suffix == 0
+                {
+                    info!(
+                        "target region's prepare is not triggered";
+                        "store_id" => ctx.store_id,
+                        "source_region_id" => prepare_merge_task_result.source_region_id,
+                        "target_region_id" => region_id
+                    );
+                    // Target prepare merge task is not triggered, which means exec_commit_merge is not triggered
+                    continue;
                 }
-                return true;
+                ret = true;
             }
         }
-        return false;
+        return ret;
     }
 
     fn resume_pending<W: WriteBatch<EK>>(&mut self, ctx: &mut ApplyContext<EK, W>) {
@@ -4210,6 +4324,7 @@ pub struct Builder<EK: KvEngine, W: WriteBatch<EK>> {
             >,
         >,
     >,
+    pending_merge_task_stats: Arc<Mutex<HashMap<(u64, u64), MergeTaskStat>>>,
 }
 
 impl<EK: KvEngine, W> Builder<EK, W>
@@ -4234,6 +4349,7 @@ where
             pending_create_peers: builder.pending_create_peers.clone(),
             tablet_factory: builder.engines.tablets.clone(),
             pending_merge_task_channel: Arc::new(Mutex::new(HashMap::default())),
+            pending_merge_task_stats: Arc::new(Mutex::new(HashMap::default())),
         }
     }
 }
@@ -4262,6 +4378,7 @@ where
                 priority,
                 self.tablet_factory.clone(),
                 self.pending_merge_task_channel.clone(),
+                self.pending_merge_task_stats.clone(),
             ),
             messages_per_tick: cfg.messages_per_tick,
             cfg_tracker: self.cfg.clone().tracker(self.tag.clone()),

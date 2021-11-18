@@ -71,9 +71,9 @@ fail = "0.4"
 uuid = { version = "0.8.1", features = ["serde", "v4"] }
 
 [dependencies.rocksdb]
-git = "https://github.com/busyjay/rust-rocksdb.git"
+git = "https://github.com/tonyxuqqi/rust-rocksdb.git"
 package = "rocksdb"
-branch = "test-cloud-5.1"
+branch = "jay_test_cloud"
 features = ["encryption", "static_libcpp"]
 
 [dev-dependencies]

@@ -35,8 +35,6 @@ use yatp::pool::{Builder, ThreadPool};
 use yatp::task::future::TaskCell;
 
 use file_system::{IOType, WithIOType};
-use sst_importer::{Config as ImportConfig, SSTImporter};
-use std::path::Path;
 use tikv_util::worker::{Runnable, RunnableWithTimer};
 
 use super::metrics::*;
@@ -88,6 +86,7 @@ pub enum Task {
     TargetRegionPrepareMerge {
         region_id: u64,
         tablet_suffix: u64,
+        source_region_id: u64,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         notifier: SyncSender<BgTaskResult>,
@@ -678,47 +677,8 @@ where
                 notifier,
                 cb,
             } => {
-                let mut tablet = match self
-                    .ctx
-                    .engines
-                    .tablets
-                    .open_tablet_cache(region_id, tablet_suffix)
-                {
-                    Some(t) => t,
-                    None => return,
-                };
-                let result =
-                    tablet.filter_sst("", &keys::data_key(&start_key), &keys::data_key(&end_key));
-                let result = BgTaskResult::SourceRegionPrepareMergeResult {
-                    region_id,
-                    tablet_suffix,
-                    sst_file_maps: result,
-                };
-
-                if let Err(e) = notifier.try_send(result) {
-                    info!(
-                        "failed to notify filter sst";
-                        "region_id" => region_id,
-                        "err" => %e,
-                    );
-                    println!("failed to notify source region result {}", region_id);
-                } else {
-                    cb(region_id);
-                }
-                info!(
-                    "SourceRegionPrepareMerge finished";
-                    "region_id" => region_id
-                );
-                println!("SourceRegionPrepareMerge finished {}", region_id);
-            }
-            Task::TargetRegionPrepareMerge {
-                region_id,
-                tablet_suffix,
-                start_key,
-                end_key,
-                notifier,
-                cb,
-            } => {
+                let timer = MERGE_SOURCE_REGION_HISTOGRAM.start_coarse_timer();
+    
                 let tablet = match self
                     .ctx
                     .engines
@@ -728,36 +688,145 @@ where
                     Some(t) => t,
                     None => return,
                 };
+                info!("SourceRegionPrepareMerge start {:?} end {:?}", &start_key, &end_key);
+
+                let end = if end_key.len() != 0 {
+                    keys::data_key(&end_key)
+                } else {
+                    keys::DATA_MAX_KEY.to_vec()
+                };
+                let start = keys::data_key(&start_key);
+                /*
+                let result =
+                    tablet.filter_sst("", &keys::data_key(&start_key), &end); 
+                */
+
                 for cf in DATA_CFS {
-                    tablet
+                    if start_key.len() != 0 {
+                        let range = Range::new(keys::DATA_MIN_KEY, start.as_slice());
+                        tablet.delete_ranges_cf(cf, DeleteStrategy::DeleteByKey, &[range]).unwrap();
+                    }
+                    if end_key.len() != 0 {
+                        let range = Range::new(&end, keys::DATA_MAX_KEY);
+                        tablet.delete_ranges_cf(cf, DeleteStrategy::DeleteByKey, &[range]).unwrap();
+                    }
+                }
+                tablet.flush(true).unwrap(); // flush mem table data;
+                for cf in DATA_CFS {
+                    if start_key.len() != 0 {
+                        tablet
                         .compact_range(
                             cf,
                             Some(keys::DATA_MIN_KEY),
-                            Some(keys::data_key(start_key.as_slice()).as_slice()),
+                            Some(start.as_slice()),
                             false,
                             1, /* threads */
                         )
                         .unwrap();
-                    tablet
+                    }
+                    if end_key.len() != 0 {
+                        tablet
                         .compact_range(
                             cf,
-                            Some(keys::data_key(end_key.as_slice()).as_slice()),
+                            Some(end.as_slice()),
                             Some(keys::DATA_MAX_KEY),
                             false,
                             1, /* threads */
                         )
                         .unwrap();
+                    }
                 }
-                if let Err(e) = notifier.try_send(BgTaskResult::TargetRegionPrepareMergeResult {
+
+                let result:std::collections::HashMap<String, String> = std::collections::HashMap::new(); 
+
+                let result = BgTaskResult::SourceRegionPrepareMergeResult {
                     region_id,
                     tablet_suffix,
-                }) {
-                    info!(
+                    sst_file_maps: result,
+                };
+                if let Err(e) = notifier.try_send(result) {
+                    error!(
                         "failed to notify filter sst";
                         "region_id" => region_id,
                         "err" => %e,
                     );
-                    println!("failed to notify target region result {}", region_id);
+                } else {
+                    cb(region_id);
+                }
+                info!(
+                    "SourceRegionPrepareMerge finished";
+                    "region_id" => region_id
+                );
+                timer.observe_duration();
+            }
+            Task::TargetRegionPrepareMerge {
+                region_id,
+                tablet_suffix,
+                source_region_id,
+                start_key,
+                end_key,
+                notifier,
+                cb,
+            } => {
+                let timer = MERGE_TARGET_REGION_HISTOGRAM.start_coarse_timer();
+                info!("TargetRegionPrepareMerge start {:?} end {:?}", &start_key, &end_key);
+                let tablet = match self
+                    .ctx
+                    .engines
+                    .tablets
+                    .open_tablet_cache(region_id, tablet_suffix)
+                {
+                    Some(t) => t,
+                    None => return,
+                };
+                let start = keys::data_key(start_key.as_slice());
+                let end = keys::data_key(end_key.as_slice());
+                for cf in DATA_CFS {
+                    if start_key.len() != 0 {
+                        let range = Range::new(keys::DATA_MIN_KEY, start.as_slice());
+                        tablet.delete_ranges_cf(cf, DeleteStrategy::DeleteByKey, &[range]).unwrap();
+                    }
+                    if end_key.len() != 0 {
+                        let range = Range::new(end.as_slice(), keys::DATA_MAX_KEY);
+                        tablet.delete_ranges_cf(cf, DeleteStrategy::DeleteByKey, &[range]).unwrap();
+                    }
+                }
+                tablet.flush(true).unwrap(); // flush mem table data;
+                for cf in DATA_CFS {
+                    if start_key.len() != 0 {
+                        tablet
+                        .compact_range(
+                            cf,
+                            Some(keys::DATA_MIN_KEY),
+                            Some(start.as_slice()),
+                            false,
+                            1, /* threads */
+                        )
+                        .unwrap();
+                    }
+                    if end_key.len() != 0 {
+                        tablet
+                        .compact_range(
+                            cf,
+                            Some(end.as_slice()),
+                            Some(keys::DATA_MAX_KEY),
+                            false,
+                            1, /* threads */
+                        )
+                        .unwrap();
+                    }
+                }
+
+                if let Err(e) = notifier.try_send(BgTaskResult::TargetRegionPrepareMergeResult {
+                    region_id,
+                    tablet_suffix,
+                    source_region_id,
+                }) {
+                    error!(
+                        "failed to notify filter sst";
+                        "region_id" => region_id,
+                        "err" => %e,
+                    );
                 } else {
                     cb(region_id);
                 }
@@ -765,7 +834,7 @@ where
                     "TargetRegionPrepareMerge finished";
                     "region_id" => region_id
                 );
-                println!("TargetRegionPrepareMerge finished {}", region_id);
+                timer.observe_duration(); 
             }
             Task::TargetRegionIngestSST {
                 src_region_id,
@@ -776,70 +845,82 @@ where
                 notifier,
                 cb,
             } => {
-                let src_tablet = match self
+                let timer = MERGE_SST_INGEST_HISTOGRAM.start_coarse_timer();
+                let src_tablet = self
                     .ctx
                     .engines
                     .tablets
-                    .open_tablet_cache(src_region_id, src_tablet_suffix)
-                {
-                    Some(t) => t,
-                    None => return,
-                };
-                let dst_tablet = match self
+                    .open_tablet_cache(src_region_id, src_tablet_suffix).unwrap();
+                /*
+                src_tablet.flush(true).unwrap(); // flush mem table data;
+                for cf in DATA_CFS {
+                    let sst_files = src_tablet.get_cf_files(cf, 0).unwrap().iter().map(|sst_file| sst_file.get_file_name().to_string()).collect::<Vec<_>>();
+                    if sst_files.len() != 0 {
+                        src_tablet.compact_files_cf(cf, sst_files, Some(1), 0, false).unwrap();
+                    }
+                }*/
+
+                let dst_tablet = self
                     .ctx
                     .engines
                     .tablets
-                    .open_tablet_cache(dst_region_id, dst_tablet_suffix)
-                {
-                    Some(t) => t,
-                    None => return,
-                };
-                //let src_path = src_tablet.path();
-                /*let src_sst_importer =
-                    SSTImporter::new(&ImportConfig::default(), Path::new(src_path), None).unwrap();
-                let src_tmp_sst_importer = SSTImporter::new(
-                    &ImportConfig::default(),
-                    Path::new(&(src_path.to_string() + "/tmp")),
-                    None,
-                )
-                .unwrap();*/
-                println!("file maps {:?}", &sst_file_maps);
-                for cf in src_tablet.cf_names() {
+                    .open_tablet_cache(dst_region_id, dst_tablet_suffix).unwrap();
+
+                let mut success = true; 
+                for cf in DATA_CFS {
+                    if !success {
+                        break;
+                    }
+
                     let num_of_level = src_tablet.get_cf_num_of_level(cf);
                     for i in 0..num_of_level {
+                        if !success {
+                            break;
+                        }
                         let level = num_of_level - i - 1;
-                        let sst_files = src_tablet.get_cf_files(cf, level).unwrap();
+                        let mut sst_files = src_tablet.get_cf_files(cf, level).unwrap();
+                        if level == 0 {
+                            sst_files.sort_by(|sst1, sst2| sst1.get_file_name().cmp(sst2.get_file_name()));
+                        }
                         let mut valid_sst_files: Vec<String> = vec![];
                         //let mut additional_sst_files: Vec<SSTFile> = vec![];
                         for sst_file in &sst_files {
+                            if !success {
+                                break;
+                            }
                             let file_name = sst_file.get_file_name();
                             let mut file_to_injest = "";
                             let full_file_name = src_tablet.path().to_string() + file_name;
                             if sst_file_maps.contains_key(file_name) {
                                 // empty means the file data is not in the region's range and should be skipped
                                 if !sst_file_maps[file_name].is_empty() {
-                                    println!(
-                                        "level {} file name {} not empty, added in additional sst files",
-                                        level, file_name
-                                    );
-                                    //additional_sst_files.push(sst_file.clone());
                                     file_to_injest = &sst_file_maps[file_name];
-                                } else {
-                                    println!(
-                                        "level {} file name {} is empty, skip",
-                                        level, file_name
-                                    );
                                 }
-                            } else {
-                                println!(
-                                    "level {} file name {} not in map, added in valid_sst_files sst files",
-                                    level, file_name
-                                );
-                                //valid_sst_files.push(sst_file.clone());
-                                file_to_injest = &full_file_name;
+                            } else { 
+                                file_to_injest = &full_file_name; // TODO: add it back
                             }
                             if file_to_injest.len() != 0 {
-                                valid_sst_files.push(file_to_injest.to_string()); 
+                                if level != 0 {
+                                    valid_sst_files.push(file_to_injest.to_string()); 
+                                } else {
+                                    info!("ingest level 0 file {} region_id:{}", file_to_injest, dst_region_id);
+                                    let mut ingest_opt =
+                                        <EK as ImportExt>::IngestExternalFileOptions::new();
+                                    ingest_opt.move_files(true);
+                                    let result = dst_tablet
+                                        .ingest_external_file_cf(cf, &ingest_opt, &[&file_to_injest]);
+                                    match result {
+                                        Ok(_) => {},
+                                        Err(e) =>  {
+                                            error!(
+                                                "failed ingest external file";
+                                                "region_id" => dst_region_id,
+                                                "err" => %e,
+                                            );
+                                            success = false;
+                                        }
+                                    }
+                                }
                             }
                         }
                         if valid_sst_files.len() != 0 {
@@ -847,38 +928,45 @@ where
                                 <EK as ImportExt>::IngestExternalFileOptions::new();
                             ingest_opt.move_files(true);
                             let v: Vec<&str> = valid_sst_files.iter().map(|x| x.as_ref()).collect();
-                            dst_tablet
-                                .ingest_external_file_cf(cf, &ingest_opt, &v)
-                                .unwrap();
+                            let result = dst_tablet
+                                        .ingest_external_file_cf(cf, &ingest_opt, &v);
+                            info!("ingested external files {:?}", v);
+                            match result {
+                                Ok(_) => {},
+                                Err(e) =>  {
+                                    error!(
+                                        "failed ingest external file";
+                                        "region_id" => dst_region_id,
+                                        "err" => %e,
+                                    );
+                                    success = false;
+                                }
+                            }
+                        } else {
+                            info!("no sst files at level {}", level);
                         }
-                        /*
-                        if additional_sst_files.len() != 0 {
-                            src_tmp_sst_importer
-                                .ingest2(&additional_sst_files, &dst_tablet)
-                                .unwrap();
-                        }*/
                     }
                 }
 
                 if let Err(e) = notifier.try_send(BgTaskResult::TargetRegionIngestSSTResult {
                     region_id: dst_region_id,
+                    success: success,
+                    source_region_id: src_region_id,
                 }) {
-                    info!(
+                    error!(
                         "failed to notify filter sst";
                         "region_id" => dst_region_id,
                         "err" => %e,
                     );
-                    println!(
-                        "failed to notify filter sst {} {}",
-                        src_region_id, dst_region_id
-                    );
                 } else {
                     cb(dst_region_id);
                 }
-                println!(
-                    "TargetRegionIngestSST finished {} {}",
-                    src_region_id, dst_region_id
+                info!(
+                    "TargetRegionIngestSST finished";
+                    "src_region_id" => src_region_id,
+                    "dst_region_id" => dst_region_id
                 );
+                timer.observe_duration(); 
             }
         }
     }
@@ -1290,7 +1378,6 @@ mod tests {
                     false,
                     |key, value| {
                         //assert!(key[0] == 0);
-                        println!("{:?} {:?}", key, value);
                         Ok(true)
                     },
                 )
@@ -1508,13 +1595,14 @@ mod tests {
         run_and_wait_prepare_source_region_merge_task(1, vec![0], vec![1]); // filter region 1 from key 0 to 1
         //assert!(sst_file_maps_recv.len() != 0);
 
-        let run_and_wait_prepare_merge_task = |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
+        let run_and_wait_prepare_merge_task = |id: u64, start_key: Vec<u8>, end_key: Vec<u8>, source_region_id: u64| {
             // construct snapshot
             let (tx, rx) = mpsc::sync_channel(1);
             sched
                 .schedule(Task::TargetRegionPrepareMerge {
                     region_id: id,
                     tablet_suffix: 0,
+                    source_region_id,
                     start_key,
                     end_key,
                     notifier: tx,
@@ -1526,7 +1614,7 @@ mod tests {
             rx.recv().unwrap();
         };
 
-        run_and_wait_prepare_merge_task(2, vec![1], vec![2]); // filter region 2 from key 1 to 2
+        run_and_wait_prepare_merge_task(2, vec![1], vec![2], 1); // filter region 2 from key 1 to 2
 
         let tablet = engine.tablets.open_tablet_cache(2, 0).unwrap();
         for cf_name in DATA_CFS {
@@ -1565,8 +1653,9 @@ mod tests {
                     .unwrap();
                 let task_result = rx.recv();
                 match task_result {
-                    Ok(BgTaskResult::TargetRegionIngestSSTResult { region_id }) => {
+                    Ok(BgTaskResult::TargetRegionIngestSSTResult { region_id, success: success, source_region_id: src_id }) => {
                         assert_eq!(region_id, dst_id);
+                        assert_eq!(success, true);
                     }
                     msg => panic!("expected TargetRegionPrepareMergeResult, but got {:?}", msg),
                 }

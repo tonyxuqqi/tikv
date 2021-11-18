@@ -21,7 +21,7 @@ use engine_rocks::{
     RocksCompactionJobInfo, RocksEngine, RocksdbLogger, Statistics,
 };
 use engine_traits::{
-    CompactionJobInfo, Engines, Peekable, RaftEngine, TabletFactory, CF_DEFAULT, CF_WRITE,
+    CompactionJobInfo, Engines, Peekable, RaftEngine, TabletFactory, CF_DEFAULT, CF_WRITE, CF_RAFT,
 };
 use kvproto::metapb;
 use kvproto::raft_serverpb::StoreIdent;
@@ -178,16 +178,20 @@ impl<ER: RaftEngine> KvEngineFactory<ER> {
             self.inner.region_info_accessor.as_ref(),
             self.inner.enable_ttl,
         );
+
         for cf_opt in &mut kv_cfs_opts {
             if readonly {
                 cf_opt.options_mut().set_disable_auto_compactions(true);
             }
-            cf_opt.options_mut().set_compaction_filter_factory(
-                "compaction_key_range_filter",
-                Box::new(CompactionKeyRangeFilterFactory {
-                    region_id: tablet_id,
-                })
-            ).unwrap();
+            /*
+            if cf_opt.cf() != CF_RAFT { 
+                cf_opt.options_mut().set_compaction_filter_factory(
+                    "compaction_key_range_filter",
+                    Box::new(CompactionKeyRangeFilterFactory {
+                        region_id: tablet_id,
+                    })
+                ).unwrap();
+            }*/
         }
         let kv_engine = engine_rocks::raw_util::new_engine_opt(
             tablet_path.to_str().unwrap(),
