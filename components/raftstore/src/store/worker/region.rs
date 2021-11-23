@@ -883,12 +883,16 @@ where
                             sst_files.sort_by(|sst1, sst2| sst1.get_file_name().cmp(sst2.get_file_name()));
                         }
                         let mut valid_sst_files: Vec<String> = vec![];
+                        let mut smallest_seqnos: Vec<u64> = vec![];
+                        let mut largest_seqnos: Vec<u64> = vec![];
                         //let mut additional_sst_files: Vec<SSTFile> = vec![];
                         for sst_file in &sst_files {
                             if !success {
                                 break;
                             }
                             let file_name = sst_file.get_file_name();
+                            let smallest_seqno = sst_file.get_smallest_seqno();
+                            let largest_seqno = sst_file.get_largest_seqno();
                             let mut file_to_injest = "";
                             let full_file_name = src_tablet.path().to_string() + file_name;
                             if sst_file_maps.contains_key(file_name) {
@@ -902,13 +906,15 @@ where
                             if file_to_injest.len() != 0 {
                                 if level != 0 {
                                     valid_sst_files.push(file_to_injest.to_string()); 
+                                    smallest_seqnos.push(smallest_seqno);
+                                    largest_seqnos.push(largest_seqno);
                                 } else {
-                                    info!("ingest level 0 file {} region_id:{}", file_to_injest, dst_region_id);
+                                    info!("ingest level 0 file {} region_id:{} smallest_seq {}, largest_seq {}", file_to_injest, dst_region_id, smallest_seqno, largest_seqno);
                                     let mut ingest_opt =
                                         <EK as ImportExt>::IngestExternalFileOptions::new();
                                     ingest_opt.move_files(true);
                                     let result = dst_tablet
-                                        .ingest_external_file_cf(cf, &ingest_opt, &[&file_to_injest]);
+                                        .ingest_external_file_cf_with_seqno(cf, &ingest_opt, &[&file_to_injest], &[smallest_seqno], &[largest_seqno]);
                                     match result {
                                         Ok(_) => {},
                                         Err(e) =>  {
@@ -929,8 +935,8 @@ where
                             ingest_opt.move_files(true);
                             let v: Vec<&str> = valid_sst_files.iter().map(|x| x.as_ref()).collect();
                             let result = dst_tablet
-                                        .ingest_external_file_cf(cf, &ingest_opt, &v);
-                            info!("ingested external files {:?}", v);
+                                        .ingest_external_file_cf_with_seqno(cf, &ingest_opt, &v, &smallest_seqnos, &largest_seqnos);
+                            info!("ingested external files {:?}, {:?}, {:?}", v, smallest_seqnos, largest_seqnos);
                             match result {
                                 Ok(_) => {},
                                 Err(e) =>  {

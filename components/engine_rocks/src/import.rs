@@ -31,6 +31,26 @@ impl ImportExt for RocksEngine {
         Ok(())
     }
 
+    fn ingest_external_file_cf_with_seqno(
+        &self,
+        cf: &str,
+        opts: &Self::IngestExternalFileOptions,
+        files: &[&str],
+        smallest_seqnos: &[u64],
+        largest_seqnos: &[u64],
+    ) -> Result<()> {
+        let cf = util::get_cf_handle(self.as_inner(), cf)?;
+        // This is calling a specially optimized version of
+        // ingest_external_file_cf. In cases where the memtable needs to be
+        // flushed it avoids blocking writers while doing the flush. The unused
+        // return value here just indicates whether the fallback path requiring
+        // the manual memtable flush was taken.
+        let _did_nonblocking_memtable_flush = self
+            .as_inner()
+            .ingest_external_file_optimized_with_seqno(&cf, &opts.0, files, smallest_seqnos, largest_seqnos)?;
+        Ok(())
+    }
+
     fn reset_global_seq<P: AsRef<Path>>(&self, cf: &str, path: P) -> Result<()> {
         let path = path.as_ref().to_str().unwrap();
         let f = File::open(path)?;

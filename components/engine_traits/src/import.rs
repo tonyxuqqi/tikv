@@ -13,6 +13,15 @@ pub trait ImportExt {
         files: &[&str],
     ) -> Result<()>;
 
+    fn ingest_external_file_cf_with_seqno(
+        &self,
+        cf: &str,
+        opts: &Self::IngestExternalFileOptions,
+        files: &[&str],
+        smallest_seqnos: &[u64],
+        largest_seqnos: &[u64],
+    ) -> Result<()>;
+
     fn reset_global_seq<P: AsRef<Path>>(&self, cf: &str, path: P) -> Result<()>;
 }
 

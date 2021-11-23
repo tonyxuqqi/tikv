@@ -2310,10 +2310,10 @@ where
         for new_region in &regions {
             let new_region_id = new_region.get_id();
 
-            if let Some(tablet) = self.fsm.peer.get_store().tablet() { // update the compaction filter range
+            /*if let Some(tablet) = self.fsm.peer.get_store().tablet() { // update the compaction filter range
                 let tablet = tablet.clone();
                 tablet.set_compaction_filter_key_range(new_region_id, new_region.get_start_key().to_vec(), new_region.get_end_key().to_vec()); 
-            }
+            }*/
             if new_region_id == region_id {
                 write_peer_state(
                     &mut kv_wb,
@@ -2976,6 +2976,7 @@ where
             );
         }
 
+        /*
         if let Some(tablet) = self.fsm.peer.get_store().tablet() {
             let tablet = tablet.clone();
             if region.get_end_key() == source.get_start_key() {
@@ -2983,7 +2984,7 @@ where
             } else {
                 tablet.set_compaction_filter_key_range(region.get_id(), source.get_start_key().to_vec(), region.get_end_key().to_vec());
             }
-        }
+        }*/
 
         meta.region_ranges
             .insert(enc_end_key(&region), region.get_id());

@@ -533,8 +533,8 @@ impl MiscExt for RocksEngine {
                 file_size: sst_meta.get_size(),
                 smallest_key: sst_meta.get_smallestkey().to_vec(),
                 largest_key: sst_meta.get_largestkey().to_vec(),
-                smallest_seqno: 0,
-                largest_seqno: 0,
+                smallest_seqno: sst_meta.get_smallest_seqno(),
+                largest_seqno: sst_meta.get_largest_seqno(),
             })
             .collect::<Vec<SSTFile>>())
     }

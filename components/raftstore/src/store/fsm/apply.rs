@@ -1430,7 +1430,7 @@ where
                 }
                 ExecResult::FailedPrepareMerge { ref region, .. } => {
                     self.region = region.clone();
-                    self.is_merging = true;
+                    self.is_merging = false;
                 }
             }
         }
@@ -2624,28 +2624,6 @@ where
         let cur_index = exec_ctx.index;
         let target_region_id = merging_state.get_target().get_id();
         let bg_job_send = ctx.get_sender(target_region_id);
-        write_peer_state(
-            ctx.kv_wb_mut(self),
-            &region,
-            PeerState::Merging,
-            Some(merging_state.clone()),
-            cur_index,
-            0,
-        )
-        .unwrap_or_else(|e| {
-            panic!(
-                "{} failed to save merging state {:?} for region {:?}: {:?}",
-                self.tag, merging_state, region, e
-            )
-        });
-        fail_point!("apply_after_prepare_merge");
-        PEER_ADMIN_CMD_COUNTER.prepare_merge.success.inc();
-
-        {
-            let mut pending_merge_task_stat = ctx.pending_merge_task_stats.lock().unwrap();
-            let merge_task_stat = MergeTaskStat {source_region_prepare_start: Instant::now()};
-            pending_merge_task_stat.insert((target_region_id, self.region.get_id()), merge_task_stat);
-        }
 
         let tablet = self.tablet.as_ref().unwrap();
         let path = Path::new(tablet.path());
@@ -2682,6 +2660,28 @@ where
             ctx.region_scheduler.schedule(sst_check_task).unwrap();
         }
 
+        write_peer_state(
+            ctx.kv_wb_mut(self),
+            &region,
+            PeerState::Merging,
+            Some(merging_state.clone()),
+            cur_index,
+            0,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "{} failed to save merging state {:?} for region {:?}: {:?}",
+                self.tag, merging_state, region, e
+            )
+        });
+        fail_point!("apply_after_prepare_merge");
+        PEER_ADMIN_CMD_COUNTER.prepare_merge.success.inc();
+
+        {
+            let mut pending_merge_task_stat = ctx.pending_merge_task_stats.lock().unwrap();
+            let merge_task_stat = MergeTaskStat {source_region_prepare_start: Instant::now()};
+            pending_merge_task_stat.insert((target_region_id, self.region.get_id()), merge_task_stat);
+        }
         Ok((
             AdminResponse::default(),
             ApplyResult::Res(ExecResult::PrepareMerge {
@@ -2886,6 +2886,10 @@ where
         } else {
             region.set_start_key(source_region.get_start_key().to_vec());
         }
+        info!(
+            "after CommitMerge";
+            "target_region" => ?region
+        );
         let cur_index = ctx.exec_ctx.as_ref().unwrap().index;
         let kv_wb_mut = ctx.kv_wb_mut(self);
         write_peer_state(kv_wb_mut, &region, PeerState::Normal, None, cur_index, target_tablet_suffix)
