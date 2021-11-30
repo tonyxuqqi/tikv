@@ -19,6 +19,12 @@ lazy_static! {
         exponential_buckets(1.0, 2.0, 20).unwrap()
     )
     .unwrap();
+    pub static ref MERGE_WRITE_FREEZE_TIME_DURATION_IN_US: Histogram = register_histogram!(
+        "tikv_raftstore_merge_freeze_write_time",
+        "The total freeze write time due to merge in us",
+        exponential_buckets(1.0, 2.0, 20).unwrap()
+    )
+    .unwrap();
 }
 
 #[derive(Default)]
@@ -95,5 +101,6 @@ impl LocalStoreStat {
 }
 
 pub struct MergeTaskStat {
-    pub source_region_prepare_start: Instant,
+    pub region_prepare_start: Instant,
+    pub region_prepare_finish: Instant,
 }

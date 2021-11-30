@@ -3716,6 +3716,7 @@ dependencies = [
  "fs2",
  "futures 0.3.8",
  "futures-util",
+ "hex 0.4.2",
  "into_other",
  "keys",
  "kvproto",

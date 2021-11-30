@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{cmp, mem, u64, usize};
@@ -521,6 +521,8 @@ where
     pub handled_proposals: usize,
 
     pub read_progress: Arc<RegionReadProgress>,
+
+    pub prepare_merge_done: Arc<AtomicBool>,
 }
 
 impl<EK, ER> Peer<EK, ER>
@@ -623,6 +625,7 @@ where
                 tag,
             )),
             handled_proposals: 0,
+            prepare_merge_done: Arc::new(AtomicBool::new(false)),
         };
 
         // If this region has only one peer and I am the one, campaign directly.

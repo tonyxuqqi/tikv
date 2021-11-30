@@ -21,7 +21,6 @@ use tikv_util::time::Instant;
 use tikv_util::{box_err, box_try, defer, error, info, thd_name, warn};
 
 use crate::coprocessor::CoprocessorHost;
-use crate::store::fsm::apply::BgTaskResult;
 use crate::store::peer_storage::{
     JOB_STATUS_CANCELLED, JOB_STATUS_CANCELLING, JOB_STATUS_FAILED, JOB_STATUS_FINISHED,
     JOB_STATUS_PENDING, JOB_STATUS_RUNNING,
@@ -36,7 +35,7 @@ use yatp::task::future::TaskCell;
 
 use file_system::{IOType, WithIOType};
 use tikv_util::worker::{Runnable, RunnableWithTimer};
-
+use crate::store::fsm::apply::PrepareMergeState;
 use super::metrics::*;
 
 const GENERATE_POOL_SIZE: usize = 5;
@@ -74,32 +73,25 @@ pub enum Task {
         tablet_suffix: u64,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
-    },
-    SourceRegionPrepareMerge {
-        region_id: u64,
-        tablet_suffix: u64,
-        start_key: Vec<u8>,
-        end_key: Vec<u8>,
-        notifier: SyncSender<BgTaskResult>,
-        cb: Box<dyn FnOnce(u64) + Send>,
-    },
-    TargetRegionPrepareMerge {
-        region_id: u64,
-        tablet_suffix: u64,
-        source_region_id: u64,
-        start_key: Vec<u8>,
-        end_key: Vec<u8>,
-        notifier: SyncSender<BgTaskResult>,
-        cb: Box<dyn FnOnce(u64) + Send>,
-    },
+    }, 
     TargetRegionIngestSST {
         src_region_id: u64,
         src_tablet_suffix: u64,
         dst_region_id: u64,
         dst_tablet_suffix: u64,
-        sst_file_maps: std::collections::HashMap<String, String>,
-        notifier: SyncSender<BgTaskResult>,
         cb: Box<dyn FnOnce(u64) + Send>,
+    },
+    PrepareMerge {
+        src_region_id: u64,
+        src_tablet_suffix: u64,
+        src_start_key: Vec<u8>,
+        src_end_key: Vec<u8>,
+        target_region_id: u64,
+        target_tablet_suffix: u64,
+        target_start_key: Vec<u8>,
+        target_end_key: Vec<u8>,
+        prepare_merge: PrepareMergeState,
+        cb: Box<dyn FnOnce(PrepareMergeState) + Send>, 
     },
 }
 
@@ -137,14 +129,11 @@ impl Display for Task {
                 log_wrappers::Value::key(&start_key),
                 log_wrappers::Value::key(&end_key)
             ),
-            Task::SourceRegionPrepareMerge { region_id, .. } => write!(
+            Task::PrepareMerge { src_region_id, .. } => write!(
                 f,
-                "SourceRegionPrepareMerge for source region:{}",
-                region_id,
+                "PrepareMerge for source region:{}",
+                src_region_id,
             ),
-            Task::TargetRegionPrepareMerge { region_id, .. } => {
-                write!(f, "PrepareTargetMerge for {}", region_id)
-            }
             Task::TargetRegionIngestSST {
                 src_region_id,
                 src_tablet_suffix: _,
@@ -669,180 +658,101 @@ where
                     self.ctx.clean_stale_ranges();
                 }
             }
-            Task::SourceRegionPrepareMerge {
-                region_id,
-                tablet_suffix,
-                start_key,
-                end_key,
-                notifier,
-                cb,
+            Task::PrepareMerge {
+                src_region_id,
+                src_tablet_suffix,
+                src_start_key,
+                src_end_key,
+                target_region_id,
+                target_tablet_suffix,
+                target_start_key,
+                target_end_key,
+                prepare_merge,
+                cb, 
             } => {
-                let timer = MERGE_SOURCE_REGION_HISTOGRAM.start_coarse_timer();
-    
-                let tablet = match self
+                let clean_data = |region_id: u64, start_key: Vec<u8>, end_key: Vec<u8>, tablet_suffix: u64| {
+                    let tablet = match self
                     .ctx
                     .engines
                     .tablets
                     .open_tablet_cache(region_id, tablet_suffix)
-                {
-                    Some(t) => t,
-                    None => return,
+                    {
+                        Some(t) => t,
+                        None => return,
+                    };
+                    info!("RegionPrepareMerge region {} start {} end {} tablet_suffix {}", region_id, hex::encode(&start_key), hex::encode(&end_key), tablet_suffix);
+
+                    let end = if end_key.len() != 0 {
+                        keys::data_key(&end_key)
+                    } else {
+                        keys::DATA_MAX_KEY.to_vec()
+                    };
+                    let start = keys::data_key(&start_key);
+                    /*
+                    let result =
+                        tablet.filter_sst("", &keys::data_key(&start_key), &end); 
+                    */
+
+                    for cf in DATA_CFS {
+                        if start_key.len() != 0 {
+                            let range = Range::new(keys::DATA_MIN_KEY, start.as_slice());
+                            info!("delete ranges from min key to {} for cf {}, region_id {}", hex::encode(&start_key), cf, region_id);
+                            tablet.delete_ranges_cf(cf, DeleteStrategy::DeleteByKey, &[range]).unwrap();
+                        }
+                        if end_key.len() != 0 {
+                            let range = Range::new(&end, keys::DATA_MAX_KEY);
+                            info!("delete ranges from {} to max key for cf {}, region_id {}", hex::encode(&end_key), cf, region_id);
+                            tablet.delete_ranges_cf(cf, DeleteStrategy::DeleteByKey, &[range]).unwrap();
+                        }
+                    }
+                    tablet.flush(true).unwrap(); // flush mem table data;
+                    for cf in DATA_CFS {
+                        if start_key.len() != 0 {
+                            tablet
+                            .compact_range(
+                                cf,
+                                Some(keys::DATA_MIN_KEY),
+                                Some(start.as_slice()),
+                                false,
+                                1, /* threads */
+                            )
+                            .unwrap();
+                        }
+                        if end_key.len() != 0 {
+                            tablet
+                            .compact_range(
+                                cf,
+                                Some(end.as_slice()),
+                                Some(keys::DATA_MAX_KEY),
+                                false,
+                                1, /* threads */
+                            )
+                            .unwrap();
+                        }
+                    }
                 };
-                info!("SourceRegionPrepareMerge start {:?} end {:?}", &start_key, &end_key);
-
-                let end = if end_key.len() != 0 {
-                    keys::data_key(&end_key)
-                } else {
-                    keys::DATA_MAX_KEY.to_vec()
-                };
-                let start = keys::data_key(&start_key);
-                /*
-                let result =
-                    tablet.filter_sst("", &keys::data_key(&start_key), &end); 
-                */
-
-                for cf in DATA_CFS {
-                    if start_key.len() != 0 {
-                        let range = Range::new(keys::DATA_MIN_KEY, start.as_slice());
-                        tablet.delete_ranges_cf(cf, DeleteStrategy::DeleteByKey, &[range]).unwrap();
-                    }
-                    if end_key.len() != 0 {
-                        let range = Range::new(&end, keys::DATA_MAX_KEY);
-                        tablet.delete_ranges_cf(cf, DeleteStrategy::DeleteByKey, &[range]).unwrap();
-                    }
-                }
-                tablet.flush(true).unwrap(); // flush mem table data;
-                for cf in DATA_CFS {
-                    if start_key.len() != 0 {
-                        tablet
-                        .compact_range(
-                            cf,
-                            Some(keys::DATA_MIN_KEY),
-                            Some(start.as_slice()),
-                            false,
-                            1, /* threads */
-                        )
-                        .unwrap();
-                    }
-                    if end_key.len() != 0 {
-                        tablet
-                        .compact_range(
-                            cf,
-                            Some(end.as_slice()),
-                            Some(keys::DATA_MAX_KEY),
-                            false,
-                            1, /* threads */
-                        )
-                        .unwrap();
-                    }
-                }
-
-                let result:std::collections::HashMap<String, String> = std::collections::HashMap::new(); 
-
-                let result = BgTaskResult::SourceRegionPrepareMergeResult {
-                    region_id,
-                    tablet_suffix,
-                    sst_file_maps: result,
-                };
-                if let Err(e) = notifier.try_send(result) {
-                    error!(
-                        "failed to notify filter sst";
-                        "region_id" => region_id,
-                        "err" => %e,
-                    );
-                } else {
-                    cb(region_id);
-                }
+                let timer = MERGE_SOURCE_REGION_HISTOGRAM.start_coarse_timer();
+                clean_data(src_region_id, src_start_key, src_end_key, src_tablet_suffix);
+                timer.observe_duration();
                 info!(
                     "SourceRegionPrepareMerge finished";
-                    "region_id" => region_id
+                    "region_id" => src_region_id
                 );
-                timer.observe_duration();
-            }
-            Task::TargetRegionPrepareMerge {
-                region_id,
-                tablet_suffix,
-                source_region_id,
-                start_key,
-                end_key,
-                notifier,
-                cb,
-            } => {
                 let timer = MERGE_TARGET_REGION_HISTOGRAM.start_coarse_timer();
-                info!("TargetRegionPrepareMerge start {:?} end {:?}", &start_key, &end_key);
-                let tablet = match self
-                    .ctx
-                    .engines
-                    .tablets
-                    .open_tablet_cache(region_id, tablet_suffix)
-                {
-                    Some(t) => t,
-                    None => return,
-                };
-                let start = keys::data_key(start_key.as_slice());
-                let end = keys::data_key(end_key.as_slice());
-                for cf in DATA_CFS {
-                    if start_key.len() != 0 {
-                        let range = Range::new(keys::DATA_MIN_KEY, start.as_slice());
-                        tablet.delete_ranges_cf(cf, DeleteStrategy::DeleteByKey, &[range]).unwrap();
-                    }
-                    if end_key.len() != 0 {
-                        let range = Range::new(end.as_slice(), keys::DATA_MAX_KEY);
-                        tablet.delete_ranges_cf(cf, DeleteStrategy::DeleteByKey, &[range]).unwrap();
-                    }
-                }
-                tablet.flush(true).unwrap(); // flush mem table data;
-                for cf in DATA_CFS {
-                    if start_key.len() != 0 {
-                        tablet
-                        .compact_range(
-                            cf,
-                            Some(keys::DATA_MIN_KEY),
-                            Some(start.as_slice()),
-                            false,
-                            1, /* threads */
-                        )
-                        .unwrap();
-                    }
-                    if end_key.len() != 0 {
-                        tablet
-                        .compact_range(
-                            cf,
-                            Some(end.as_slice()),
-                            Some(keys::DATA_MAX_KEY),
-                            false,
-                            1, /* threads */
-                        )
-                        .unwrap();
-                    }
-                }
-
-                if let Err(e) = notifier.try_send(BgTaskResult::TargetRegionPrepareMergeResult {
-                    region_id,
-                    tablet_suffix,
-                    source_region_id,
-                }) {
-                    error!(
-                        "failed to notify filter sst";
-                        "region_id" => region_id,
-                        "err" => %e,
-                    );
-                } else {
-                    cb(region_id);
-                }
+                clean_data(target_region_id, target_start_key, target_end_key, target_tablet_suffix);
                 info!(
                     "TargetRegionPrepareMerge finished";
-                    "region_id" => region_id
+                    "region_id" => target_region_id
                 );
-                timer.observe_duration(); 
+                timer.observe_duration();
+                cb(prepare_merge);
             }
+
             Task::TargetRegionIngestSST {
                 src_region_id,
                 src_tablet_suffix,
                 dst_region_id,
                 dst_tablet_suffix,
-                sst_file_maps,
-                notifier,
                 cb,
             } => {
                 let timer = MERGE_SST_INGEST_HISTOGRAM.start_coarse_timer();
@@ -895,14 +805,7 @@ where
                             let largest_seqno = sst_file.get_largest_seqno();
                             let mut file_to_injest = "";
                             let full_file_name = src_tablet.path().to_string() + file_name;
-                            if sst_file_maps.contains_key(file_name) {
-                                // empty means the file data is not in the region's range and should be skipped
-                                if !sst_file_maps[file_name].is_empty() {
-                                    file_to_injest = &sst_file_maps[file_name];
-                                }
-                            } else { 
-                                file_to_injest = &full_file_name; // TODO: add it back
-                            }
+                            file_to_injest = &full_file_name; 
                             if file_to_injest.len() != 0 {
                                 if level != 0 {
                                     valid_sst_files.push(file_to_injest.to_string()); 
@@ -954,19 +857,7 @@ where
                     }
                 }
 
-                if let Err(e) = notifier.try_send(BgTaskResult::TargetRegionIngestSSTResult {
-                    region_id: dst_region_id,
-                    success: success,
-                    source_region_id: src_region_id,
-                }) {
-                    error!(
-                        "failed to notify filter sst";
-                        "region_id" => dst_region_id,
-                        "err" => %e,
-                    );
-                } else {
-                    cb(dst_region_id);
-                }
+                cb(src_region_id);
                 info!(
                     "TargetRegionIngestSST finished";
                     "src_region_id" => src_region_id,
@@ -1345,7 +1236,6 @@ mod tests {
 
         let run_and_wait_prepare_merge_task = |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
             // construct snapshot
-            let (tx, rx) = mpsc::sync_channel(1);
             sched
                 .schedule(Task::SourceRegionPrepareMerge {
                     region_id: id,
@@ -1358,19 +1248,6 @@ mod tests {
                     }),
                 })
                 .unwrap();
-            let task_result = rx.recv();
-            match task_result {
-                Ok(BgTaskResult::SourceRegionPrepareMergeResult {
-                    region_id,
-                    tablet_suffix,
-                    sst_file_maps,
-                }) => {
-                    assert_eq!(region_id, id);
-                    assert_eq!(tablet_suffix, 0);
-                    //assert!(sst_file_maps.len() != 0);
-                }
-                msg => panic!("expected SourceRegionPrepareMergeResult, but got {:?}", msg),
-            }
         };
 
         run_and_wait_prepare_merge_task(1, vec![0], vec![1]);
@@ -1455,30 +1332,17 @@ mod tests {
 
         let run_and_wait_prepare_merge_task = |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
             // construct snapshot
-            let (tx, rx) = mpsc::sync_channel(1);
             sched
                 .schedule(Task::TargetRegionPrepareMerge {
                     region_id: id,
                     tablet_suffix: 0,
                     start_key,
                     end_key,
-                    notifier: tx,
                     cb: Box::new(move |region_id| {
                         assert_eq!(region_id, id);
                     }),
                 })
                 .unwrap();
-            let task_result = rx.recv();
-            match task_result {
-                Ok(BgTaskResult::TargetRegionPrepareMergeResult {
-                    region_id,
-                    tablet_suffix,
-                }) => {
-                    assert_eq!(region_id, id);
-                    assert_eq!(tablet_suffix, 0);
-                }
-                msg => panic!("expected TargetRegionPrepareMergeResult, but got {:?}", msg),
-            }
         };
 
         run_and_wait_prepare_merge_task(1, vec![0], vec![1]);
@@ -1572,7 +1436,6 @@ mod tests {
         let mut run_and_wait_prepare_source_region_merge_task =
             |id: u64, start_key: Vec<u8>, end_key: Vec<u8>| {
                 // construct snapshot
-                let (tx, rx) = mpsc::sync_channel(1);
                 sched
                     .schedule(Task::SourceRegionPrepareMerge {
                         region_id: id,
@@ -1585,17 +1448,6 @@ mod tests {
                         }),
                     })
                     .unwrap();
-                let task_result = rx.recv();
-                match task_result {
-                    Ok(BgTaskResult::SourceRegionPrepareMergeResult {
-                        region_id: _,
-                        tablet_suffix: _,
-                        sst_file_maps,
-                    }) => {
-                        sst_file_maps_recv = sst_file_maps;
-                    }
-                    msg => panic!("expected SourceRegionPrepareMergeResult, but got {:?}", msg),
-                }
             };
 
         run_and_wait_prepare_source_region_merge_task(1, vec![0], vec![1]); // filter region 1 from key 0 to 1
@@ -1643,28 +1495,17 @@ mod tests {
         let run_and_wait_sst_ingest_task =
             |src_id: u64, dst_id: u64, sst_file_maps: std::collections::HashMap<String, String>| {
                 // construct snapshot
-                let (tx, rx) = mpsc::sync_channel(1);
                 sched
                     .schedule(Task::TargetRegionIngestSST {
                         src_region_id: src_id,
                         src_tablet_suffix: 0,
                         dst_region_id: dst_id,
                         dst_tablet_suffix: 0,
-                        sst_file_maps,
-                        notifier: tx,
                         cb: Box::new(move |region_id| {
                             assert_eq!(region_id, dst_id);
                         }),
                     })
                     .unwrap();
-                let task_result = rx.recv();
-                match task_result {
-                    Ok(BgTaskResult::TargetRegionIngestSSTResult { region_id, success: success, source_region_id: src_id }) => {
-                        assert_eq!(region_id, dst_id);
-                        assert_eq!(success, true);
-                    }
-                    msg => panic!("expected TargetRegionPrepareMergeResult, but got {:?}", msg),
-                }
             };
 
         run_and_wait_sst_ingest_task(1, 2, sst_file_maps_recv);

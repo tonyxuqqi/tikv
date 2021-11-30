@@ -217,7 +217,7 @@ pub fn admin_cmd_epoch_lookup(admin_cmp_type: AdminCmdType) -> AdminCmdEpochStat
         AdminCmdType::Split => AdminCmdEpochState::new(true, true, true, false),
         AdminCmdType::BatchSplit => AdminCmdEpochState::new(true, true, true, false),
         // Merge
-        AdminCmdType::PrepareMerge => AdminCmdEpochState::new(true, true, true, true),
+        AdminCmdType::PrepareMerge => AdminCmdEpochState::new(false, false, false, false),
         AdminCmdType::CommitMerge => AdminCmdEpochState::new(true, true, true, false),
         AdminCmdType::RollbackMerge => AdminCmdEpochState::new(true, true, true, false),
         // Transfer leader

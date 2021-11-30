@@ -8,10 +8,10 @@ use engine_traits::{CompactedEvent, KvEngine, Snapshot};
 use kvproto::import_sstpb::SstMeta;
 use kvproto::kvrpcpb::ExtraOp as TxnExtraOp;
 use kvproto::metapb;
-use kvproto::metapb::RegionEpoch;
+use kvproto::metapb::{RegionEpoch, Region};
 use kvproto::pdpb::CheckPolicy;
 use kvproto::raft_cmdpb::{RaftCmdRequest, RaftCmdResponse};
-use kvproto::raft_serverpb::RaftMessage;
+use kvproto::raft_serverpb::{RaftMessage, MergeState};
 use kvproto::replication_modepb::ReplicationStatus;
 use raft::SnapshotStatus;
 
@@ -284,6 +284,10 @@ where
         callback: Callback<SK>,
     },
     LeaderCallback(Callback<SK>),
+    PrepareMerge {
+        region: Region,
+        state: MergeState,
+    },
 }
 
 /// Message that will be sent to a peer.

@@ -68,6 +68,7 @@ use crate::store::{
 };
 use crate::{Error, Result};
 use keys::{self, enc_end_key, enc_start_key};
+use std::sync::atomic::{Ordering};
 
 /// Limits the maximum number of regions returned by error.
 ///
@@ -911,6 +912,12 @@ where
             SignificantMsg::LeaderCallback(cb) => {
                 self.on_leader_callback(cb);
             }
+            SignificantMsg::PrepareMerge {
+                region,
+                state,
+            } => {
+                self.on_ready_prepare_merge(region, state);
+            }
         }
     }
 
@@ -1019,7 +1026,7 @@ where
             self.on_ready_apply_snapshot(apply_res);
             if is_merging {
                 // After applying a snapshot, merge is rollbacked implicitly.
-                self.on_ready_rollback_merge(0, None);
+                self.on_ready_rollback_merge(0, None, 0);
             }
             self.register_raft_base_tick();
         }
@@ -2845,13 +2852,34 @@ where
         }
     }
 
+    fn on_prepare_merge_started(&mut self, region: metapb::Region, state: MergeState) {
+        info!(
+            "on_prepare_merge_started";
+            "region_id" => region.get_id(),
+            "state" => ?state,
+        );
+        {
+            let mut meta = self.ctx.store_meta.lock().unwrap();
+            meta.set_region(&self.ctx.coprocessor_host, region, &mut self.fsm.peer);
+        }
+
+        self.fsm.peer.pending_merge_state = Some(state); 
+    }
+    
     fn on_ready_prepare_merge(&mut self, region: metapb::Region, state: MergeState) {
+        info!(
+            "on_ready_prepare_merge";
+            "region_id" => region.get_id(),
+            "region" => ?region,
+            "state" => ?state,
+        );
         {
             let mut meta = self.ctx.store_meta.lock().unwrap();
             meta.set_region(&self.ctx.coprocessor_host, region, &mut self.fsm.peer);
         }
 
         self.fsm.peer.pending_merge_state = Some(state);
+        self.fsm.peer.prepare_merge_done.store(true, Ordering::SeqCst);
         let state = self.fsm.peer.pending_merge_state.as_ref().unwrap();
 
         if let Some(ref catch_up_logs) = self.fsm.peer.catch_up_logs {
@@ -2877,6 +2905,12 @@ where
         let region_id = self.fsm.region_id();
         assert_eq!(region_id, catch_up_logs.merge.get_source().get_id());
 
+        info!(
+            "on_catch_up_logs_for_merge";
+            "region_id" => region_id,
+            "prepare_merge_done" => self.fsm.peer.prepare_merge_done.load(Ordering::SeqCst),
+        );
+
         if let Some(ref cul) = self.fsm.peer.catch_up_logs {
             panic!(
                 "{} get catch_up_logs from {} but has already got from {}",
@@ -2886,20 +2920,26 @@ where
 
         if let Some(ref pending_merge_state) = self.fsm.peer.pending_merge_state {
             if pending_merge_state.get_commit() == catch_up_logs.merge.get_commit() {
-                assert_eq!(
-                    pending_merge_state.get_target().get_id(),
-                    catch_up_logs.target_region_id
-                );
-                // Indicate that `on_ready_prepare_merge` has already executed.
-                // Mark pending_remove because its apply fsm will be destroyed.
-                self.fsm.peer.pending_remove = true;
-                // Just for saving memory.
-                catch_up_logs.merge.clear_entries();
-                // Send CatchUpLogs back to destroy source apply fsm,
-                // then it will send `Noop` to trigger target apply fsm.
-                self.ctx
-                    .apply_router
-                    .schedule_task(region_id, ApplyTask::LogsUpToDate(catch_up_logs));
+                if self.fsm.peer.prepare_merge_done.load(Ordering::SeqCst) {
+                    assert_eq!(
+                        pending_merge_state.get_target().get_id(),
+                        catch_up_logs.target_region_id
+                    );
+                    // Indicate that `on_ready_prepare_merge` has already executed.
+                    // Mark pending_remove because its apply fsm will be destroyed.
+                    self.fsm.peer.pending_remove = true;
+                    // Just for saving memory.
+                    catch_up_logs.merge.clear_entries();
+                    // Send CatchUpLogs back to destroy source apply fsm,
+                    // then it will send `Noop` to trigger target apply fsm.
+                    self.ctx
+                        .apply_router
+                        .schedule_task(region_id, ApplyTask::LogsUpToDate(catch_up_logs));
+                } else {
+                     // Just for saving memory.
+                    catch_up_logs.merge.clear_entries();
+                    self.fsm.peer.catch_up_logs = Some(catch_up_logs);
+                }
                 return;
             }
         }
@@ -3046,7 +3086,7 @@ where
     /// If commit is 0, it means that Merge is rollbacked by a snapshot; otherwise
     /// it's rollbacked by a proposal, and its value should be equal to the commit
     /// index of previous PrepareMerge.
-    fn on_ready_rollback_merge(&mut self, commit: u64, region: Option<metapb::Region>) {
+    fn on_ready_rollback_merge(&mut self, commit: u64, region: Option<metapb::Region>, cur_index: u64) {
         let pending_commit = self
             .fsm
             .peer
@@ -3060,6 +3100,7 @@ where
                 self.fsm.peer.tag, pending_commit, commit
             );
         }
+
         // Clear merge releted data
         self.fsm.peer.pending_merge_state = None;
         self.fsm.peer.want_rollback_merge_peers.clear();
@@ -3068,6 +3109,27 @@ where
         self.fsm.peer.read_progress.resume();
 
         if let Some(r) = region {
+            // persist the rollback state
+            let mut kv_wb = self.ctx.engines.kv.write_batch();
+            write_peer_state(
+                &mut kv_wb,
+                &r,
+                PeerState::Normal,
+                None,
+                cur_index,
+                0,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{} failed to rollback merge: {:?}",
+                    self.fsm.peer.tag, e
+                )
+            });
+
+            let mut write_opts = WriteOptions::new();
+            write_opts.set_sync(true);
+            kv_wb.write_opt(&write_opts).unwrap();
+
             let mut meta = self.ctx.store_meta.lock().unwrap();
             meta.set_region(&self.ctx.coprocessor_host, r, &mut self.fsm.peer);
         }
@@ -3313,7 +3375,8 @@ where
                     split_index,
                 } => self.on_ready_split_region(derived, regions, new_split_regions, split_index),
                 ExecResult::PrepareMerge { region, state } => {
-                    self.on_ready_prepare_merge(region, state)
+                    info!("BUGBUG ExecResult::PrepareMerge is received");
+                    //self.on_ready_prepare_merge(region, state)
                 }
                 ExecResult::CommitMerge {
                     index,
@@ -3322,8 +3385,8 @@ where
                     target_suffix,
                     source_suffix,
                 } => self.on_ready_commit_merge(index, region, source, target_suffix, source_suffix),
-                ExecResult::RollbackMerge { region, commit } => {
-                    self.on_ready_rollback_merge(commit, Some(region))
+                ExecResult::RollbackMerge { region, commit, cur_index } => {
+                    self.on_ready_rollback_merge(commit, Some(region), cur_index)
                 }
                 ExecResult::ComputeHash {
                     region,
@@ -3341,6 +3404,12 @@ where
                 }
                 ExecResult::IngestSst { ssts } => self.on_ingest_sst_result(ssts),
                 ExecResult::FailedPrepareMerge { .. } => {},
+                ExecResult::PrepareMergeStarted {
+                    region,
+                    state,
+                } => {
+                    self.on_prepare_merge_started(region, state)
+                }
             }
         }
 
@@ -3522,13 +3591,15 @@ where
                 return;
             }
             Err(e) => {
-                debug!(
-                    "failed to propose";
-                    "region_id" => self.region_id(),
-                    "peer_id" => self.fsm.peer_id(),
-                    "message" => ?msg,
-                    "err" => %e,
-                );
+                if msg.has_admin_request() && msg.get_admin_request().get_cmd_type() == AdminCmdType::RollbackMerge {
+                    error!(
+                        "failed to propose";
+                        "region_id" => self.region_id(),
+                        "peer_id" => self.fsm.peer_id(),
+                        "message" => ?msg,
+                        "err" => %e,
+                    );
+                }
                 cb.invoke_with_response(new_error(e));
                 return;
             }
@@ -3536,19 +3607,29 @@ where
         }
 
         if self.fsm.peer.pending_remove {
+            if msg.has_admin_request() && msg.get_admin_request().get_cmd_type() == AdminCmdType::RollbackMerge {
+                error!(
+                    "failed to propose";
+                    "region_id" => self.region_id(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "message" => "pending removal",
+                );
+            }
             apply::notify_req_region_removed(self.region_id(), cb);
             return;
         }
 
         if let Err(e) = self.check_merge_proposal(&mut msg) {
-            warn!(
-                "failed to propose merge";
-                "region_id" => self.region_id(),
-                "peer_id" => self.fsm.peer_id(),
-                "message" => ?msg,
-                "err" => %e,
-                "error_code" => %e.error_code(),
-            );
+            if msg.has_admin_request() && msg.get_admin_request().get_cmd_type() == AdminCmdType::RollbackMerge {
+                warn!(
+                    "failed to propose merge";
+                    "region_id" => self.region_id(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "message" => ?msg,
+                    "err" => %e,
+                    "error_code" => %e.error_code(),
+                );
+            }
             cb.invoke_with_response(new_error(e));
             return;
         }
@@ -3563,6 +3644,13 @@ where
         bind_term(&mut resp, term);
         if self.fsm.peer.propose(self.ctx, cb, msg, resp) {
             self.fsm.has_ready = true;
+        } else {
+            error!(
+                "failed to propose.";
+                "region_id" => self.region_id(),
+                "peer_id" => self.fsm.peer_id(),
+                "message" => "propose return false",
+            );
         }
 
         if self.fsm.peer.should_wake_up {
