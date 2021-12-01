@@ -2874,6 +2874,19 @@ where
             "state" => ?state,
         );
         {
+            let mut kv_wb = self.ctx.engines.kv.write_batch();
+            write_peer_state(
+                &mut kv_wb,
+                &region,
+                PeerState::Merging,
+                Some(state.clone()),
+                state.get_commit(), 
+                0,
+            );
+            let mut write_opts = WriteOptions::new();
+            write_opts.set_sync(true);
+            kv_wb.write_opt(&write_opts).unwrap();
+
             let mut meta = self.ctx.store_meta.lock().unwrap();
             meta.set_region(&self.ctx.coprocessor_host, region, &mut self.fsm.peer);
         }
@@ -3591,15 +3604,13 @@ where
                 return;
             }
             Err(e) => {
-                if msg.has_admin_request() && msg.get_admin_request().get_cmd_type() == AdminCmdType::RollbackMerge {
-                    error!(
-                        "failed to propose";
-                        "region_id" => self.region_id(),
-                        "peer_id" => self.fsm.peer_id(),
-                        "message" => ?msg,
-                        "err" => %e,
-                    );
-                }
+                debug!(
+                    "failed to propose";
+                    "region_id" => self.region_id(),
+                    "peer_id" => self.fsm.peer_id(),
+                    "message" => ?msg,
+                    "err" => %e,
+                );
                 cb.invoke_with_response(new_error(e));
                 return;
             }
@@ -3607,29 +3618,19 @@ where
         }
 
         if self.fsm.peer.pending_remove {
-            if msg.has_admin_request() && msg.get_admin_request().get_cmd_type() == AdminCmdType::RollbackMerge {
-                error!(
-                    "failed to propose";
-                    "region_id" => self.region_id(),
-                    "peer_id" => self.fsm.peer_id(),
-                    "message" => "pending removal",
-                );
-            }
             apply::notify_req_region_removed(self.region_id(), cb);
             return;
         }
 
         if let Err(e) = self.check_merge_proposal(&mut msg) {
-            if msg.has_admin_request() && msg.get_admin_request().get_cmd_type() == AdminCmdType::RollbackMerge {
-                warn!(
-                    "failed to propose merge";
-                    "region_id" => self.region_id(),
-                    "peer_id" => self.fsm.peer_id(),
-                    "message" => ?msg,
-                    "err" => %e,
-                    "error_code" => %e.error_code(),
-                );
-            }
+            warn!(
+                "failed to propose merge";
+                "region_id" => self.region_id(),
+                "peer_id" => self.fsm.peer_id(),
+                "message" => ?msg,
+                "err" => %e,
+                "error_code" => %e.error_code(),
+            );
             cb.invoke_with_response(new_error(e));
             return;
         }
@@ -3644,13 +3645,6 @@ where
         bind_term(&mut resp, term);
         if self.fsm.peer.propose(self.ctx, cb, msg, resp) {
             self.fsm.has_ready = true;
-        } else {
-            error!(
-                "failed to propose.";
-                "region_id" => self.region_id(),
-                "peer_id" => self.fsm.peer_id(),
-                "message" => "propose return false",
-            );
         }
 
         if self.fsm.peer.should_wake_up {

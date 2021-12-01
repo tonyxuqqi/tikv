@@ -2686,6 +2686,7 @@ where
         let conf_version = region.get_region_epoch().get_conf_ver() + 1;
         region.mut_region_epoch().set_conf_ver(conf_version);
 
+        self.region = region.clone();
         let prepare_merge_state2 = PrepareMergeState {
             region,
             prepare_merge_req: prepare_merge_state.prepare_merge_req.clone(), 
