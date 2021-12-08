@@ -141,4 +141,7 @@ pub trait MiscExt: CFNamesExt {
     fn get_cf_files(&self, cf: &str, level: usize) -> Result<Vec<SSTFile>>;
 
     fn get_cf_num_of_level(&self, cf: &str) -> usize;
+
+    fn pause_bg_work(&self);
+    fn resume_bg_work(&self);
 }

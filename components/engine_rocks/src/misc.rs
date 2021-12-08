@@ -546,6 +546,16 @@ impl MiscExt for RocksEngine {
         let level_metas = column_family_meta.get_levels();
         return level_metas.len();
     }
+
+    fn pause_bg_work(&self) {
+        let db = self.as_inner().clone();
+        db.pause_bg_work();
+    }
+    
+    fn resume_bg_work(&self) {
+        let db = self.as_inner().clone();
+        db.continue_bg_work();
+    }
 }
 
 #[cfg(test)]

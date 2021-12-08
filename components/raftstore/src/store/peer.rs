@@ -522,7 +522,7 @@ where
 
     pub read_progress: Arc<RegionReadProgress>,
 
-    pub prepare_merge_done: Arc<AtomicBool>,
+    pub prepare_merge_started: Arc<AtomicBool>,
 }
 
 impl<EK, ER> Peer<EK, ER>
@@ -625,7 +625,7 @@ where
                 tag,
             )),
             handled_proposals: 0,
-            prepare_merge_done: Arc::new(AtomicBool::new(false)),
+            prepare_merge_started: Arc::new(AtomicBool::new(false)),
         };
 
         // If this region has only one peer and I am the one, campaign directly.
@@ -2983,6 +2983,18 @@ where
         Ok((min_m, min_c))
     }
 
+    fn pre_propose_split(
+        &self,
+        req: &mut RaftCmdRequest
+    ) -> Result<()> {
+        if self.prepare_merge_started.load(Ordering::SeqCst) {
+            return Err(box_err!(
+                "Prepare merge is started. Ignore the split cmd."
+            ));
+        }
+        Ok(())
+    }
+
     fn pre_propose_prepare_merge<T>(
         &self,
         ctx: &mut PollContext<EK, ER, T>,
@@ -3048,6 +3060,11 @@ where
                 "log gap size exceed entry size limit, skip merging."
             ));
         }
+        if self.prepare_merge_started.load(Ordering::SeqCst) {
+            return Err(box_err!(
+                "merge is started"
+            ));
+        }
         req.mut_admin_request()
             .mut_prepare_merge()
             .set_min_index(min_matched + 1);
@@ -3071,7 +3088,10 @@ where
         }
 
         match req.get_admin_request().get_cmd_type() {
-            AdminCmdType::Split | AdminCmdType::BatchSplit => ctx.insert(ProposalContext::SPLIT),
+            AdminCmdType::Split | AdminCmdType::BatchSplit => {
+                self.pre_propose_split(req)?;
+                ctx.insert(ProposalContext::SPLIT);
+            }
             AdminCmdType::PrepareMerge => {
                 self.pre_propose_prepare_merge(poll_ctx, req)?;
                 ctx.insert(ProposalContext::PREPARE_MERGE);

@@ -17,7 +17,7 @@ use keys::{data_end_key, data_key};
 use kvproto::metapb::Region;
 use raft::StateRole;
 use tikv_util::worker::{Builder as WorkerBuilder, Runnable, RunnableWithTimer, Scheduler, Worker};
-use tikv_util::{box_err, debug, info, warn};
+use tikv_util::{box_err, debug, info, warn, error};
 
 /// `RegionInfoAccessor` is used to collect all regions' information on this TiKV into a collection
 /// so that other parts of TiKV can get region information from it. It registers a observer to
@@ -342,6 +342,9 @@ impl RegionCollector {
             if self.is_region_epoch_stale(region, current_region) {
                 return false;
             }
+            if region.get_region_epoch().get_version() == current_region.get_region_epoch().get_version() {
+                error!("check_region_range failed. region {:?}, current_region {:?}", region, current_region);
+            } 
             // They are impossible to equal, or they cannot overlap.
             assert_ne!(
                 region.get_region_epoch().get_version(),

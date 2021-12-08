@@ -112,4 +112,12 @@ impl MiscExt for PanicEngine {
     fn get_cf_num_of_level(&self, cf: &str) -> usize {
         panic!()
     }
+
+    fn pause_bg_work(&self) {
+        panic!()
+    }
+
+    fn resume_bg_work(&self) {
+        panic!()
+    }
 }

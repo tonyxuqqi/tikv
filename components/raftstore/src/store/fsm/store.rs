@@ -149,7 +149,11 @@ impl<EK: KvEngine> StoreMeta<EK> {
         peer: &mut crate::store::Peer<EK, ER>,
     ) {
         let prev = self.regions.insert(region.get_id(), region.clone());
-        if prev.map_or(true, |r| r.get_id() != region.get_id()) {
+        if let Some(r) = prev  {
+            if r.get_region_epoch().get_version() > region.get_region_epoch().get_version() || r.get_id() != region.get_id() {
+                panic!("{} region corrupted, existing region {:?} new region {:?}", peer.tag, r, region);
+            }
+        } else {
             // TODO: may not be a good idea to panic when holding a lock.
             panic!("{} region corrupted", peer.tag);
         }

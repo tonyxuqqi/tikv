@@ -915,8 +915,9 @@ where
             SignificantMsg::PrepareMerge {
                 region,
                 state,
+                tablet_suffix,
             } => {
-                self.on_ready_prepare_merge(region, state);
+                self.on_ready_prepare_merge(region, state, tablet_suffix);
             }
         }
     }
@@ -2862,16 +2863,16 @@ where
             let mut meta = self.ctx.store_meta.lock().unwrap();
             meta.set_region(&self.ctx.coprocessor_host, region, &mut self.fsm.peer);
         }
-
-        self.fsm.peer.pending_merge_state = Some(state); 
+        self.fsm.peer.prepare_merge_started.store(true, Ordering::SeqCst);
     }
     
-    fn on_ready_prepare_merge(&mut self, region: metapb::Region, state: MergeState) {
+    fn on_ready_prepare_merge(&mut self, region: metapb::Region, state: MergeState, tablet_suffix: u64) {
         info!(
             "on_ready_prepare_merge";
             "region_id" => region.get_id(),
             "region" => ?region,
             "state" => ?state,
+            "is_leader" => self.fsm.peer.is_leader(),
         );
         {
             let mut kv_wb = self.ctx.engines.kv.write_batch();
@@ -2881,8 +2882,8 @@ where
                 PeerState::Merging,
                 Some(state.clone()),
                 state.get_commit(), 
-                0,
-            );
+                tablet_suffix,
+            ).unwrap();
             let mut write_opts = WriteOptions::new();
             write_opts.set_sync(true);
             kv_wb.write_opt(&write_opts).unwrap();
@@ -2892,7 +2893,6 @@ where
         }
 
         self.fsm.peer.pending_merge_state = Some(state);
-        self.fsm.peer.prepare_merge_done.store(true, Ordering::SeqCst);
         let state = self.fsm.peer.pending_merge_state.as_ref().unwrap();
 
         if let Some(ref catch_up_logs) = self.fsm.peer.catch_up_logs {
@@ -2921,7 +2921,7 @@ where
         info!(
             "on_catch_up_logs_for_merge";
             "region_id" => region_id,
-            "prepare_merge_done" => self.fsm.peer.prepare_merge_done.load(Ordering::SeqCst),
+            "prepare_merge_started" => self.fsm.peer.prepare_merge_started.load(Ordering::SeqCst),
         );
 
         if let Some(ref cul) = self.fsm.peer.catch_up_logs {
@@ -2933,7 +2933,7 @@ where
 
         if let Some(ref pending_merge_state) = self.fsm.peer.pending_merge_state {
             if pending_merge_state.get_commit() == catch_up_logs.merge.get_commit() {
-                if self.fsm.peer.prepare_merge_done.load(Ordering::SeqCst) {
+                //if self.fsm.peer.prepare_merge_started.load(Ordering::SeqCst) {
                     assert_eq!(
                         pending_merge_state.get_target().get_id(),
                         catch_up_logs.target_region_id
@@ -2948,11 +2948,11 @@ where
                     self.ctx
                         .apply_router
                         .schedule_task(region_id, ApplyTask::LogsUpToDate(catch_up_logs));
-                } else {
+                //} else {
                      // Just for saving memory.
-                    catch_up_logs.merge.clear_entries();
-                    self.fsm.peer.catch_up_logs = Some(catch_up_logs);
-                }
+                //    catch_up_logs.merge.clear_entries();
+                //    self.fsm.peer.catch_up_logs = Some(catch_up_logs);
+                //}
                 return;
             }
         }
@@ -3116,6 +3116,7 @@ where
 
         // Clear merge releted data
         self.fsm.peer.pending_merge_state = None;
+        self.fsm.peer.prepare_merge_started.store(false, Ordering::SeqCst);
         self.fsm.peer.want_rollback_merge_peers.clear();
 
         // Resume updating `safe_ts`
@@ -3130,7 +3131,7 @@ where
                 PeerState::Normal,
                 None,
                 cur_index,
-                0,
+                self.fsm.peer.get_store().tablet_suffix().unwrap(),
             )
             .unwrap_or_else(|e| {
                 panic!(
@@ -3598,19 +3599,22 @@ where
     }
 
     fn propose_raft_command(&mut self, mut msg: RaftCmdRequest, cb: Callback<EK::Snapshot>) {
+        let print = msg.has_admin_request() && msg.get_admin_request().get_cmd_type() == AdminCmdType::CommitMerge;
         match self.pre_propose_raft_command(&msg) {
             Ok(Some(resp)) => {
                 cb.invoke_with_response(resp);
                 return;
             }
             Err(e) => {
-                debug!(
-                    "failed to propose";
-                    "region_id" => self.region_id(),
-                    "peer_id" => self.fsm.peer_id(),
-                    "message" => ?msg,
-                    "err" => %e,
-                );
+                if print {
+                    error!(
+                        "failed to propose";
+                        "region_id" => self.region_id(),
+                        "peer_id" => self.fsm.peer_id(),
+                        "message" => ?msg,
+                        "err" => %e,
+                    );
+                }
                 cb.invoke_with_response(new_error(e));
                 return;
             }
@@ -3619,6 +3623,9 @@ where
 
         if self.fsm.peer.pending_remove {
             apply::notify_req_region_removed(self.region_id(), cb);
+            if print {
+                error!("pending removal. propose failed");
+            }
             return;
         }
 
@@ -3645,6 +3652,11 @@ where
         bind_term(&mut resp, term);
         if self.fsm.peer.propose(self.ctx, cb, msg, resp) {
             self.fsm.has_ready = true;
+            if print {
+                info!("propose succeeded");
+            }
+        } else if print {
+            error!("failed to propose");
         }
 
         if self.fsm.peer.should_wake_up {

@@ -670,6 +670,8 @@ where
                 prepare_merge,
                 cb, 
             } => {
+                // Test Code
+                //std::thread::sleep(Duration::from_secs(60));
                 let clean_data = |region_id: u64, start_key: Vec<u8>, end_key: Vec<u8>, tablet_suffix: u64| {
                     let tablet = match self
                     .ctx

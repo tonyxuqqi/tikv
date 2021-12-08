@@ -366,49 +366,6 @@ pub trait Notifier<EK: KvEngine>: Send {
     fn clone_box(&self) -> Box<dyn Notifier<EK>>;
 }
 
-#[derive(Derivative)]
-#[derivative(Debug)]
-pub struct PrepareMergeTaskResult {
-    finish_target_region: bool,
-    finish_source_region: bool,
-    triggered_ingest_sst: bool,
-    finish_ingest_sst: bool,
-    //merge_result_stat: Option<MergeTaskResult>,
-    source_region_id: u64,
-    source_tablet_suffix: u64,
-    target_region_id: u64,
-    target_tablet_suffix: u64,
-    sst_file_maps: Option<std::collections::HashMap<String, String>>,
-    sourcce_start_key: Vec<u8>,
-    source_end_key: Vec<u8>,
-}
-
-impl PrepareMergeTaskResult {
-    pub fn default() -> Self {
-        PrepareMergeTaskResult {
-            finish_target_region: false,
-            finish_source_region: false,
-            triggered_ingest_sst: false,
-            finish_ingest_sst: false,
-            source_region_id: 0,
-            source_tablet_suffix: 0,
-            target_region_id: 0,
-            target_tablet_suffix: 0,
-            // merge_result_stat: None,
-            sst_file_maps: None,
-            sourcce_start_key: vec![],
-            source_end_key: vec![],
-        }
-    }
-}
-
-#[derive(Derivative)]
-#[derivative(Debug)]
-pub struct MergeTaskResult {
-    region: Region,
-    state: MergeState,
-}
-
 struct ApplyContext<EK, W>
 where
     EK: KvEngine,
@@ -1312,7 +1269,7 @@ where
                 // clear dirty values.
                 ctx.kv_wb_mut(self).rollback_to_save_point().unwrap();
                 match e {
-                    Error::EpochNotMatch(..) => debug!(
+                    Error::EpochNotMatch(..) => error!(
                         "epoch not match";
                         "region_id" => self.region_id(),
                         "peer_id" => self.id(),
@@ -2560,7 +2517,7 @@ where
         let target_region_id = target_region.get_id();
         let tablet = self.tablet.as_ref().unwrap();
         let path = Path::new(tablet.path());
-        let mut target_suffix:u64;
+        let target_suffix:u64;
         if let Some(target_tablet_suffix) = self.get_tablet_suffix(ctx, target_region_id) {
              target_suffix = target_tablet_suffix;
         } else {
@@ -2587,17 +2544,7 @@ where
             );
         }
 
-        // In theory conf version should not be increased when executing prepare_merge.
-        // However, we don't want to do conf change after prepare_merge is committed.
-        // This can also be done by iterating all proposal to find if prepare_merge is
-        // proposed before proposing conf change, but it make things complicated.
-        // Another way is make conf change also check region version, but this is not
-        // backward compatible.
-        let mut region = self.region.clone();
-        //let region_version = region.get_region_epoch().get_version() + 1;
-        //region.mut_region_epoch().set_version(region_version);
-        //let conf_version = region.get_region_epoch().get_conf_ver() + 1;
-        //region.mut_region_epoch().set_conf_ver(conf_version);
+        let region = self.region.clone();
         let mut merging_state = MergeState::default();
         merging_state.set_min_index(index);
         merging_state.set_target(target_region.clone());
@@ -2664,6 +2611,7 @@ where
         ))
     }
 
+    // TODO: add failure handling; need to clear the merge started flag in peer.rs
     fn finish_prepare_merge<W: WriteBatch<EK>>(
         &mut self,
         ctx: &mut ApplyContext<EK, W>,
@@ -2680,7 +2628,7 @@ where
             );
             pending_merge_task_stat.get_mut(&target_source_region_id).unwrap().region_prepare_finish = Instant::now(); 
         }
-        let mut region = prepare_merge_state.region.clone();
+        let mut region = self.region.clone();
         let region_version = region.get_region_epoch().get_version() + 1;
         region.mut_region_epoch().set_version(region_version);
         let conf_version = region.get_region_epoch().get_conf_ver() + 1;
@@ -2722,6 +2670,7 @@ where
         let msg = SignificantMsg::PrepareMerge {
             region: prepare_merge_state2.region.clone(),
             state: prepare_merge_state2.merging_state.clone(), 
+            tablet_suffix: self.get_tablet_suffix(ctx, self.region_id()).unwrap(),
         };
         ctx.notifier
             .notify_one(self.region_id(), PeerMsg::SignificantMsg(msg));
@@ -2798,7 +2747,7 @@ where
         let dst_total_count = get_keys_count(&dst_tablet);
         */
         // end of test code
-
+        src_tablet.pause_bg_work();
         for cf in DATA_CFS {
             let num_of_level = src_tablet.get_cf_num_of_level(cf);
             for i in 0..num_of_level {
@@ -2866,6 +2815,7 @@ where
                 }
             } 
         }
+        src_tablet.resume_bg_work();
         // test code
         /*let dst_total_count2 = get_keys_count(&dst_tablet);
         if dst_total_count2 != dst_total_count + src_total_count {
@@ -2953,33 +2903,7 @@ where
                 logs_up_to_date: logs_up_to_date.clone(),
             });
             ctx.notifier
-                .notify_one(source_region_id, PeerMsg::SignificantMsg(msg));
-            /*
-            let path = Path::new(self.tablet.as_ref().unwrap().path());
-            if let Some(s) = path.file_name().map(|s| s.to_string_lossy()) {
-                let mut split = s.split('_');
-                let tablet_id = split.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                let tablet_suffix = split.next().and_then(|s| s.parse().ok()).unwrap_or(1);
-                let src_tablet_suffix = self.get_tablet_suffix(ctx, source_region_id).unwrap();
-
-                info!(
-                    "scheduling sst ingest task";
-                    "store_id" => ctx.store_id,
-                    "source_region_id" => source_region_id,
-                    "target_region_id" => tablet_id,
-                );
-                let mailbox = ctx.router.mailbox(tablet_id).unwrap();
-                let ingest_sst_task = RegionTask::TargetRegionIngestSST {
-                    src_region_id: source_region_id, 
-                    src_tablet_suffix: src_tablet_suffix,
-                    dst_region_id: tablet_id,
-                    dst_tablet_suffix: tablet_suffix,
-                    cb: Box::new(move |region_id| {
-                        let _ = mailbox.force_send(Msg::Noop);
-                    }),
-                };
-                ctx.region_scheduler.schedule(ingest_sst_task).unwrap();
-            }*/
+                .notify_one(source_region_id, PeerMsg::SignificantMsg(msg)); 
             return Ok((
                 AdminResponse::default(),
                 ApplyResult::WaitMergeSource(logs_up_to_date),
@@ -2998,7 +2922,6 @@ where
         );
         let source_tablet_suffix = self.get_tablet_suffix(ctx, source_region_id).unwrap(); 
         let target_tablet_suffix = self.get_tablet_suffix(ctx, self.region_id()).unwrap();  
-        ApplyDelegate::ingest_sst(ctx, source_region_id, source_tablet_suffix, self.region_id(), target_tablet_suffix); 
         self.ready_source_region_id = 0;
         let region_state_key = keys::region_state_key(source_region_id);
         let source_tablet = ctx
@@ -3027,6 +2950,7 @@ where
                 self.tag, source_region, exist_region
             );
         }
+        ApplyDelegate::ingest_sst(ctx, source_region_id, source_tablet_suffix, self.region_id(), target_tablet_suffix); 
         let mut region = self.region.clone();
         // Use a max value so that pd can ensure overlapped region has a priority.
         let version = cmp::max(
@@ -3079,17 +3003,20 @@ where
         {
             let mut pending_merge_task_stat = ctx.pending_merge_task_stats.lock().unwrap();
             let region_id = self.region_id();
-            let merge_task_stat = pending_merge_task_stat.remove(&(region_id, source_region_id)).unwrap();
-            let merge_time_in_us = merge_task_stat
+            let mut merge_time_in_us = 0.0;
+            let mut freeze_time_in_us = 0.0;
+            if let Some(merge_task_stat) = pending_merge_task_stat.remove(&(region_id, source_region_id)) {
+                merge_time_in_us = merge_task_stat
                                     .region_prepare_start
                                     .saturating_elapsed()
                                     .as_micros() as f64;
-            REGION_MERGE_DURATION_IN_US.observe(merge_time_in_us );
-            let freeze_time_in_us = merge_task_stat
-                                    .region_prepare_finish
-                                    .saturating_elapsed()
-                                    .as_micros() as f64;
-            MERGE_WRITE_FREEZE_TIME_DURATION_IN_US.observe(freeze_time_in_us);
+                REGION_MERGE_DURATION_IN_US.observe(merge_time_in_us );
+                freeze_time_in_us = merge_task_stat
+                                        .region_prepare_finish
+                                        .saturating_elapsed()
+                                        .as_micros() as f64;
+                MERGE_WRITE_FREEZE_TIME_DURATION_IN_US.observe(freeze_time_in_us);
+            }
             info!(
                 "merge region finished";
                 "target_region" => self.region_id(),

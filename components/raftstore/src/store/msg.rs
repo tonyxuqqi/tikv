@@ -287,6 +287,7 @@ where
     PrepareMerge {
         region: Region,
         state: MergeState,
+        tablet_suffix: u64,
     },
 }
 
