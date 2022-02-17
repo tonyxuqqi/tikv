@@ -20,9 +20,6 @@ use futures::executor::block_on;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use yatp::{Remote, ThreadPool};
-use affinity::*;
-
-static BACK_GROUND_TASK_CORES:[usize;2]= [1, 2];
 
 #[derive(Eq, PartialEq)]
 pub enum ScheduleError<T> {
@@ -357,7 +354,6 @@ impl Worker {
             .interval(std::time::Instant::now(), interval)
             .compat();
         self.remote.spawn(async move {
-            set_thread_affinity(&BACK_GROUND_TASK_CORES).unwrap();
             while let Some(Ok(_)) = interval.next().await {
                 func();
             }
@@ -416,7 +412,6 @@ impl Worker {
     ) {
         let counter = self.counter.clone();
         self.remote.spawn(async move {
-            set_thread_affinity(&BACK_GROUND_TASK_CORES).unwrap();
             let mut handle = RunnableWrapper { inner: runner };
             while let Some(msg) = receiver.next().await {
                 match msg {
@@ -444,7 +439,6 @@ impl Worker {
         let timeout = runner.get_interval();
         Self::delay_notify(tx.clone(), timeout);
         self.remote.spawn(async move {
-            set_thread_affinity(&BACK_GROUND_TASK_CORES).unwrap();
             let mut handle = RunnableWrapper { inner: runner };
             while let Some(msg) = receiver.next().await {
                 match msg {
