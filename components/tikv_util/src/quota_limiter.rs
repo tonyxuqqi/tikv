@@ -79,7 +79,7 @@ impl QuotaLimiter {
             Duration::ZERO
         };
 
-        cpu_dur + kv_dur + bw_dur
+        std::cmp::max(std::cmp::max(cpu_dur,  kv_dur), bw_dur)
     }
 
     pub fn consume_read(
@@ -96,7 +96,7 @@ impl QuotaLimiter {
         } else {
             Duration::ZERO
         };
-        cpu_dur + bw_dur
+        std::cmp::max(cpu_dur, bw_dur)
     }
 }
 

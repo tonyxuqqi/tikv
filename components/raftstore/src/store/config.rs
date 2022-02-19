@@ -259,6 +259,8 @@ pub struct Config {
 
     // Interval to inspect the latency of raftstore for slow store detection.
     pub inspect_interval: ReadableDuration,
+    
+    pub max_batch_size: usize,
 }
 
 impl Default for Config {
@@ -344,6 +346,7 @@ impl Default for Config {
             clean_stale_peer_delay: ReadableDuration::minutes(0),
             inspect_interval: ReadableDuration::millis(500),
             check_leader_lease_interval: ReadableDuration::secs(0),
+            max_batch_size: 64,
         }
     }
 }
@@ -521,7 +524,7 @@ impl Config {
                 return Err(box_err!("apply-max-batch-size should be greater than 0"));
             }
         } else {
-            self.apply_batch_system.max_batch_size = Some(256);
+            self.apply_batch_system.max_batch_size = Some(self.max_batch_size);
         }
         if self.store_batch_system.pool_size == 0 || self.store_batch_system.pool_size > limit {
             return Err(box_err!(
@@ -538,9 +541,9 @@ impl Config {
                 return Err(box_err!("store-max-batch-size should be greater than 0"));
             }
         } else if self.hibernate_regions {
-            self.store_batch_system.max_batch_size = Some(256);
+            self.store_batch_system.max_batch_size = Some(self.max_batch_size);
         } else {
-            self.store_batch_system.max_batch_size = Some(1024);
+            self.store_batch_system.max_batch_size = Some(self.max_batch_size);
         }
         if self.store_io_notify_capacity == 0 {
             return Err(box_err!(
