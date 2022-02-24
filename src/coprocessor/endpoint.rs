@@ -34,7 +34,7 @@ use concurrency_manager::ConcurrencyManager;
 use engine_rocks::PerfLevel;
 use resource_metering::{FutureExt, ResourceTagFactory, StreamExt};
 use tikv_alloc::trace::MemoryTraceGuard;
-use tikv_util::time::Instant;
+use tikv_util::{time::Instant, quota_limiter::QuotaLimiter};
 use txn_types::Lock;
 
 /// Requests that need time of less than `LIGHT_TASK_THRESHOLD` is considered as light ones,
@@ -70,6 +70,8 @@ pub struct Endpoint<E: Engine> {
     slow_log_threshold: Duration,
 
     _phantom: PhantomData<E>,
+
+    quota_limiter: Arc<QuotaLimiter>,
 }
 
 impl<E: Engine> tikv_util::AssertSend for Endpoint<E> {}
@@ -81,6 +83,7 @@ impl<E: Engine> Endpoint<E> {
         concurrency_manager: ConcurrencyManager,
         perf_level: PerfLevel,
         resource_tag_factory: ResourceTagFactory,
+        quota_limiter: Arc<QuotaLimiter>,
     ) -> Self {
         // FIXME: When yatp is used, we need to limit coprocessor requests in progress to avoid
         // using too much memory. However, if there are a number of large requests, small requests
@@ -104,6 +107,7 @@ impl<E: Engine> Endpoint<E> {
             max_handle_duration: cfg.end_point_request_max_handle_duration.0,
             slow_log_threshold: cfg.end_point_slow_log_threshold.0,
             _phantom: Default::default(),
+            quota_limiter: quota_limiter,
         }
     }
 
@@ -209,6 +213,7 @@ impl<E: Engine> Endpoint<E> {
                 self.check_memory_locks(&req_ctx)?;
 
                 let batch_row_limit = self.get_batch_row_limit(is_streaming);
+                let quota_limiter = self.quota_limiter.clone();
                 builder = Box::new(move |snap, req_ctx| {
                     let data_version = snap.ext().get_data_version();
                     let store = SnapshotStore::new(
@@ -233,6 +238,7 @@ impl<E: Engine> Endpoint<E> {
                         is_streaming,
                         req.get_is_cache_enabled(),
                         paging_size,
+                        quota_limiter,
                     )
                     .data_version(data_version)
                     .build()

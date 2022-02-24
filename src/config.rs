@@ -2436,6 +2436,7 @@ pub struct QuotaConfig {
     pub write_kvs: usize,
     pub write_bandwidth: ReadableSize,
     pub read_bandwidth: ReadableSize,
+    pub total_qps: usize,
 }
 
 impl Default for QuotaConfig {
@@ -2445,6 +2446,7 @@ impl Default for QuotaConfig {
             write_kvs: 0,
             write_bandwidth: ReadableSize(0),
             read_bandwidth: ReadableSize(0),
+            total_qps: 0,
         }
     }
 }

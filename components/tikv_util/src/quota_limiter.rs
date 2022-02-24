@@ -9,6 +9,7 @@ pub struct QuotaLimiter {
     write_kvs_limiter: Limiter,
     write_bandwidth_limiter: Limiter,
     read_bandwidth_limiter: Limiter,
+    total_qps_limiter: Limiter,
 }
 
 impl Default for QuotaLimiter {
@@ -18,6 +19,7 @@ impl Default for QuotaLimiter {
             write_kvs_limiter: Limiter::new(f64::INFINITY),
             write_bandwidth_limiter: Limiter::new(f64::INFINITY),
             read_bandwidth_limiter: Limiter::new(f64::INFINITY),
+            total_qps_limiter: Limiter::new(f64::INFINITY),
         }
     }
 }
@@ -29,6 +31,7 @@ impl QuotaLimiter {
         write_kvs: usize,
         write_bandwidth: ReadableSize,
         read_bandwidth: ReadableSize,
+        total_qps: usize,
     ) -> Self {
         let cputime_limiter = if cpu_quota == 0 {
             Limiter::new(f64::INFINITY)
@@ -55,16 +58,23 @@ impl QuotaLimiter {
             Limiter::new(read_bandwidth.0 as f64)
         };
 
+        let total_qps_limiter = if total_qps == 0 {
+            Limiter::new(f64::INFINITY)
+        } else {
+            Limiter::new(total_qps as f64)
+        };
+
         Self {
             cputime_limiter,
             write_kvs_limiter,
             write_bandwidth_limiter,
             read_bandwidth_limiter,
+            total_qps_limiter,
         }
     }
 
-    pub fn consume_write(&self, req_cnt: usize, kv_cnt: usize, bytes: usize) -> Duration {
-        let cost_micro_cpu: usize = req_cnt * 200/*write request overhead*/ + kv_cnt * 50;
+    pub fn consume_write(&self, req_cnt: usize, kv_cnt: usize, bytes: usize, time_in_us: usize) -> Duration {
+        let cost_micro_cpu: usize = time_in_us; //req_cnt * 200/*write request overhead*/ + kv_cnt * 50;
         let cpu_dur = self.cputime_limiter.consume_duration(cost_micro_cpu);
 
         let kv_dur = if kv_cnt > 0 {
@@ -79,7 +89,9 @@ impl QuotaLimiter {
             Duration::ZERO
         };
 
-        std::cmp::max(std::cmp::max(cpu_dur,  kv_dur), bw_dur)
+        let qps_dur = self.total_qps_limiter.consume_duration(1);
+
+        std::cmp::max(qps_dur, std::cmp::max(std::cmp::max(cpu_dur,  kv_dur), bw_dur))
     }
 
     pub fn consume_read(
@@ -96,7 +108,9 @@ impl QuotaLimiter {
         } else {
             Duration::ZERO
         };
-        std::cmp::max(cpu_dur, bw_dur)
+
+        let qps_dur = self.total_qps_limiter.consume_duration(1);
+        std::cmp::max(qps_dur, std::cmp::max(cpu_dur, bw_dur))
     }
 }
 
@@ -113,7 +127,7 @@ mod tests {
             ReadableSize::kb(1),
             ReadableSize::kb(1),
         );
-        let delay = quota_limiter.consume_write(1, 1, 1024);
+        let delay = quota_limiter.consume_write(1, 1, 1024, 0);
         assert_eq!(delay, Duration::from_secs(1));
 
         // 10K write requests will cost more than 1vCPU
@@ -123,7 +137,7 @@ mod tests {
             ReadableSize::kb(1),
             ReadableSize::kb(1),
         );
-        let delay = quota_limiter.consume_write(5000, 0, 0);
+        let delay = quota_limiter.consume_write(5000, 0, 0, 0);
         assert_eq!(delay, Duration::from_secs(1));
 
         // consume read

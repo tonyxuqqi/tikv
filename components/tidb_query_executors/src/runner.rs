@@ -22,6 +22,8 @@ use tidb_query_common::metrics::*;
 use tidb_query_common::storage::{IntervalRange, Storage};
 use tidb_query_common::Result;
 use tidb_query_datatype::expr::{EvalConfig, EvalContext, EvalWarnings};
+use tikv_util::{timer::GLOBAL_TIMER_HANDLE, quota_limiter::QuotaLimiter};
+use futures::compat::Future01CompatExt;
 
 // TODO: The value is chosen according to some very subjective experience, which is not tuned
 // carefully. We need to benchmark to find a best value. Also we may consider accepting this value
@@ -69,6 +71,8 @@ pub struct BatchExecutorsRunner<SS> {
 
     /// If it's a paging request, paging_size indicates to the required size for current page.
     paging_size: Option<u64>,
+
+    limiter: Arc<QuotaLimiter>,
 }
 
 // We assign a dummy type `()` so that we can omit the type when calling `check_supported`.
@@ -347,6 +351,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         stream_row_limit: usize,
         is_streaming: bool,
         paging_size: Option<u64>,
+        limiter: Arc<QuotaLimiter>,
     ) -> Result<Self> {
         let executors_len = req.get_executors().len();
         let collect_exec_summary = req.get_collect_execution_summaries();
@@ -391,6 +396,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
             stream_row_limit,
             encode_type,
             paging_size,
+            limiter,
         })
     }
 
@@ -414,11 +420,12 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
 
         let mut time_slice_start = Instant::now();
         loop {
-            let time_slice_len = time_slice_start.saturating_elapsed();
+            let mut time_slice_len = time_slice_start.saturating_elapsed();
             // Check whether we should yield from the execution
             if time_slice_len > MAX_TIME_SLICE {
                 reschedule().await;
                 time_slice_start = Instant::now();
+                time_slice_len = Duration::ZERO;
             }
 
             let mut chunk = Chunk::default();
@@ -430,7 +437,20 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
                 &mut warnings,
                 &mut ctx,
             )?;
-
+            // Because we don't know what's the internal_handle_request cost, just wait after the call.
+            let new_time_slice_len = time_slice_start.saturating_elapsed();
+            let wait = self.limiter.consume_read(
+                (new_time_slice_len.as_micros() - time_slice_len.as_micros()) as usize,
+                1,
+                record_len
+            );
+            if !wait.is_zero() {
+                GLOBAL_TIMER_HANDLE
+                    .delay(std::time::Instant::now() + wait)
+                    .compat()
+                    .await
+                    .unwrap();
+            }
             if record_len > 0 {
                 chunks.push(chunk);
                 record_all += record_len;

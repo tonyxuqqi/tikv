@@ -472,24 +472,23 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     fn execute(&self, mut task: Task) {
         let sched = self.clone();
 
-        let quota_delay = self.inner.quota_limiter.as_ref().consume_write(
+        /*let quota_delay = self.inner.quota_limiter.as_ref().consume_write(
             1,
             task.cmd.write_kvs(),
             task.cmd.write_bytes(),
-        );
-
+        );*/
         self.get_sched_pool(task.cmd.priority())
             .pool
             .spawn(async move {
                 // Delay if hit quota limit
-                if !quota_delay.is_zero() {
+                /*if !quota_delay.is_zero() {
                     GLOBAL_TIMER_HANDLE
                         .delay(std::time::Instant::now() + quota_delay)
                         .compat()
                         .await
                         .unwrap();
-                }
-
+                }*/
+  
                 if sched.check_task_deadline_exceeded(&task) {
                     return;
                 }
@@ -747,6 +746,10 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     /// message if successful or a `FinishedWithErr` message back to the `Scheduler`.
     async fn process_write(self, snapshot: E::Snap, task: Task, statistics: &mut Statistics) {
         fail_point!("txn_before_process_write");
+        let quota_limiter = Arc::clone(&self.inner.quota_limiter);
+        let kvs = task.cmd.write_kvs();
+        let write_bytes = task.cmd.write_bytes(); 
+        let begin_instant = Instant::now_coarse(); 
         let tag = task.cmd.tag();
         let cid = task.cid;
         let priority = task.cmd.priority();
@@ -797,6 +800,21 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             Ok(res) => res,
         };
         SCHED_STAGE_COUNTER_VEC.get(tag).write.inc();
+
+        let cost_time = begin_instant.saturating_elapsed();
+        let quota_delay = quota_limiter.as_ref().consume_write(
+            1,
+            kvs,
+            write_bytes,
+            cost_time.as_micros() as usize,
+        );
+        if !quota_delay.is_zero() {
+            GLOBAL_TIMER_HANDLE
+                .delay(std::time::Instant::now() + quota_delay)
+                .compat()
+                .await
+                .unwrap();
+        }
 
         if let Some(lock_info) = lock_info {
             let WriteResultLockInfo {
