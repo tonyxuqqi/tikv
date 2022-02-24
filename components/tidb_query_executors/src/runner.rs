@@ -24,6 +24,7 @@ use tidb_query_common::Result;
 use tidb_query_datatype::expr::{EvalConfig, EvalContext, EvalWarnings};
 use tikv_util::{timer::GLOBAL_TIMER_HANDLE, quota_limiter::QuotaLimiter};
 use futures::compat::Future01CompatExt;
+use cpu_time::ThreadTime;
 
 // TODO: The value is chosen according to some very subjective experience, which is not tuned
 // carefully. We need to benchmark to find a best value. Also we may consider accepting this value
@@ -430,20 +431,13 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
 
             let mut chunk = Chunk::default();
 
-            let (drained, record_len) = self.internal_handle_request(
+            let (drained, record_len, wait) = self.internal_handle_request(
                 false,
                 batch_size,
                 &mut chunk,
                 &mut warnings,
                 &mut ctx,
             )?;
-            // Because we don't know what's the internal_handle_request cost, just wait after the call.
-            let new_time_slice_len = time_slice_start.saturating_elapsed();
-            let wait = self.limiter.consume_read(
-                (new_time_slice_len.as_micros() - time_slice_len.as_micros()) as usize,
-                1,
-                record_len
-            );
             if !wait.is_zero() {
                 GLOBAL_TIMER_HANDLE
                     .delay(std::time::Instant::now() + wait)
@@ -516,7 +510,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         // record count less than batch size and is not drained
         while record_len < self.stream_row_limit && !is_drained {
             let mut current_chunk = Chunk::default();
-            let (drained, len) = self.internal_handle_request(
+            let (drained, len, wait_) = self.internal_handle_request(
                 true,
                 batch_size.min(self.stream_row_limit - record_len),
                 &mut current_chunk,
@@ -561,7 +555,8 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         chunk: &mut Chunk,
         warnings: &mut EvalWarnings,
         ctx: &mut EvalContext,
-    ) -> Result<(bool, usize)> {
+    ) -> Result<(bool, usize, Duration)> {
+        let thread_cpu_time = ThreadTime::now();
         let mut record_len = 0;
 
         self.deadline.check()?;
@@ -611,7 +606,12 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         }
 
         warnings.merge(&mut result.warnings);
-        Ok((is_drained, record_len))
+        let wait = self.limiter.consume_read(
+            (thread_cpu_time.elapsed().as_micros()) as usize,
+            1,
+            record_len
+        );
+        Ok((is_drained, record_len, wait))
     }
 
     fn make_stream_response(

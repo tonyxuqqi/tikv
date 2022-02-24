@@ -108,6 +108,8 @@ use tikv_util::quota_limiter::QuotaLimiter;
 use tikv_util::time::{duration_to_ms, duration_to_sec, Instant, ThreadReadId};
 use tikv_util::timer::GLOBAL_TIMER_HANDLE;
 use txn_types::{Key, KvPair, Lock, OldValues, RawMutation, TimeStamp, TsSet, Value};
+use cpu_time::ThreadTime;
+use std::time::Duration;
 
 pub type Result<T> = std::result::Result<T, Error>;
 pub type Callback<T> = Box<dyn FnOnce(Result<T>) + Send>;
@@ -576,7 +578,8 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                     let begin_instant = Instant::now_coarse();
                     let stage_snap_recv_ts = begin_instant;
                     let mut statistics = Statistics::default();
-                    let (result, delta) = {
+                    let (result, delta, cost_time) = {
+                        let thread_time_start = ThreadTime::now();
                         let perf_statistics = PerfStatisticsInstant::new();
                         let snap_store = SnapshotStore::new(
                             snapshot,
@@ -597,12 +600,12 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             });
 
                         let delta = perf_statistics.delta();
-                        (result, delta)
+                        let cost_time = thread_time_start.elapsed(); 
+                        (result, delta, cost_time)
                     };
                     metrics::tls_collect_scan_details(CMD, &statistics);
                     metrics::tls_collect_read_flow(ctx.get_region_id(), &statistics);
                     metrics::tls_collect_perf_stats(CMD, &delta);
-                    let cost_time = begin_instant.saturating_elapsed();
                     SCHED_PROCESSING_READ_HISTOGRAM_STATIC
                         .get(CMD)
                         .observe(duration_to_sec(cost_time));
@@ -618,7 +621,6 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             .map_or(0, |v| v.len());
                     let wait =
                         quota_limiter.consume_read(cost_time.as_micros() as usize, 1, read_bytes);
-
                     if !wait.is_zero() {
                         GLOBAL_TIMER_HANDLE
                             .delay(std::time::Instant::now() + wait)

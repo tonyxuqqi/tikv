@@ -64,6 +64,7 @@ use crate::storage::{
     get_priority_tag, kv::FlowStatsReporter, types::StorageCallback, Error as StorageError,
     ErrorInner as StorageErrorInner,
 };
+use cpu_time::ThreadTime;
 
 const TASKS_SLOTS_NUM: usize = 1 << 12; // 4096 slots.
 
@@ -471,24 +472,9 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
     /// Executes the task in the sched pool.
     fn execute(&self, mut task: Task) {
         let sched = self.clone();
-
-        /*let quota_delay = self.inner.quota_limiter.as_ref().consume_write(
-            1,
-            task.cmd.write_kvs(),
-            task.cmd.write_bytes(),
-        );*/
         self.get_sched_pool(task.cmd.priority())
             .pool
             .spawn(async move {
-                // Delay if hit quota limit
-                /*if !quota_delay.is_zero() {
-                    GLOBAL_TIMER_HANDLE
-                        .delay(std::time::Instant::now() + quota_delay)
-                        .compat()
-                        .await
-                        .unwrap();
-                }*/
-  
                 if sched.check_task_deadline_exceeded(&task) {
                     return;
                 }
@@ -761,7 +747,9 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let txn_ext = snapshot.ext().get_txn_ext().cloned();
 
         let deadline = task.cmd.deadline();
+        let mut cost_time = Duration::ZERO;
         let write_result = {
+            let thread_start_time = ThreadTime::now();
             let context = WriteContext {
                 lock_mgr: &self.inner.lock_mgr,
                 concurrency_manager: self.inner.concurrency_manager.clone(),
@@ -770,9 +758,11 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
                 async_apply_prewrite: self.inner.enable_async_apply_prewrite,
             };
 
-            task.cmd
+            let result = task.cmd
                 .process_write(snapshot, context)
-                .map_err(StorageError::from)
+                .map_err(StorageError::from);
+            cost_time = thread_start_time.elapsed();
+            result
         };
         let WriteResult {
             ctx,
@@ -801,7 +791,6 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         };
         SCHED_STAGE_COUNTER_VEC.get(tag).write.inc();
 
-        let cost_time = begin_instant.saturating_elapsed();
         let quota_delay = quota_limiter.as_ref().consume_write(
             1,
             kvs,

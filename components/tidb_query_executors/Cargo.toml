@@ -25,6 +25,7 @@ tipb = { git = "https://github.com/pingcap/tipb.git" }
 yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
 itertools = "0.10"
 futures = { version = "0.3", features = ["thread-pool", "compat"] }
+cpu-time = "1.0.0"
 
 [dev-dependencies]
 anyhow = "1.0"
