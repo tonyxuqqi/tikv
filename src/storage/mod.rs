@@ -619,8 +619,10 @@ impl<E: Engine, L: LockManager> Storage<E, L> {
                             .unwrap_or(&None)
                             .as_ref()
                             .map_or(0, |v| v.len());
+                    let cost_time = Duration::from_micros((cost_time.as_micros() as f64 *1.1_f64) as u64);
                     let wait =
                         quota_limiter.consume_read(cost_time.as_micros() as usize, 1, read_bytes);
+                    KV_COMMAND_THROTTLE_TIME_COUNTER_VEC_STATIC.get(CMD).inc_by(wait.as_micros() as u64);
                     if !wait.is_zero() {
                         GLOBAL_TIMER_HANDLE
                             .delay(std::time::Instant::now() + wait)

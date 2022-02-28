@@ -101,7 +101,7 @@ impl QuotaLimiter {
         read_bytes: usize,
     ) -> Duration {
         let cpu_dur = self.cputime_limiter.consume_duration(
-            time_micro_secs as usize + req_cnt * 100, /*read request overhead*/
+            time_micro_secs as usize 
         );
         let bw_dur = if read_bytes > 0 {
             self.read_bandwidth_limiter.consume_duration(read_bytes)

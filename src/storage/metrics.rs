@@ -371,6 +371,10 @@ make_auto_flush_static_metric! {
         "req" => CommandKind,
         "metric" => PerfMetric,
     }
+
+    pub struct KvCommandThrottleTimeCounterVec: LocalIntCounter {
+        "type" => CommandKind,
+    }
 }
 
 impl From<ServerGcKeysCF> for GcKeysCF {
@@ -607,4 +611,13 @@ lazy_static! {
 
     pub static ref STORAGE_ROCKSDB_PERF_COUNTER_STATIC: PerfCounter =
         auto_flush_from!(STORAGE_ROCKSDB_PERF_COUNTER, PerfCounter);
+
+    pub static ref KV_COMMAND_THROTTLE_TIME_COUNTER_VEC: IntCounterVec = register_int_counter_vec!(
+        "tikv_storage_command_throttle_time_total",
+        "Total throttle time (in milliseconds) of commands.",
+        &["type"]
+    )
+    .unwrap();
+    pub static ref KV_COMMAND_THROTTLE_TIME_COUNTER_VEC_STATIC: KvCommandThrottleTimeCounterVec =
+        auto_flush_from!(KV_COMMAND_THROTTLE_TIME_COUNTER_VEC, KvCommandThrottleTimeCounterVec);
 }

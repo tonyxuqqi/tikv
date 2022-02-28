@@ -747,8 +747,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
         let txn_ext = snapshot.ext().get_txn_ext().cloned();
 
         let deadline = task.cmd.deadline();
-        let mut cost_time = Duration::ZERO;
-        let write_result = {
+        let (write_result, cost_time) = {
             let thread_start_time = ThreadTime::now();
             let context = WriteContext {
                 lock_mgr: &self.inner.lock_mgr,
@@ -761,8 +760,8 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             let result = task.cmd
                 .process_write(snapshot, context)
                 .map_err(StorageError::from);
-            cost_time = thread_start_time.elapsed();
-            result
+            let cost_time = thread_start_time.elapsed();
+            (result, cost_time)
         };
         let WriteResult {
             ctx,
@@ -797,6 +796,7 @@ impl<E: Engine, L: LockManager> Scheduler<E, L> {
             write_bytes,
             cost_time.as_micros() as usize,
         );
+        KV_COMMAND_THROTTLE_TIME_COUNTER_VEC_STATIC.get(tag).inc_by(quota_delay.as_micros() as u64);
         if !quota_delay.is_zero() {
             GLOBAL_TIMER_HANDLE
                 .delay(std::time::Instant::now() + quota_delay)

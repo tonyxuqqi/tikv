@@ -421,12 +421,11 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
 
         let mut time_slice_start = Instant::now();
         loop {
-            let mut time_slice_len = time_slice_start.saturating_elapsed();
+            let time_slice_len = time_slice_start.saturating_elapsed();
             // Check whether we should yield from the execution
             if time_slice_len > MAX_TIME_SLICE {
                 reschedule().await;
                 time_slice_start = Instant::now();
-                time_slice_len = Duration::ZERO;
             }
 
             let mut chunk = Chunk::default();
@@ -438,6 +437,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
                 &mut warnings,
                 &mut ctx,
             )?;
+            //KV_COMMAND_TIME_THROTTLE_COUNTER_VEC_STATIC.get(CommandKind::scan).add(cost_time.as_micros() as usize);
             if !wait.is_zero() {
                 GLOBAL_TIMER_HANDLE
                     .delay(std::time::Instant::now() + wait)
@@ -510,7 +510,7 @@ impl<SS: 'static> BatchExecutorsRunner<SS> {
         // record count less than batch size and is not drained
         while record_len < self.stream_row_limit && !is_drained {
             let mut current_chunk = Chunk::default();
-            let (drained, len, wait_) = self.internal_handle_request(
+            let (drained, len, _wait) = self.internal_handle_request(
                 true,
                 batch_size.min(self.stream_row_limit - record_len),
                 &mut current_chunk,
