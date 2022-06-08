@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crossbeam::channel::TrySendError;
 use engine_rocks::{raw::DB, RocksEngine, RocksSnapshot};
-use engine_traits::{ALL_CFS, CF_DEFAULT};
+use engine_traits::{DummyFactory, ALL_CFS, CF_DEFAULT};
 use kvproto::{
     kvrpcpb::{Context, ExtraOp as TxnExtraOp},
     metapb::Region,
@@ -182,6 +182,7 @@ fn bench_async_snapshot(b: &mut test::Bencher) {
     let kv = RaftKv::new(
         SyncBenchRouter::new(region.clone(), db.clone()),
         RocksEngine::from_db(db),
+        Box::new(DummyFactory::new()),
     );
 
     let mut ctx = Context::default();
@@ -214,6 +215,7 @@ fn bench_async_write(b: &mut test::Bencher) {
     let kv = RaftKv::new(
         SyncBenchRouter::new(region.clone(), db.clone()),
         RocksEngine::from_db(db),
+        Box::new(DummyFactory::new()),
     );
 
     let mut ctx = Context::default();

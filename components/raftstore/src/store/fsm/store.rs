@@ -26,8 +26,9 @@ use collections::{HashMap, HashMapEntry, HashSet};
 use concurrency_manager::ConcurrencyManager;
 use crossbeam::channel::{unbounded, Sender, TryRecvError, TrySendError};
 use engine_traits::{
-    CompactedEvent, DeleteStrategy, Engines, KvEngine, Mutable, PerfContextKind, RaftEngine,
-    RaftLogBatch, Range, WriteBatch, WriteOptions, CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE,
+    CompactedEvent, DeleteStrategy, Engines, EnginesFactory, KvEngine, Mutable, PerfContextKind,
+    RaftEngine, RaftLogBatch, Range, WriteBatch, WriteOptions, CF_DEFAULT, CF_LOCK, CF_RAFT,
+    CF_WRITE,
 };
 use fail::fail_point;
 use futures::{compat::Future01CompatExt, FutureExt};
@@ -495,6 +496,7 @@ where
     pub sync_write_worker: Option<WriteWorker<EK, ER, RaftRouter<EK, ER>, T>>,
     pub io_reschedule_concurrent_count: Arc<AtomicUsize>,
     pub pending_latency_inspect: Vec<util::LatencyInspector>,
+    pub engines_factory: Box<dyn EnginesFactory<EK, ER> + Send>,
 }
 
 impl<EK, ER, T> PollContext<EK, ER, T>
@@ -1057,6 +1059,7 @@ pub struct RaftPollerBuilder<EK: KvEngine, ER: RaftEngine, T> {
     feature_gate: FeatureGate,
     write_senders: Vec<Sender<WriteMsg<EK, ER>>>,
     io_reschedule_concurrent_count: Arc<AtomicUsize>,
+    pub engines_factory: Box<dyn EnginesFactory<EK, ER> + Send>,
 }
 
 impl<EK: KvEngine, ER: RaftEngine, T> RaftPollerBuilder<EK, ER, T> {
@@ -1111,13 +1114,14 @@ impl<EK: KvEngine, ER: RaftEngine, T> RaftPollerBuilder<EK, ER, T> {
                 applying_regions.push(region.clone());
                 return Ok(true);
             }
-
+            // TODOTODO: get right tablet suffix, for Single rocksDB, the tablet suffix does not matter.
+            let tablet_engines = self.engines_factory.create_engines(region.get_id(), 0)?;
             let (tx, mut peer) = box_try!(PeerFsm::create(
                 store_id,
                 &self.cfg.value(),
                 self.region_scheduler.clone(),
                 self.raftlog_fetch_scheduler.clone(),
-                self.engines.clone(),
+                tablet_engines,
                 region,
             ));
             peer.peer.init_replication_mode(&mut *replication_state);
@@ -1293,6 +1297,7 @@ where
             sync_write_worker,
             io_reschedule_concurrent_count: self.io_reschedule_concurrent_count.clone(),
             pending_latency_inspect: vec![],
+            engines_factory: self.engines_factory.clone(),
         };
         ctx.update_ticks_timeout();
         let tag = format!("[store {}]", ctx.store.get_id());
@@ -1343,6 +1348,7 @@ where
             feature_gate: self.feature_gate.clone(),
             write_senders: self.write_senders.clone(),
             io_reschedule_concurrent_count: self.io_reschedule_concurrent_count.clone(),
+            engines_factory: self.engines_factory.clone(),
         }
     }
 }
@@ -1414,6 +1420,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
         concurrency_manager: ConcurrencyManager,
         collector_reg_handle: CollectorRegHandle,
         health_service: Option<HealthService>,
+        engines_factory: Box<dyn EnginesFactory<EK, ER> + Send>,
     ) -> Result<()> {
         assert!(self.workers.is_none());
         // TODO: we can get cluster meta regularly too later.
@@ -1532,6 +1539,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftBatchSystem<EK, ER> {
             feature_gate: pd_client.feature_gate().clone(),
             write_senders: self.store_writers.senders().clone(),
             io_reschedule_concurrent_count: Arc::new(AtomicUsize::new(0)),
+            engines_factory,
         };
         let region_peers = builder.init()?;
         self.start_system::<T, C>(

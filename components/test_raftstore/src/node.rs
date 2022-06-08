@@ -34,7 +34,7 @@ use tempfile::TempDir;
 use tikv::{
     config::{ConfigController, Module},
     import::SstImporter,
-    server::{raftkv::ReplicaReadLockChecker, Node, Result as ServerResult},
+    server::{raftkv::ReplicaReadLockChecker, DummyEnginesFactory, Node, Result as ServerResult},
 };
 use tikv_util::{
     config::VersionTrack,
@@ -301,6 +301,7 @@ impl Simulator for NodeCluster {
             Box::new(SplitCheckConfigManager(split_scheduler.clone())),
         );
 
+        let engines_factory = DummyEnginesFactory::new(engines.kv.clone(), engines.raft.clone());
         node.try_bootstrap_store(engines.clone())?;
         node.start(
             engines.clone(),
@@ -314,6 +315,7 @@ impl Simulator for NodeCluster {
             AutoSplitController::default(),
             cm,
             CollectorRegHandle::new_for_test(),
+            Box::new(engines_factory),
         )?;
         assert!(
             engines

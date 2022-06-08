@@ -35,4 +35,5 @@ impl<K: KvEngine, R: RaftEngine> Engines<K, R> {
 
 pub trait EnginesFactory<K, R> {
     fn create_engines(&self, region_id: u64, suffix: u64) -> Result<Engines<K, R>>;
+    fn clone(&self) -> Box<dyn EnginesFactory<K, R> + Send>;
 }

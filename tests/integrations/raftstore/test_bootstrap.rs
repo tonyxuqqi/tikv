@@ -15,7 +15,10 @@ use raftstore::{
 use resource_metering::CollectorRegHandle;
 use tempfile::Builder;
 use test_raftstore::*;
-use tikv::{import::SstImporter, server::Node};
+use tikv::{
+    import::SstImporter,
+    server::{DummyEnginesFactory, Node},
+};
 use tikv_util::{
     config::VersionTrack,
     worker::{dummy_scheduler, Builder as WorkerBuilder, LazyWorker},
@@ -106,6 +109,7 @@ fn test_node_bootstrap_with_prepared_data() {
 
     node.try_bootstrap_store(engines.clone()).unwrap();
     // try to restart this node, will clear the prepare data
+    let engines_factory = DummyEnginesFactory::new(engines.kv.clone(), engines.raft.clone());
     node.start(
         engines,
         simulate_trans,
@@ -118,6 +122,7 @@ fn test_node_bootstrap_with_prepared_data() {
         AutoSplitController::default(),
         ConcurrencyManager::new(1.into()),
         CollectorRegHandle::new_for_test(),
+        Box::new(engines_factory),
     )
     .unwrap();
     assert!(

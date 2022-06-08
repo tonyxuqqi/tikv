@@ -15,7 +15,7 @@ use concurrency_manager::ConcurrencyManager;
 use encryption_export::DataKeyManager;
 use engine_rocks::{RocksEngine, RocksSnapshot};
 use engine_test::raft::RaftTestEngine;
-use engine_traits::{Engines, MiscExt};
+use engine_traits::{DummyFactory, Engines, MiscExt};
 use futures::executor::block_on;
 use grpcio::{ChannelBuilder, EnvBuilder, Environment, Error as GrpcError, Service};
 use grpcio_health::HealthService;
@@ -58,8 +58,8 @@ use tikv::{
         raftkv::ReplicaReadLockChecker,
         resolve::{self, StoreAddrResolver},
         service::DebugService,
-        ConnectionBuilder, Error, Node, PdStoreAddrResolver, RaftClient, RaftKv,
-        Result as ServerResult, Server, ServerTransport,
+        ConnectionBuilder, DummyEnginesFactory, Error, Node, PdStoreAddrResolver, RaftClient,
+        RaftKv, Result as ServerResult, Server, ServerTransport,
     },
     storage::{self, kv::SnapContext, txn::flow_controller::FlowController, Engine},
 };
@@ -281,7 +281,11 @@ impl ServerCluster {
         let raft_router = ServerRaftStoreRouter::new(router.clone(), local_reader);
         let sim_router = SimulateTransport::new(raft_router.clone());
 
-        let raft_engine = RaftKv::new(sim_router.clone(), engines.kv.clone());
+        let raft_engine = RaftKv::new(
+            sim_router.clone(),
+            engines.kv.clone(),
+            Box::new(DummyFactory::new()),
+        );
 
         // Create coprocessor.
         let mut coprocessor_host = CoprocessorHost::new(router.clone(), cfg.coprocessor.clone());
@@ -302,7 +306,11 @@ impl ServerCluster {
             raft_engine.clone(),
         ));
 
-        let mut engine = RaftKv::new(sim_router.clone(), engines.kv.clone());
+        let mut engine = RaftKv::new(
+            sim_router.clone(),
+            engines.kv.clone(),
+            Box::new(DummyFactory::new()),
+        );
         if let Some(scheduler) = self.txn_extra_schedulers.remove(&node_id) {
             engine.set_txn_extra_scheduler(scheduler);
         }
@@ -542,6 +550,7 @@ impl ServerCluster {
         let split_config_manager =
             SplitConfigManager::new(Arc::new(VersionTrack::new(cfg.tikv.split)));
         let auto_split_controller = AutoSplitController::new(split_config_manager);
+        let engines_factory = DummyEnginesFactory::new(engines.kv.clone(), engines.raft.clone());
         node.start(
             engines,
             simulate_trans.clone(),
@@ -554,6 +563,7 @@ impl ServerCluster {
             auto_split_controller,
             concurrency_manager.clone(),
             collector_reg_handle,
+            Box::new(engines_factory),
         )?;
         assert!(node_id == 0 || node_id == node.id());
         let node_id = node.id();

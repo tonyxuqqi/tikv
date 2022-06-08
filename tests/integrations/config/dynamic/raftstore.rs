@@ -25,6 +25,7 @@ use test_raftstore::TestPdClient;
 use tikv::{
     config::{ConfigController, Module, TiKvConfig},
     import::SstImporter,
+    server::DummyEnginesFactory,
 };
 use tikv_util::{
     config::{ReadableSize, VersionTrack},
@@ -105,6 +106,7 @@ fn start_raftstore(
     let pd_worker = LazyWorker::new("store-config");
     let (split_check_scheduler, _) = dummy_scheduler();
 
+    let engines_factory = DummyEnginesFactory::new(engines.kv.clone(), engines.raft.clone());
     system
         .spawn(
             Default::default(),
@@ -124,6 +126,7 @@ fn start_raftstore(
             ConcurrencyManager::new(1.into()),
             CollectorRegHandle::new_for_test(),
             None,
+            Box::new(engines_factory),
         )
         .unwrap();
 

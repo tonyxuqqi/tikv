@@ -42,6 +42,7 @@ use tikv::{
     server::{
         gc_worker::sync_gc,
         service::{batch_commands_request, batch_commands_response},
+        DummyEnginesFactory,
     },
 };
 use tikv_util::{
@@ -980,6 +981,7 @@ fn test_double_run_node() {
     let (split_check_scheduler, _) = dummy_scheduler();
 
     let store_meta = Arc::new(Mutex::new(StoreMeta::new(20)));
+    let engines_factory = DummyEnginesFactory::new(engines.kv.clone(), engines.raft.clone());
     let e = node
         .start(
             engines,
@@ -993,6 +995,7 @@ fn test_double_run_node() {
             AutoSplitController::default(),
             ConcurrencyManager::new(1.into()),
             CollectorRegHandle::new_for_test(),
+            Box::new(engines_factory),
         )
         .unwrap_err();
     assert!(format!("{:?}", e).contains("already started"), "{:?}", e);

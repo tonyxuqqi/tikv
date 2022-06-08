@@ -13,7 +13,7 @@ use std::{
 };
 
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::{CfName, KvEngine, MvccProperties, Snapshot};
+use engine_traits::{CfName, KvEngine, MvccProperties, Snapshot, TabletFactory};
 use kvproto::{
     errorpb,
     kvrpcpb::{Context, IsolationLevel},
@@ -153,7 +153,6 @@ where
 }
 
 /// `RaftKv` is a storage engine base on `RaftStore`.
-#[derive(Clone)]
 pub struct RaftKv<E, S>
 where
     E: KvEngine,
@@ -162,6 +161,19 @@ where
     router: S,
     engine: E,
     txn_extra_scheduler: Option<Arc<dyn TxnExtraScheduler>>,
+    tablet_factory: Box<dyn TabletFactory<E> + Send>,
+}
+
+impl<E: KvEngine, S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static> Clone for RaftKv<E, S> {
+    #[inline]
+    fn clone(&self) -> RaftKv<E, S> {
+        RaftKv {
+            router: self.router.clone(),
+            engine: self.engine.clone(),
+            txn_extra_scheduler: self.txn_extra_scheduler.clone(),
+            tablet_factory: self.tablet_factory.clone(),
+        }
+    }
 }
 
 impl<E, S> RaftKv<E, S>
@@ -170,11 +182,16 @@ where
     S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
 {
     /// Create a RaftKv using specified configuration.
-    pub fn new(router: S, engine: E) -> RaftKv<E, S> {
+    pub fn new(
+        router: S,
+        engine: E,
+        tablet_factory: Box<dyn TabletFactory<E> + Send>,
+    ) -> RaftKv<E, S> {
         RaftKv {
             router,
             engine,
             txn_extra_scheduler: None,
+            tablet_factory,
         }
     }
 
