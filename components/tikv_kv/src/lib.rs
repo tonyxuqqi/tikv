@@ -266,8 +266,11 @@ pub trait Engine: Send + Clone + 'static {
     type Snap: Snapshot;
     type Local: LocalEngine;
 
-    /// Local storage engine.
+    /// Local storage engine, for single rocksdb.
     fn kv_engine(&self) -> Self::Local;
+
+    /// Local storage engine per region, for multi rocksdb
+    fn kv_tablet(&self, region_id: u64) -> Option<Self::Local>;
 
     fn snapshot_on_kv_engine(&self, start_key: &[u8], end_key: &[u8]) -> Result<Self::Snap>;
 

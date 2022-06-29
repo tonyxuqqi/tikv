@@ -1,4 +1,4 @@
-// Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
+// Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 // #[PerformanceCriticalPath]
 use std::{
@@ -47,134 +47,25 @@ use crate::storage::{
         ExtCallback, Modify, SnapContext, WriteData,
     },
 };
-
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("{}", .0.get_message())]
-    RequestFailed(errorpb::Error),
-
-    #[error("{0}")]
-    Io(#[from] IoError),
-
-    #[error("{0}")]
-    Server(#[from] RaftServerError),
-
-    #[error("{0}")]
-    InvalidResponse(String),
-
-    #[error("{0}")]
-    InvalidRequest(String),
-
-    #[error("timeout after {0:?}")]
-    Timeout(Duration),
-}
-
-fn get_status_kind_from_error(e: &Error) -> RequestStatusKind {
-    match *e {
-        Error::RequestFailed(ref header) => {
-            RequestStatusKind::from(storage::get_error_kind_from_header(header))
-        }
-        Error::Io(_) => RequestStatusKind::err_io,
-        Error::Server(_) => RequestStatusKind::err_server,
-        Error::InvalidResponse(_) => RequestStatusKind::err_invalid_resp,
-        Error::InvalidRequest(_) => RequestStatusKind::err_invalid_req,
-        Error::Timeout(_) => RequestStatusKind::err_timeout,
-    }
-}
-
-fn get_status_kind_from_engine_error(e: &kv::Error) -> RequestStatusKind {
-    match *e {
-        KvError(box KvErrorInner::Request(ref header)) => {
-            RequestStatusKind::from(storage::get_error_kind_from_header(header))
-        }
-        KvError(box KvErrorInner::KeyIsLocked(_)) => {
-            RequestStatusKind::err_leader_memory_lock_check
-        }
-        KvError(box KvErrorInner::Timeout(_)) => RequestStatusKind::err_timeout,
-        KvError(box KvErrorInner::EmptyRequest) => RequestStatusKind::err_empty_request,
-        KvError(box KvErrorInner::Other(_)) => RequestStatusKind::err_other,
-    }
-}
-
-pub type Result<T> = result::Result<T, Error>;
-
-impl From<Error> for kv::Error {
-    fn from(e: Error) -> kv::Error {
-        match e {
-            Error::RequestFailed(e) => KvError::from(KvErrorInner::Request(e)),
-            Error::Server(e) => e.into(),
-            e => box_err!(e),
-        }
-    }
-}
-
-pub enum CmdRes<S>
-where
-    S: Snapshot,
-{
-    Resp(Vec<Response>),
-    Snap(RegionSnapshot<S>),
-}
-
-fn check_raft_cmd_response(resp: &mut RaftCmdResponse) -> Result<()> {
-    if resp.get_header().has_error() {
-        return Err(Error::RequestFailed(resp.take_header().take_error()));
-    }
-
-    Ok(())
-}
-
-fn on_write_result<S>(mut write_resp: WriteResponse) -> Result<CmdRes<S>>
-where
-    S: Snapshot,
-{
-    if let Err(e) = check_raft_cmd_response(&mut write_resp.response) {
-        return Err(e);
-    }
-    let resps = write_resp.response.take_responses();
-    Ok(CmdRes::Resp(resps.into()))
-}
-
-fn on_read_result<S>(mut read_resp: ReadResponse<S>) -> Result<CmdRes<S>>
-where
-    S: Snapshot,
-{
-    if let Err(e) = check_raft_cmd_response(&mut read_resp.response) {
-        return Err(e);
-    }
-    let resps = read_resp.response.take_responses();
-    if let Some(mut snapshot) = read_resp.snapshot {
-        snapshot.term = NonZeroU64::new(read_resp.response.get_header().get_current_term());
-        snapshot.txn_extra_op = read_resp.txn_extra_op;
-        Ok(CmdRes::Snap(snapshot))
-    } else {
-        Ok(CmdRes::Resp(resps.into()))
-    }
-}
+use crate::server::raftkv::*;
 
 /// `RaftKv` is a storage engine base on `RaftStore`.
 #[derive(Clone)]
-pub struct RaftKv<E, S>
+pub struct RaftTablet<E>
 where
     E: KvEngine,
-    S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
 {
-    router: S,
-    engine: E,
     txn_extra_scheduler: Option<Arc<dyn TxnExtraScheduler>>,
     tablet_factory: Box<dyn TabletFactory<E> + Send>,
 }
 
-impl<E, S> RaftKv<E, S>
+impl<E> RaftTablet<E>
 where
     E: KvEngine,
-    S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
 {
     /// Create a RaftKv using specified configuration.
-    pub fn new(router: S, engine: E, tablet_factory: Box<dyn TabletFactory<E> + Send>) -> RaftKv<E, S> {
-        RaftKv {
-            router,
-            engine,
+    pub fn new(tablet_factory: Box<dyn TabletFactory<E> + Send>) -> RaftTablet<E> {
+        RaftTablet {
             txn_extra_scheduler: None,
             tablet_factory,
         }
@@ -182,134 +73,29 @@ where
 
     pub fn set_txn_extra_scheduler(&mut self, txn_extra_scheduler: Arc<dyn TxnExtraScheduler>) {
         self.txn_extra_scheduler = Some(txn_extra_scheduler);
-    }
+    } 
+}
 
-    fn new_request_header(&self, ctx: &Context) -> RaftRequestHeader {
-        let mut header = RaftRequestHeader::default();
-        header.set_region_id(ctx.get_region_id());
-        header.set_peer(ctx.get_peer().clone());
-        header.set_region_epoch(ctx.get_region_epoch().clone());
-        if ctx.get_term() != 0 {
-            header.set_term(ctx.get_term());
-        }
-        header.set_sync_log(ctx.get_sync_log());
-        header.set_replica_read(ctx.get_replica_read());
-        header
-    }
-
-    fn exec_snapshot(
-        &self,
-        ctx: SnapContext<'_>,
-        req: Request,
-        cb: Callback<CmdRes<E::Snapshot>>,
-    ) -> Result<()> {
-        let mut header = self.new_request_header(&*ctx.pb_ctx);
-        if ctx.pb_ctx.get_stale_read() && !ctx.start_ts.is_zero() {
-            let mut data = [0u8; 8];
-            (&mut data[..])
-                .encode_u64(ctx.start_ts.into_inner())
-                .unwrap();
-            header.set_flags(WriteBatchFlags::STALE_READ.bits());
-            header.set_flag_data(data.into());
-        }
-        let mut cmd = RaftCmdRequest::default();
-        cmd.set_header(header);
-        cmd.set_requests(vec![req].into());
-        self.router
-            .read(
-                ctx.read_id,
-                cmd,
-                StoreCallback::Read(Box::new(move |resp| {
-                    cb(on_read_result(resp).map_err(Error::into));
-                })),
-            )
-            .map_err(From::from)
-    }
-
-    fn exec_write_requests(
-        &self,
-        ctx: &Context,
-        batch: WriteData,
-        write_cb: Callback<CmdRes<E::Snapshot>>,
-        proposed_cb: Option<ExtCallback>,
-        committed_cb: Option<ExtCallback>,
-    ) -> Result<()> {
-        #[cfg(feature = "failpoints")]
-        {
-            // If rid is some, only the specified region reports error.
-            // If rid is None, all regions report error.
-            let raftkv_early_error_report_fp = || -> Result<()> {
-                fail_point!("raftkv_early_error_report", |rid| {
-                    let region_id = ctx.get_region_id();
-                    rid.and_then(|rid| {
-                        let rid: u64 = rid.parse().unwrap();
-                        if rid == region_id { None } else { Some(()) }
-                    })
-                    .ok_or_else(|| RaftServerError::RegionNotFound(region_id).into())
-                });
-                Ok(())
-            };
-            raftkv_early_error_report_fp()?;
-        }
-
-        let reqs: Vec<Request> = batch.modifies.into_iter().map(Into::into).collect();
-        let txn_extra = batch.extra;
-        let mut header = self.new_request_header(ctx);
-        if txn_extra.one_pc {
-            header.set_flags(WriteBatchFlags::ONE_PC.bits());
-        }
-
-        let mut cmd = RaftCmdRequest::default();
-        cmd.set_header(header);
-        cmd.set_requests(reqs.into());
-
-        self.schedule_txn_extra(txn_extra);
-
-        let cb = StoreCallback::write_ext(
-            Box::new(move |resp| {
-                write_cb(on_write_result(resp).map_err(Error::into));
-            }),
-            proposed_cb,
-            committed_cb,
-        );
-        let extra_opts = RaftCmdExtraOpts {
-            deadline: batch.deadline,
-            disk_full_opt: batch.disk_full_opt,
-        };
-        self.router.send_command(cmd, cb, extra_opts)?;
-
-        Ok(())
+impl<E> Display for RaftTablet<E>
+where
+    E: KvEngine,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "RaftTablet")
     }
 }
 
-fn invalid_resp_type(exp: CmdType, act: CmdType) -> Error {
-    Error::InvalidResponse(format!(
-        "cmd type not match, want {:?}, got {:?}!",
-        exp, act
-    ))
-}
-
-impl<E, S> Display for RaftKv<E, S>
+impl<E> Debug for RaftTablet<E>
 where
     E: KvEngine,
     S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "RaftKv")
+        write!(f, "RaftTablet")
     }
 }
 
-impl<E, S> Debug for RaftKv<E, S>
-where
-    E: KvEngine,
-    S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "RaftKv")
-    }
-}
-
-impl<E, S> Engine for RaftKv<E, S>
+impl<E, S> Engine for RaftTablet<E, S>
 where
     E: KvEngine,
     S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
@@ -318,7 +104,7 @@ where
     type Local = E;
 
     fn kv_engine(&self) -> E {
-        self.engine.clone()
+        unimplemented!() 
     }
 
     fn kv_tablet(&self, region_id: u64) -> Option<E> {
@@ -326,41 +112,11 @@ where
     }
 
     fn snapshot_on_kv_engine(&self, start_key: &[u8], end_key: &[u8]) -> kv::Result<Self::Snap> {
-        let mut region = metapb::Region::default();
-        region.set_start_key(start_key.to_owned());
-        region.set_end_key(end_key.to_owned());
-        // Use a fake peer to avoid panic.
-        region.mut_peers().push(Default::default());
-        Ok(RegionSnapshot::<E::Snapshot>::from_raw(
-            self.engine.clone(),
-            region,
-        ))
+        unimplemented!()
     }
 
     fn modify_on_kv_engine(&self, mut modifies: Vec<Modify>) -> kv::Result<()> {
-        for modify in &mut modifies {
-            match modify {
-                Modify::Delete(_, ref mut key) => {
-                    let bytes = keys::data_key(key.as_encoded());
-                    *key = Key::from_encoded(bytes);
-                }
-                Modify::Put(_, ref mut key, _) => {
-                    let bytes = keys::data_key(key.as_encoded());
-                    *key = Key::from_encoded(bytes);
-                }
-                Modify::PessimisticLock(ref mut key, _) => {
-                    let bytes = keys::data_key(key.as_encoded());
-                    *key = Key::from_encoded(bytes);
-                }
-                Modify::DeleteRange(_, ref mut key1, ref mut key2, _) => {
-                    let bytes = keys::data_key(key1.as_encoded());
-                    *key1 = Key::from_encoded(bytes);
-                    let bytes = keys::data_end_key(key2.as_encoded());
-                    *key2 = Key::from_encoded(bytes);
-                }
-            }
-        }
-        write_modifies(&self.engine, modifies)
+        unimplemented!()
     }
 
     fn async_write(

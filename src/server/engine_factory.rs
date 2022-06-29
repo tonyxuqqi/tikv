@@ -247,6 +247,10 @@ impl<ER: RaftEngine> TabletFactory<RocksEngine> for KvEngineFactory<ER> {
         self.create_shared_db()
     }
 
+    fn open_tablet_cache_latest(&self, id: u64) -> Option<RocksEngine> {
+        self.open_tablet_cache_any(id)
+    }
+
     fn open_tablet_raw(&self, _path: &Path, _readonly: bool) -> Result<RocksEngine> {
         TabletFactory::create_tablet(self, 0, 0)
     }

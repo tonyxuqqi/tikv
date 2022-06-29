@@ -151,6 +151,10 @@ impl Engine for MockEngine {
         self.base.kv_engine()
     }
 
+    fn kv_tablet(&self, region_id: u64) -> Option<Self::Local> {
+        self.base.kv_engine()
+    }
+
     fn snapshot_on_kv_engine(&self, start_key: &[u8], end_key: &[u8]) -> Result<Self::Snap> {
         self.base.snapshot_on_kv_engine(start_key, end_key)
     }

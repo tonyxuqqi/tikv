@@ -180,6 +180,9 @@ pub trait TabletFactory<EK>: TabletAccessor<EK> {
         self.open_tablet_cache(id, 0)
     }
 
+    /// Open a tablet by id and latest available suffix from cache
+    fn open_tablet_cache_latest(&self, id: u64) -> Option<EK>;
+
     /// Open tablet by path and readonly flag
     fn open_tablet_raw(&self, path: &Path, readonly: bool) -> Result<EK>;
 
@@ -239,21 +242,31 @@ where
     fn create_tablet(&self, _id: u64, _suffix: u64) -> Result<EK> {
         Ok(self.engine.as_ref().unwrap().clone())
     }
+
     fn open_tablet_raw(&self, _path: &Path, _readonly: bool) -> Result<EK> {
         Ok(self.engine.as_ref().unwrap().clone())
     }
+
+    fn open_tablet_cache_latest(&self, _region_id: u64) -> Option<EK> {
+        Ok(self.engine.as_ref().unwrap().clone())
+    }
+
     fn create_shared_db(&self) -> Result<EK> {
         Ok(self.engine.as_ref().unwrap().clone())
     }
+
     fn destroy_tablet(&self, _id: u64, _suffix: u64) -> crate::Result<()> {
         Ok(())
     }
+
     fn exists_raw(&self, _path: &Path) -> bool {
         true
     }
+
     fn tablet_path(&self, _id: u64, _suffix: u64) -> PathBuf {
         PathBuf::from(&self.root_path)
     }
+
     fn tablets_path(&self) -> PathBuf {
         PathBuf::from(&self.root_path)
     }

@@ -374,10 +374,12 @@ impl<E: Engine> Tracker<E> {
             let mut c = c.borrow_mut();
             let perf_context = c.get_or_insert_with(|| unsafe {
                 with_tls_engine::<E, _, _>(|engine| {
-                    Box::new(engine.kv_engine().get_perf_context(
+                    // TODO: what if kv_tablet returned None()? 
+                    let kv_tablet = engine.kv_tablet(self.req_ctx.context.region_id).unwrap();
+                    return Box::new(kv_tablet.get_perf_context(
                         PerfLevel::Uninitialized,
                         PerfContextKind::Coprocessor(self.req_ctx.tag.get_str()),
-                    ))
+                    ));
                 })
             });
             f(perf_context)

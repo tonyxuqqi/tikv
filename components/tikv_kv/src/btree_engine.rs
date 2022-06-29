@@ -80,6 +80,10 @@ impl Engine for BTreeEngine {
         unimplemented!();
     }
 
+    fn kv_tablet(&self, region_id: u64) -> Option<PanicEngine> {
+        unimplemented!();
+    }
+
     fn snapshot_on_kv_engine(&self, _: &[u8], _: &[u8]) -> EngineResult<Self::Snap> {
         unimplemented!();
     }
