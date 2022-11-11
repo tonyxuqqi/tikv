@@ -30,7 +30,6 @@ use kvproto::{
 };
 use protobuf::Message as _;
 use raft::{
-    eraftpb,
     eraftpb::{self, MessageType, Snapshot},
     Ready, StateRole,
 };
@@ -281,6 +280,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         if !has_ready || self.destroy_progress().started() {
             #[cfg(feature = "testexport")]
             self.async_writer.notify_flush();
+            println!("handle_raft_ready has ready is false");
             return;
         }
         ctx.has_ready = true;
@@ -288,6 +288,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         if !self.raft_group().has_ready() && (self.serving() || self.postpond_destroy()) {
             #[cfg(feature = "testexport")]
             self.async_writer.notify_flush();
+            println!("handle_raft_ready has ready is false 2");
             return;
         }
 
@@ -337,6 +338,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         // Always sending snapshot task after apply task, so it gets latest
         // snapshot.
         if let Some(gen_task) = self.storage_mut().take_gen_snap_task() {
+            println!("get gen snapshot task, applying it");
             self.apply_scheduler().send(ApplyTask::Snapshot(gen_task));
         }
 
@@ -565,6 +567,7 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
         task: &mut WriteTask<EK, ER>,
         tablet_factory: Arc<dyn TabletFactory<EK>>,
     ) -> Result<()> {
+        println!("apply_snapshot starts");
         let region_id = self.get_region_id();
         info!(self.logger(),
             "begin to apply snapshot";
@@ -615,6 +618,7 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
         let hook =
             move |region_id: u64| tablet_factory.load_tablet(path.as_path(), region_id, last_index);
         task.add_after_write_hook(Some(Box::new(hook)));
+        println!("apply_snapshot ends");
         Ok(())
     }
 }

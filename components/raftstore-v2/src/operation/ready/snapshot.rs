@@ -123,6 +123,7 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
     /// Will schedule a task to read worker and then generate a snapshot
     /// asynchronously.
     pub fn schedule_gen_snapshot(&mut self, snap_task: GenSnapTask) {
+        println!("schedule_gen_snapshot");
         // Do not generate, the peer is removed.
         if self.tombstone() {
             snap_task.canceled.store(true, Ordering::SeqCst);
@@ -166,6 +167,7 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
     /// Gets a snapshot. Returns `SnapshotTemporarilyUnavailable` if there is no
     /// unavailable snapshot.
     pub fn snapshot(&self, request_index: u64, to: u64) -> raft::Result<Snapshot> {
+        println!("Storage::snapshot starts");
         let mut snap_state = self.snap_state_mut();
         match *snap_state {
             SnapState::Generating { ref canceled, .. } => {
@@ -180,6 +182,7 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
             SnapState::Generated(ref s) => {
                 let SnapState::Generated(snap) = mem::replace(&mut *snap_state, SnapState::Relax) else { unreachable!() };
                 if self.validate_snap(&snap, request_index) {
+                    println!("Storage::snapshot return a valid snapshot");
                     return Ok(*snap);
                 }
             }
@@ -200,6 +203,7 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
             "request_index" => request_index,
             "request_peer" => to,
         );
+        println!("Storage::snapshot requesting snapshot");
         let canceled = Arc::new(AtomicBool::new(false));
         let index = Arc::new(AtomicU64::new(0));
         *snap_state = SnapState::Generating {
