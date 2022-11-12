@@ -462,6 +462,8 @@ mod tests {
     fn test_apply_snapshot() {
         let region = new_region();
         let path = TempDir::new().unwrap();
+        let mgr = TabletSnapManager::new(path.path().join("snap_dir").to_str().unwrap());
+        mgr.init().unwrap();
         let raft_engine =
             engine_test::raft::new_engine(&format!("{}", path.path().join("raft").display()), None)
                 .unwrap();
@@ -486,7 +488,7 @@ mod tests {
 
         let snapshot = new_empty_snapshot(region.clone(), 10, 1, false);
         let mut task = WriteTask::new(region.get_id(), 5, 0);
-        s.apply_snapshot(&snapshot, &mut task, factory.clone())
+        s.apply_snapshot(&snapshot, &mut task, mgr, factory.clone())
             .unwrap();
 
         // It can be set before load tablet.
