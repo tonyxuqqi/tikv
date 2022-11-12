@@ -98,42 +98,42 @@ fn test_add_learner() {
     let (msg, _) = PeerMsg::raft_command(req.clone());
     router0.send(2, msg).unwrap();
 
-    std::thread::sleep(Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(100));
 
-    let from_path = cluster
-        .node(0)
-        .tablet_factory()
-        .tablets_path()
-        .as_path()
-        .parent()
-        .unwrap()
-        .join("tablets_snap");
-    let to_path = cluster
-        .node(1)
-        .tablet_factory()
-        .tablets_path()
-        .as_path()
-        .parent()
-        .unwrap()
-        .join("tablets_snap");
+    // let from_path = cluster
+    //     .node(0)
+    //     .tablet_factory()
+    //     .tablets_path()
+    //     .as_path()
+    //     .parent()
+    //     .unwrap()
+    //     .join("tablets_snap");
+    // let to_path = cluster
+    //     .node(1)
+    //     .tablet_factory()
+    //     .tablets_path()
+    //     .as_path()
+    //     .parent()
+    //     .unwrap()
+    //     .join("tablets_snap");
 
-    let key = TabletSnapKey::new(
-        region_id,
-        learner_peer.get_id(),
-        meta.raft_status.hard_state.term,
-        7,
-    );
+    // let key = TabletSnapKey::new(
+    //     region_id,
+    //     learner_peer.get_id(),
+    //     meta.raft_status.hard_state.term,
+    //     7,
+    // );
 
-    let gen_path = from_path.as_path().join(key.get_gen_suffix());
-    let recv_path = to_path.as_path().join(key.get_recv_suffix());
-    println!(
-        "gen_path:{},recv_path:{}",
-        gen_path.display(),
-        recv_path.display()
-    );
+    // let gen_path = from_path.as_path().join(key.get_gen_suffix());
+    // let recv_path = to_path.as_path().join(key.get_recv_suffix());
+    // println!(
+    //     "gen_path:{},recv_path:{}",
+    //     gen_path.display(),
+    //     recv_path.display()
+    // );
 
-    std::fs::rename(gen_path, recv_path.clone()).unwrap();
-    assert!(recv_path.exists());
+    // std::fs::rename(gen_path, recv_path.clone()).unwrap();
+    // assert!(recv_path.exists());
     cluster.dispatch(region_id, msgs.clone());
     std::thread::sleep(Duration::from_secs(20));
 }
@@ -317,6 +317,10 @@ fn test_config_change_and_apply_snapshot() {
         cluster.trig_heartbeat(0, 2);
         cluster.dispatch(2, vec![]);
         println!("before wait_committed");
+        // triage send snapshot
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        cluster.trig_heartbeat(0, 2);
+        cluster.dispatch(2, vec![]);
         assert!(block_on(sub.wait_committed()));
         let resp = block_on(sub.result()).unwrap();
         assert!(!resp.get_header().has_error(), "{:?}", resp);

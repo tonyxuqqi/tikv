@@ -314,6 +314,7 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
         // snap is consumed or canceled. Such as leader changed, the state of generated
         // should be reset.
         *snap_state = SnapState::Generated(snap);
+        println!("on_snapshot_generated");
         true
     }
 
