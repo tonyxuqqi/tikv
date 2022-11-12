@@ -31,7 +31,7 @@ use raftstore::store::{
 };
 use raftstore_v2::{
     create_store_batch_system,
-    router::{DebugInfoChannel, FlushChannel, PeerMsg, QueryResult, RaftRouter},
+    router::{DebugInfoChannel, FlushChannel, PeerMsg, PeerTick, QueryResult, RaftRouter},
     Bootstrap, StoreMeta, StoreSystem,
 };
 use slog::{debug, o, Logger};
@@ -421,6 +421,21 @@ impl Cluster {
 
     pub fn router(&self, offset: usize) -> TestRouter {
         self.routers[offset].clone()
+    }
+
+    pub fn trig_heartbeat(&self, node_offset: usize, region_id: u64) {
+        for i in 1..=self
+            .node(node_offset)
+            .running_state()
+            .unwrap()
+            .cfg
+            .value()
+            .raft_heartbeat_ticks
+        {
+            self.router(node_offset)
+                .send(region_id, PeerMsg::Tick(PeerTick::Raft))
+                .unwrap()
+        }
     }
 
     /// Send messages and wait for side effects are all handled.
