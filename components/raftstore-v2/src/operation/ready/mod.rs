@@ -22,7 +22,7 @@ mod snapshot;
 
 use std::{cmp, path::PathBuf, sync::Arc};
 
-use engine_traits::{KvEngine, MiscExt, RaftEngine, TabletFactory};
+use engine_traits::{KvEngine, MiscExt, OpenOptions, RaftEngine, TabletFactory};
 use error_code::ErrorCodeExt;
 use kvproto::raft_serverpb::{PeerState, RaftMessage, RaftSnapshotData};
 use protobuf::Message as _;
@@ -380,6 +380,13 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         }
         if need_scheduled {
             self.storage_mut().after_applied_snapshot();
+            let suffix = self.storage().raft_state().last_index;
+            let region_id = self.storage().get_region_id();
+            let tablet = ctx
+                .tablet_factory
+                .open_tablet(region_id, Some(suffix), OpenOptions::default())
+                .unwrap();
+            self.tablet_mut().set(tablet);
             self.schedule_apply_fsm(ctx);
         }
         let persisted_message = self

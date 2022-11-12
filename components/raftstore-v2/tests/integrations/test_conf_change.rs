@@ -202,7 +202,6 @@ fn test_simple_change() {
 fn test_config_change_and_apply_snapshot() {
     let cluster = Cluster::with_node_count(3, None);
     let router0 = cluster.router(0);
-    let cluster_ref = &cluster;
     let flag = Arc::new(AtomicBool::new(false));
     // let th = std::thread::spawn(|| {
     // loop {

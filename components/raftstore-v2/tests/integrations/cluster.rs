@@ -424,7 +424,7 @@ impl Cluster {
     }
 
     pub fn trig_heartbeat(&self, node_offset: usize, region_id: u64) {
-        for i in 1..=self
+        for _i in 1..=self
             .node(node_offset)
             .running_state()
             .unwrap()
