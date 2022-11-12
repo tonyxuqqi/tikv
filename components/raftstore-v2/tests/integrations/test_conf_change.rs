@@ -127,7 +127,13 @@ fn test_add_learner() {
     std::fs::rename(gen_path, recv_path.clone()).unwrap();
     assert!(recv_path.exists());
     cluster.dispatch(region_id, msgs.clone());
+
     thread::sleep(Duration::from_secs(20));
+
+    let meta = router1
+        .must_query_debug_info(region_id, Duration::from_secs(3))
+        .unwrap();
+    println!("new peer{:?}", meta);
 }
 
 #[test]
