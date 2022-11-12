@@ -280,7 +280,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         if !has_ready || self.destroy_progress().started() {
             #[cfg(feature = "testexport")]
             self.async_writer.notify_flush();
-            println!("handle_raft_ready has ready is false");
+            //println!("handle_raft_ready has ready is false");
             return;
         }
         ctx.has_ready = true;

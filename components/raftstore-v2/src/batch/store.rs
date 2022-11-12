@@ -310,7 +310,7 @@ where
 
     fn build(&mut self, priority: batch_system::Priority) -> Self::Handler {
         let cfg = self.cfg.value().clone();
-        let poll_ctx = StoreContext {
+        let mut poll_ctx = StoreContext {
             logger: self.logger.clone(),
             trans: self.trans.clone(),
             current_time: None,
@@ -327,6 +327,7 @@ where
             apply_pool: self.apply_pool.clone(),
             read_scheduler: self.read_scheduler.clone(),
         };
+        poll_ctx.tick_batch[PeerTick::Raft as usize].wait_duration = Duration::from_millis(10);
         let cfg_tracker = self.cfg.clone().tracker("raftstore".to_string());
         StorePoller::new(poll_ctx, cfg_tracker)
     }

@@ -132,9 +132,11 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
         let idx = tick as usize;
         let key = 1u16 << (idx as u16);
         if self.fsm.tick_registry & key != 0 {
+            println!("failed to schedule a tick");
             return;
         }
         if is_zero_duration(&self.store_ctx.tick_batch[idx].wait_duration) {
+            println!("failed to schedule a tick, zero duration");
             return;
         }
         trace!(
@@ -191,6 +193,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
     }
 
     fn on_tick(&mut self, tick: PeerTick) {
+        self.fsm.tick_registry -= (1u16 << (tick as u16));
         match tick {
             PeerTick::Raft => self.on_raft_tick(),
             PeerTick::RaftLogGc => unimplemented!(),
