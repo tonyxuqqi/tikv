@@ -209,7 +209,6 @@ impl RunningState {
         let router = RaftRouter::new(store_id, router);
         let store_meta = router.store_meta().clone();
         let snap_mgr = TabletSnapManager::new(path.join("tablets_snap").to_str().unwrap());
-        snap_mgr.init()unwrap();
         system
             .start(
                 store_id,

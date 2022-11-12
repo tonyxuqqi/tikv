@@ -210,13 +210,12 @@ where
 }
 
 impl<EK: KvEngine, ER: RaftEngine> PersistedNotifier for StoreRouter<EK, ER> {
-    fn notify(&self, region_id: u64, peer_id: u64, ready_number: u64, need_scheduled: bool) {
+    fn notify(&self, region_id: u64, peer_id: u64, ready_number: u64) {
         if let Err(e) = self.force_send(
             region_id,
             PeerMsg::Persisted {
                 peer_id,
                 ready_number,
-                need_scheduled,
             },
         ) {
             warn!(
@@ -225,7 +224,6 @@ impl<EK: KvEngine, ER: RaftEngine> PersistedNotifier for StoreRouter<EK, ER> {
                 "region_id" => region_id,
                 "peer_id" => peer_id,
                 "ready_number" => ready_number,
-                "need_scheduled" =>need_scheduled,
                 "error" => ?e,
             );
         }
