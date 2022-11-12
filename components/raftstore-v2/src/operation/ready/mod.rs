@@ -32,7 +32,7 @@ use raft::{
 };
 use raftstore::{
     coprocessor::ApplySnapshotObserver,
-    store::{util, ExtraStates, FetchedLogs, SnapKey, Transport, WriteTask},
+    store::{util, ExtraStates, FetchedLogs, SnapKey, TabletSnapKey, Transport, WriteTask},
 };
 use slog::{debug, error, info, trace, warn};
 use tikv_util::{
