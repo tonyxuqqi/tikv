@@ -98,7 +98,7 @@ fn test_add_learner() {
     let (msg, _) = PeerMsg::raft_command(req.clone());
     router0.send(2, msg).unwrap();
 
-    std::thread::sleep(Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(100));
 
     // let from_path = cluster
     //     .node(0)

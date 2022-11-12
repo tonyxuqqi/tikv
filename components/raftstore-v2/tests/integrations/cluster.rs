@@ -461,6 +461,7 @@ impl Cluster {
                     }
                 };
                 regions.insert(msg.get_region_id());
+                // Simulate already received the snapshot.
                 if msg.get_message().get_msg_type() == MessageType::MsgSnapshot {
                     let from_offset = match self
                         .nodes
@@ -503,7 +504,7 @@ impl Cluster {
                         gen_path.display(),
                         recv_path.display()
                     );
-
+                    assert!(gen_path.exists());
                     std::fs::rename(gen_path, recv_path.clone()).unwrap();
                     assert!(recv_path.exists());
                 }
