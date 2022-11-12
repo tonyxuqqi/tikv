@@ -447,7 +447,6 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
     }
 
     pub fn after_applied_snapshot(&mut self) {
-        println!("after load tablet");
         let mut entry = self.entry_storage_mut();
         let term = entry.get_truncate_term();
         let index = entry.get_truncate_index();
@@ -511,9 +510,11 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
             .join("tablets_snap")
             .as_path()
             .join(key.get_recv_suffix());
-        println!("load snapshot dir:{}", path.display());
-        let hook =
-            move |region_id: u64| tablet_factory.load_tablet(path.as_path(), region_id, last_index);
+        // println!("load snapshot dir:{}", path.display());
+        let hook = move |region_id: u64| {
+            assert!(path.as_path().exists());
+            tablet_factory.load_tablet(path.as_path(), region_id, last_index)
+        };
         task.add_after_write_hook(Some(Box::new(hook)));
         Ok(())
     }

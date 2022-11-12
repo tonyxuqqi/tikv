@@ -124,9 +124,9 @@ fn test_add_learner() {
         recv_path.display()
     );
 
-    std::fs::rename(gen_path, recv_path).unwrap();
+    std::fs::rename(gen_path, recv_path.clone()).unwrap();
+    assert!(recv_path.exists());
     cluster.dispatch(region_id, msgs.clone());
-    println!("test finish");
     thread::sleep(Duration::from_secs(20));
 }
 
