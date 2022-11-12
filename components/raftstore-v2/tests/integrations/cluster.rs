@@ -1,5 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+use core::panic;
 use std::{
     ops::{Deref, DerefMut},
     path::Path,
@@ -26,8 +27,10 @@ use kvproto::{
     raft_serverpb::RaftMessage,
 };
 use pd_client::RpcClient;
+use raft::eraftpb::MessageType;
 use raftstore::store::{
-    region_meta::RegionMeta, Config, TabletSnapManager, Transport, RAFT_INIT_LOG_INDEX,
+    region_meta::RegionMeta, Config, TabletSnapKey, TabletSnapManager, Transport,
+    RAFT_INIT_LOG_INDEX,
 };
 use raftstore_v2::{
     create_store_batch_system,
@@ -445,6 +448,7 @@ impl Cluster {
         regions.insert(region_id);
         loop {
             for msg in msgs.drain(..) {
+                println!("dispatch msg {:?}", msg);
                 let offset = match self
                     .nodes
                     .iter()
@@ -457,6 +461,52 @@ impl Cluster {
                     }
                 };
                 regions.insert(msg.get_region_id());
+                if msg.get_message().get_msg_type() == MessageType::MsgSnapshot {
+                    let from_offset = match self
+                        .nodes
+                        .iter()
+                        .position(|n| n.id() == msg.get_from_peer().get_store_id())
+                    {
+                        Some(offset) => offset,
+                        None => {
+                            debug!(self.logger, "failed to find snapshot source node"; "message" => ?msg);
+                            continue;
+                        }
+                    };
+                    let from_path = self
+                        .node(from_offset)
+                        .tablet_factory()
+                        .tablets_path()
+                        .as_path()
+                        .parent()
+                        .unwrap()
+                        .join("tablets_snap");
+                    let to_path = self
+                        .node(offset)
+                        .tablet_factory()
+                        .tablets_path()
+                        .as_path()
+                        .parent()
+                        .unwrap()
+                        .join("tablets_snap");
+                    let key = TabletSnapKey::new(
+                        region_id,
+                        msg.get_to_peer().get_id(),
+                        msg.get_message().get_snapshot().get_metadata().get_term(),
+                        msg.get_message().get_snapshot().get_metadata().get_index(),
+                    );
+
+                    let gen_path = from_path.as_path().join(key.get_gen_suffix());
+                    let recv_path = to_path.as_path().join(key.get_recv_suffix());
+                    println!(
+                        "gen_path:{}, recv_path:{}",
+                        gen_path.display(),
+                        recv_path.display()
+                    );
+
+                    std::fs::rename(gen_path, recv_path.clone()).unwrap();
+                    assert!(recv_path.exists());
+                }
                 if let Err(e) = self.routers[offset].send_raft_message(msg) {
                     debug!(self.logger, "failed to send raft message"; "err" => ?e);
                 }
@@ -471,6 +521,7 @@ impl Cluster {
             }
             regions.clear();
             if msgs.is_empty() {
+                println!("dispatch finished");
                 return;
             }
         }

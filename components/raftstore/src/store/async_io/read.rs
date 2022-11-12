@@ -121,7 +121,7 @@ impl<EK: KvEngine, ER: RaftEngine, N: AsyncReadNotifier> ReadRunner<EK, ER, N> {
     fn generate_snap(&self, snap_key: &TabletSnapKey, tablet: EK) -> crate::Result<()> {
         let checkpointer_path = self.snap_mgr().get_tablet_checkpointer_path(snap_key);
         println!(
-            "begin check point tablet,path:{}",
+            "begin check point tablet, path:{}",
             checkpointer_path.display()
         );
         if checkpointer_path.as_path().exists() {
