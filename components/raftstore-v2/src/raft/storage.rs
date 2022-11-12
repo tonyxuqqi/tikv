@@ -482,13 +482,13 @@ mod tests {
         let mut worker = Worker::new("test-read-worker").lazy_build("test-read-worker");
         let sched = worker.scheduler();
         let logger = slog_global::borrow_global().new(o!());
-        let mut s = Storage::new(4, 6, raft_engine.clone(), sched.clone(), &logger.clone())
+        let mut s = Storage::new(4, 6, raft_engine.clone(), sched, &logger.clone())
             .unwrap()
             .unwrap();
 
         let snapshot = new_empty_snapshot(region.clone(), 10, 1, false);
         let mut task = WriteTask::new(region.get_id(), 5, 0);
-        s.apply_snapshot(&snapshot, &mut task, mgr, factory.clone())
+        s.apply_snapshot(&snapshot, &mut task, mgr, factory)
             .unwrap();
 
         // It can be set before load tablet.

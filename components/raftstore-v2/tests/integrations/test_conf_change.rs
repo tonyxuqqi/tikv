@@ -16,7 +16,6 @@ use kvproto::{
     raft_serverpb::RaftMessage,
 };
 use raft::prelude::ConfChangeType;
-use raftstore::store::TabletSnapKey;
 use raftstore_v2::router::PeerMsg;
 use tikv_util::store::{new_learner_peer, new_peer};
 
@@ -78,14 +77,13 @@ fn test_add_learner() {
 
     let raft_message = raft_msg.mut_message();
     raft_message.set_msg_type(raft::prelude::MessageType::MsgAppendResponse);
-    raft_message.set_from(leader_peer.clone().id);
-    raft_message.set_to(learner_peer.clone().id);
+    raft_message.set_from(leader_peer.id);
+    raft_message.set_to(learner_peer.id);
     raft_message.set_term(meta.raft_status.hard_state.term);
     raft_message.set_reject(true);
     raft_message.set_request_snapshot(1);
 
-    let mut msgs = Vec::with_capacity(1);
-    msgs.push(Box::new(raft_msg));
+    let msgs = vec![Box::new(raft_msg)];
     cluster.dispatch(region_id, msgs.clone());
 
     let mut req = router0.new_request_for(region_id);
@@ -99,43 +97,9 @@ fn test_add_learner() {
     router0.send(2, msg).unwrap();
 
     std::thread::sleep(Duration::from_millis(100));
-
-    // let from_path = cluster
-    //     .node(0)
-    //     .tablet_factory()
-    //     .tablets_path()
-    //     .as_path()
-    //     .parent()
-    //     .unwrap()
-    //     .join("tablets_snap");
-    // let to_path = cluster
-    //     .node(1)
-    //     .tablet_factory()
-    //     .tablets_path()
-    //     .as_path()
-    //     .parent()
-    //     .unwrap()
-    //     .join("tablets_snap");
-
-    // let key = TabletSnapKey::new(
-    //     region_id,
-    //     learner_peer.get_id(),
-    //     meta.raft_status.hard_state.term,
-    //     7,
-    // );
-
-    // let gen_path = from_path.as_path().join(key.get_gen_suffix());
-    // let recv_path = to_path.as_path().join(key.get_recv_suffix());
-    // println!(
-    //     "gen_path:{},recv_path:{}",
-    //     gen_path.display(),
-    //     recv_path.display()
-    // );
-
-    // std::fs::rename(gen_path, recv_path.clone()).unwrap();
-    // assert!(recv_path.exists());
-    cluster.dispatch(region_id, msgs.clone());
-    std::thread::sleep(Duration::from_secs(20));
+    cluster.dispatch(region_id, msgs);
+    std::thread::sleep(Duration::from_millis(100));
+    cluster.dispatch(region_id, vec![]);
 }
 
 #[test]
@@ -325,6 +289,17 @@ fn test_config_change_and_apply_snapshot() {
         let resp = block_on(sub.result()).unwrap();
         assert!(!resp.get_header().has_error(), "{:?}", resp);
         assert_eq!(tablet.get_value(b"key").unwrap().unwrap(), b"value");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // use tablet with node 1 to verify the write.
+        cluster.trig_heartbeat(0, 2);
+        cluster.dispatch(2, vec![]);
+
+        let tablet_factory_1 = cluster.node(1).tablet_factory();
+        let tablet_1 = tablet_factory_1
+            .open_tablet(2, None, OpenOptions::default().set_cache_only(true))
+            .unwrap();
+        assert_eq!(tablet_1.get_value(b"key").unwrap().unwrap(), b"value");
 
         let mut delete_req = Request::default();
         delete_req.set_cmd_type(CmdType::Delete);
