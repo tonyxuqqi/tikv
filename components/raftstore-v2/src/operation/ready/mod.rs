@@ -32,7 +32,7 @@ use raft::{
 };
 use raftstore::{
     coprocessor::ApplySnapshotObserver,
-    store::{util, ExtraStates, FetchedLogs, SnapKey, Transport, WriteTask},
+    store::{util, ExtraStates, FetchedLogs, SnapKey, TabletSnapKey, Transport, WriteTask},
 };
 use slog::{debug, error, info, trace, warn};
 use tikv_util::{
@@ -447,6 +447,7 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
     }
 
     pub fn after_applied_snapshot(&mut self) {
+        println!("after load tablet");
         let mut entry = self.entry_storage_mut();
         let term = entry.get_truncate_term();
         let index = entry.get_truncate_index();
@@ -501,14 +502,16 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
             "state" => ?self.entry_storage().apply_state(),
         );
 
-        let key = SnapKey::new(region_id, last_term, last_index);
+        let key = TabletSnapKey::new(region_id, self.peer().get_id(), last_term, last_index);
         let mut path = tablet_factory
             .tablets_path()
             .as_path()
-            .join("snap")
+            .parent()
+            .unwrap()
+            .join("tablets_snap")
             .as_path()
-            .join(key.get_snapshot_recv_path());
-
+            .join(key.get_recv_suffix());
+        println!("load snapshot dir:{}", path.display());
         let hook =
             move |region_id: u64| tablet_factory.load_tablet(path.as_path(), region_id, last_index);
         task.add_after_write_hook(Some(Box::new(hook)));
