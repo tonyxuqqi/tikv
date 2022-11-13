@@ -268,7 +268,7 @@ fn test_config_change_and_apply_snapshot() {
 
         let tablet_factory = cluster.node(0).tablet_factory();
         let tablet = tablet_factory
-            .open_tablet(2, None, OpenOptions::qdefault().set_cache_only(true))
+            .open_tablet(2, None, OpenOptions::default().set_cache_only(true))
             .unwrap();
         assert!(tablet.get_value(b"key").unwrap().is_none());
         let (msg, mut sub) = PeerMsg::raft_command(req.clone());
