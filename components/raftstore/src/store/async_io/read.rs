@@ -124,6 +124,11 @@ impl<EK: KvEngine, ER: RaftEngine, N: AsyncReadNotifier> ReadRunner<EK, ER, N> {
             // Remove the old checkpoint directly.
             std::fs::remove_dir_all(checkpointer_path.as_path())?;
         }
+        // TODO: temp code in case snapshot manager initialization is not done.
+        let parent_path = checkpointer_path.as_path().parent().unwrap();
+        if !parent_path.exists() {
+            std::fs::create_dir_all(parent_path)?;
+        }
         // Here not checkpoint to a temporary directory first, the temporary directory
         // logic already implemented in rocksdb.
         let mut checkpointer = tablet.new_checkpointer()?;

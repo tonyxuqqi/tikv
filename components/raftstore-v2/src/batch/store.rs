@@ -327,7 +327,7 @@ where
             apply_pool: self.apply_pool.clone(),
             read_scheduler: self.read_scheduler.clone(),
         };
-        poll_ctx.tick_batch[PeerTick::Raft as usize].wait_duration = Duration::from_millis(10);
+        poll_ctx.tick_batch[PeerTick::Raft as usize].wait_duration = self.cfg.value().raft_base_tick_interval.0;;
         let cfg_tracker = self.cfg.clone().tracker("raftstore".to_string());
         StorePoller::new(poll_ctx, cfg_tracker)
     }
