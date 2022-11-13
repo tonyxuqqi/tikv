@@ -14,19 +14,9 @@ use crate::cluster::Cluster;
 
 #[test]
 fn test_simple_change() {
-    let cluster = Cluster::with_node_count(3, None);
+    let cluster = Cluster::with_node_count(2, None, false);
     let router0 = cluster.router(0);
-    let cluster_ref = &cluster;
     let flag = Arc::new(AtomicBool::new(false));
-    /*let th = std::thread::spawn(|| {
-        loop {
-            if flag.load(Ordering::Relaxed) {
-                break;
-            }
-            cluster_ref.dispatch(2, vec![]);
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-    });*/
     {
         let router = cluster.router(0);
         let mut req = router.new_request_for(2);
@@ -128,8 +118,10 @@ fn test_simple_change() {
         cluster.dispatch(2, vec![]);
         println!("before wait proposed");
         assert!(block_on(sub.wait_proposed()));
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        cluster.dispatch(2, vec![]);
+        for i in 0..60 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            cluster.dispatch(2, vec![]);
+        }
         println!("before wait_committed");
         assert!(block_on(sub.wait_committed()));
         let resp = block_on(sub.result()).unwrap();
@@ -147,8 +139,6 @@ fn test_simple_change() {
         cluster.dispatch(2, vec![]);
         println!("before wait proposed delete");
         assert!(block_on(sub.wait_proposed()));
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        cluster.dispatch(2, vec![]);
         println!("before wait_committed delete");
         assert!(block_on(sub.wait_committed()));
         let resp = block_on(sub.result()).unwrap();
