@@ -150,6 +150,10 @@ impl SnapKey {
             snap,
         ))
     }
+
+    pub fn get_snapshot_recv_path(&self) -> String {
+        format!("{}_{}", SNAP_REV_PREFIX, self)
+    }
 }
 
 impl Display for SnapKey {
@@ -1910,6 +1914,14 @@ impl TabletSnapKey {
         let term = snap.get_metadata().get_term();
         TabletSnapKey::new(region_id, to_peer, term, index)
     }
+
+    pub fn get_recv_suffix(&self) -> String {
+        format!("{}_{}", SNAP_REV_PREFIX, self)
+    }
+
+    pub fn get_gen_suffix(&self) -> String {
+        format!("{}_{}", SNAP_GEN_PREFIX, self)
+    }
 }
 
 impl Display for TabletSnapKey {
@@ -1956,7 +1968,12 @@ impl TabletSnapManager {
     }
 
     pub fn get_tablet_checkpointer_path(&self, key: &TabletSnapKey) -> PathBuf {
-        let prefix = format!("{}_{}", SNAP_GEN_PREFIX, key);
+        let suffix = key.get_gen_suffix();
+        PathBuf::from(&self.base).join(&suffix)
+    }
+
+    pub fn get_recv_tablet_path(&self, key: &TabletSnapKey) -> PathBuf {
+        let prefix = format!("{}_{}", SNAP_REV_PREFIX, key);
         PathBuf::from(&self.base).join(&prefix)
     }
 }
