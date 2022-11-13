@@ -448,7 +448,6 @@ impl Cluster {
         regions.insert(region_id);
         loop {
             for msg in msgs.drain(..) {
-                println!("dispatch msg {:?}", msg);
                 let offset = match self
                     .nodes
                     .iter()
@@ -499,11 +498,6 @@ impl Cluster {
 
                     let gen_path = from_path.as_path().join(key.get_gen_suffix());
                     let recv_path = to_path.as_path().join(key.get_recv_suffix());
-                    println!(
-                        "gen_path:{}, recv_path:{}",
-                        gen_path.display(),
-                        recv_path.display()
-                    );
                     assert!(gen_path.exists());
                     std::fs::rename(gen_path, recv_path.clone()).unwrap();
                     assert!(recv_path.exists());
@@ -522,7 +516,6 @@ impl Cluster {
             }
             regions.clear();
             if msgs.is_empty() {
-                println!("dispatch finished");
                 return;
             }
         }
