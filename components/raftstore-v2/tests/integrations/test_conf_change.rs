@@ -268,13 +268,13 @@ fn test_config_change_and_apply_snapshot() {
 
         let tablet_factory = cluster.node(0).tablet_factory();
         let tablet = tablet_factory
-            .open_tablet(2, None, OpenOptions::default().set_cache_only(true))
+            .open_tablet(2, None, OpenOptions::qdefault().set_cache_only(true))
             .unwrap();
         assert!(tablet.get_value(b"key").unwrap().is_none());
         let (msg, mut sub) = PeerMsg::raft_command(req.clone());
         router.send(2, msg).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
         cluster.dispatch(2, vec![]);
+        std::thread::sleep(std::time::Duration::from_millis(100));
         println!("before wait proposed");
         assert!(block_on(sub.wait_proposed()));
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -282,10 +282,11 @@ fn test_config_change_and_apply_snapshot() {
         cluster.dispatch(2, vec![]);
         println!("before wait_committed");
         // triage send snapshot
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         cluster.trig_heartbeat(0, 2);
         cluster.dispatch(2, vec![]);
         assert!(block_on(sub.wait_committed()));
+        println!("after wait_committed");
         let resp = block_on(sub.result()).unwrap();
         assert!(!resp.get_header().has_error(), "{:?}", resp);
         assert_eq!(tablet.get_value(b"key").unwrap().unwrap(), b"value");

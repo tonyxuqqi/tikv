@@ -204,7 +204,6 @@ where
 
     pub fn on_after_write_to_kv_db(&mut self) -> bool {
         if self.after_write_hook.is_some() {
-            println!("begin to load tablet");
             let hook = std::mem::take(&mut self.after_write_hook).unwrap();
             match hook(self.region_id) {
                 Ok(_) => return true,
@@ -530,7 +529,6 @@ where
         let now = std::time::Instant::now();
         for task in &mut self.tasks {
             if task.on_after_write_to_kv_db() {
-                println!("load tablet succ");
                 applied_regions.insert(task.region_id);
             }
             if metrics.waterfall_metrics {
