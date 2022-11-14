@@ -1,5 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+use core::panic;
 use std::{
     ops::{Deref, DerefMut},
     path::Path,
@@ -26,13 +27,14 @@ use kvproto::{
     raft_serverpb::RaftMessage,
 };
 use pd_client::RpcClient;
+use raft::eraftpb::MessageType;
 use raftstore::store::{
     region_meta::{RegionLocalState, RegionMeta},
-    Config, TabletSnapManager, Transport, RAFT_INIT_LOG_INDEX,
+    Config, TabletSnapKey, TabletSnapManager, Transport, RAFT_INIT_LOG_INDEX,
 };
 use raftstore_v2::{
     create_store_batch_system,
-    router::{DebugInfoChannel, FlushChannel, PeerMsg, QueryResult, RaftRouter},
+    router::{DebugInfoChannel, FlushChannel, PeerMsg, PeerTick, QueryResult, RaftRouter},
     Bootstrap, StoreMeta, StoreSystem,
 };
 use slog::{debug, o, Logger};
@@ -189,7 +191,7 @@ pub struct RunningState {
 
 impl RunningState {
     fn new(
-        pd_client: &RpcClient,
+        pd_client: &Arc<RpcClient>,
         path: &Path,
         cfg: Arc<VersionTrack<Config>>,
         transport: TestTransport,
@@ -208,7 +210,7 @@ impl RunningState {
         let raft_engine =
             engine_test::raft::new_engine(&format!("{}", path.join("raft").display()), None)
                 .unwrap();
-        let mut bootstrap = Bootstrap::new(&raft_engine, 0, pd_client, logger.clone());
+        let mut bootstrap = Bootstrap::new(&raft_engine, 0, pd_client.as_ref(), logger.clone());
         let store_id = bootstrap.bootstrap_store().unwrap();
         let mut store = Store::default();
         store.set_id(store_id);
@@ -236,6 +238,7 @@ impl RunningState {
         let router = RaftRouter::new(store_id, router);
         let store_meta = router.store_meta().clone();
         let snap_mgr = TabletSnapManager::new(path.join("tablets_snap").to_str().unwrap());
+        snap_mgr.init().unwrap();
         system
             .start(
                 store_id,
@@ -243,6 +246,7 @@ impl RunningState {
                 raft_engine.clone(),
                 factory.clone(),
                 transport.clone(),
+                pd_client.clone(),
                 router.store_router(),
                 store_meta.clone(),
                 snap_mgr,
@@ -269,7 +273,7 @@ impl Drop for RunningState {
 }
 
 pub struct TestNode {
-    pd_client: RpcClient,
+    pd_client: Arc<RpcClient>,
     path: TempDir,
     running_state: Option<RunningState>,
     logger: Logger,
@@ -277,7 +281,7 @@ pub struct TestNode {
 
 impl TestNode {
     fn with_pd(pd_server: &test_pd::Server<Service>, logger: Logger) -> TestNode {
-        let pd_client = test_pd::util::new_client(pd_server.bind_addrs(), None);
+        let pd_client = Arc::new(test_pd::util::new_client(pd_server.bind_addrs(), None));
         let path = TempDir::new().unwrap();
 
         TestNode {
@@ -449,6 +453,21 @@ impl Cluster {
         self.routers[offset].clone()
     }
 
+    pub fn trig_heartbeat(&self, node_offset: usize, region_id: u64) {
+        for _i in 1..=self
+            .node(node_offset)
+            .running_state()
+            .unwrap()
+            .cfg
+            .value()
+            .raft_heartbeat_ticks
+        {
+            self.router(node_offset)
+                .send(region_id, PeerMsg::Tick(PeerTick::Raft))
+                .unwrap()
+        }
+    }
+
     /// Send messages and wait for side effects are all handled.
     #[allow(clippy::vec_box)]
     pub fn dispatch(&self, region_id: u64, mut msgs: Vec<Box<RaftMessage>>) {
@@ -468,6 +487,48 @@ impl Cluster {
                     }
                 };
                 regions.insert(msg.get_region_id());
+                // Simulate already received the snapshot.
+                if msg.get_message().get_msg_type() == MessageType::MsgSnapshot {
+                    let from_offset = match self
+                        .nodes
+                        .iter()
+                        .position(|n| n.id() == msg.get_from_peer().get_store_id())
+                    {
+                        Some(offset) => offset,
+                        None => {
+                            debug!(self.logger, "failed to find snapshot source node"; "message" => ?msg);
+                            continue;
+                        }
+                    };
+                    let from_path = self
+                        .node(from_offset)
+                        .tablet_factory()
+                        .tablets_path()
+                        .as_path()
+                        .parent()
+                        .unwrap()
+                        .join("tablets_snap");
+                    let to_path = self
+                        .node(offset)
+                        .tablet_factory()
+                        .tablets_path()
+                        .as_path()
+                        .parent()
+                        .unwrap()
+                        .join("tablets_snap");
+                    let key = TabletSnapKey::new(
+                        region_id,
+                        msg.get_to_peer().get_id(),
+                        msg.get_message().get_snapshot().get_metadata().get_term(),
+                        msg.get_message().get_snapshot().get_metadata().get_index(),
+                    );
+
+                    let gen_path = from_path.as_path().join(key.get_gen_suffix());
+                    let recv_path = to_path.as_path().join(key.get_recv_suffix());
+                    assert!(gen_path.exists());
+                    std::fs::rename(gen_path, recv_path.clone()).unwrap();
+                    assert!(recv_path.exists());
+                }
                 if let Err(e) = self.routers[offset].send_raft_message(msg) {
                     debug!(self.logger, "failed to send raft message"; "err" => ?e);
                 }

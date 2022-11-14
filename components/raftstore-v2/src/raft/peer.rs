@@ -487,10 +487,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         &self.txn_ext
     }
 
-    pub fn heartbeat_pd<T>(&self, store_ctx: &StoreContext<EK, ER, T>) {
-        // todo
-    }
-
     pub fn generate_read_delegate(&self) -> ReadDelegate {
         let peer_id = self.peer().get_id();
 

@@ -223,6 +223,7 @@ where
                 let mut res = None;
                 if let Err(e) = self.generate_snap(&snap_key, tablet) {
                     error!("failed to create checkpointer"; "region_id" => region_id, "error" => %e);
+                    println!("failed to create checkpointer, err:{:?}", e);
                     SNAP_COUNTER.generate.fail.inc();
                 } else {
                     SNAP_COUNTER.generate.success.inc();
