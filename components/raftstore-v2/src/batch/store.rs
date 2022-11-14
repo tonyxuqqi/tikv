@@ -16,6 +16,7 @@ use engine_traits::{Engines, KvEngine, RaftEngine, TabletFactory};
 use file_system::{set_io_type, IoType};
 use futures::{compat::Future01CompatExt, FutureExt};
 use kvproto::{
+    disk_usage::DiskUsage,
     metapb::Store,
     raft_serverpb::{PeerState, RaftMessage},
 };
@@ -74,6 +75,9 @@ pub struct StoreContext<EK: KvEngine, ER: RaftEngine, T> {
     pub read_scheduler: Scheduler<ReadTask<EK>>,
     pub pd_scheduler: Scheduler<PdTask>,
     pub snap_mgr: TabletSnapManager,
+
+    /// Disk usage for the store itself.
+    pub self_disk_usage: DiskUsage,
 }
 
 /// A [`PollHandler`] that handles updates of [`StoreFsm`]s and [`PeerFsm`]s.
@@ -275,6 +279,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
     fn init(&self) -> Result<HashMap<u64, SenderFsmPair<EK, ER>>> {
         let mut regions = HashMap::default();
         let cfg = self.cfg.value();
+        let mut meta = self.store_meta.lock().unwrap();
         self.engine
             .for_each_raft_group::<Error, _>(&mut |region_id| {
                 assert_ne!(region_id, INVALID_ID);
@@ -288,8 +293,11 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
                     Some(p) => p,
                     None => return Ok(()),
                 };
-                let pair = PeerFsm::new(&cfg, &*self.tablet_factory, storage)?;
-                let prev = regions.insert(region_id, pair);
+                let (sender, peer_fsm) = PeerFsm::new(&cfg, &*self.tablet_factory, storage)?;
+                meta.region_read_progress
+                    .insert(region_id, peer_fsm.as_ref().peer().read_progress().clone());
+
+                let prev = regions.insert(region_id, (sender, peer_fsm));
                 if let Some((_, p)) = prev {
                     return Err(box_err!(
                         "duplicate region {:?} vs {:?}",
@@ -338,6 +346,7 @@ where
             read_scheduler: self.read_scheduler.clone(),
             pd_scheduler: self.pd_scheduler.clone(),
             snap_mgr: self.snap_mgr.clone(),
+            self_disk_usage: DiskUsage::Normal,
         };
         let cfg_tracker = self.cfg.clone().tracker("raftstore".to_string());
         StorePoller::new(poll_ctx, cfg_tracker)
