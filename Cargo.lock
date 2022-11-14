@@ -4273,6 +4273,7 @@ name = "raftstore-v2"
 version = "0.1.0"
 dependencies = [
  "batch-system",
+ "bytes",
  "collections",
  "crossbeam",
  "engine_test",
@@ -4284,11 +4285,13 @@ dependencies = [
  "keys",
  "kvproto",
  "log_wrappers",
+ "parking_lot 0.12.0",
  "pd_client",
  "protobuf",
  "raft",
  "raft-proto",
  "raftstore",
+ "rand 0.8.3",
  "slog",
  "slog-global",
  "smallvec",

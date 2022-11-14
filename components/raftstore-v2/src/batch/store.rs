@@ -16,6 +16,7 @@ use engine_traits::{Engines, KvEngine, RaftEngine, TabletFactory};
 use file_system::{set_io_type, IoType};
 use futures::{compat::Future01CompatExt, FutureExt};
 use kvproto::{
+    disk_usage::DiskUsage,
     metapb::Store,
     raft_serverpb::{PeerState, RaftMessage},
 };
@@ -71,6 +72,9 @@ pub struct StoreContext<EK: KvEngine, ER: RaftEngine, T> {
     pub apply_pool: FuturePool,
     pub read_scheduler: Scheduler<ReadTask<EK>>,
     pub snap_mgr: TabletSnapManager,
+
+    /// Disk usage for the store itself.
+    pub self_disk_usage: DiskUsage,
 }
 
 /// A [`PollHandler`] that handles updates of [`StoreFsm`]s and [`PeerFsm`]s.
@@ -331,6 +335,7 @@ where
             apply_pool: self.apply_pool.clone(),
             read_scheduler: self.read_scheduler.clone(),
             snap_mgr: self.snap_mgr.clone(),
+            self_disk_usage: DiskUsage::Normal,
         };
         let cfg_tracker = self.cfg.clone().tracker("raftstore".to_string());
         StorePoller::new(poll_ctx, cfg_tracker)
