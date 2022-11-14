@@ -118,7 +118,7 @@ fn test_transfer_leader() {
         .must_query_debug_info(2, Duration::from_secs(3))
         .unwrap();
     assert_eq!(peer0_id, meta.raft_status.soft_state.leader_id);
-    assert_eq!(meta.raft_status.id, 10, "{:?}", meta);
+    assert_eq!(meta.raft_status.id, peer1.id, "{:?}", meta);
     assert_eq!(meta.region_state.epoch.version, epoch.get_version());
     assert_eq!(meta.region_state.epoch.conf_ver, new_conf_ver);
 
