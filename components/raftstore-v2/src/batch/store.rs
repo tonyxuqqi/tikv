@@ -2,6 +2,7 @@
 
 use std::{
     ops::{Deref, DerefMut},
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -22,7 +23,7 @@ use pd_client::PdClient;
 use raft::INVALID_ID;
 use raftstore::store::{
     fsm::store::PeerTickBatch, local_metrics::RaftMetrics, Config, ReadRunner, ReadTask,
-    StoreWriters, Transport, WriteSenders,
+    StoreWriters, TabletSnapManager, Transport, WriteSenders,
 };
 use slog::Logger;
 use tikv_util::{
@@ -72,6 +73,7 @@ pub struct StoreContext<EK: KvEngine, ER: RaftEngine, T> {
     pub apply_pool: FuturePool,
     pub read_scheduler: Scheduler<ReadTask<EK>>,
     pub pd_scheduler: Scheduler<PdTask>,
+    pub snap_mgr: TabletSnapManager,
 }
 
 /// A [`PollHandler`] that handles updates of [`StoreFsm`]s and [`PeerFsm`]s.
@@ -224,6 +226,7 @@ struct StorePollerBuilder<EK: KvEngine, ER: RaftEngine, T> {
     apply_pool: FuturePool,
     logger: Logger,
     store_meta: Arc<Mutex<StoreMeta<EK>>>,
+    snap_mgr: TabletSnapManager,
 }
 
 impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
@@ -239,6 +242,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
         store_writers: &mut StoreWriters<EK, ER>,
         logger: Logger,
         store_meta: Arc<Mutex<StoreMeta<EK>>>,
+        snap_mgr: TabletSnapManager,
     ) -> Self {
         let pool_size = cfg.value().apply_batch_system.pool_size;
         let max_pool_size = std::cmp::max(
@@ -263,6 +267,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
             logger,
             write_senders: store_writers.senders(),
             store_meta,
+            snap_mgr,
         }
     }
 
@@ -332,6 +337,7 @@ where
             apply_pool: self.apply_pool.clone(),
             read_scheduler: self.read_scheduler.clone(),
             pd_scheduler: self.pd_scheduler.clone(),
+            snap_mgr: self.snap_mgr.clone(),
         };
         let cfg_tracker = self.cfg.clone().tracker("raftstore".to_string());
         StorePoller::new(poll_ctx, cfg_tracker)
@@ -375,6 +381,7 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
         pd_client: Arc<C>,
         router: &StoreRouter<EK, ER>,
         store_meta: Arc<Mutex<StoreMeta<EK>>>,
+        snap_mgr: TabletSnapManager,
     ) -> Result<()>
     where
         T: Transport + 'static,
@@ -389,10 +396,11 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
         workers
             .store_writers
             .spawn(store_id, raft_engine.clone(), None, router, &trans, &cfg)?;
-        let read_scheduler = workers.async_read_worker.start(
-            "async-read-worker",
-            ReadRunner::new(router.clone(), raft_engine.clone()),
-        );
+        let mut read_runner = ReadRunner::new(router.clone(), raft_engine.clone());
+        read_runner.set_snap_mgr(snap_mgr.clone());
+        let read_scheduler = workers
+            .async_read_worker
+            .start("async-read-worker", read_runner);
         let pd_scheduler = workers.pd_worker.start(
             "pd-worker",
             PdRunner::new(
@@ -417,6 +425,7 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
             &mut workers.store_writers,
             self.logger.clone(),
             store_meta.clone(),
+            snap_mgr,
         );
         self.workers = Some(workers);
         let peers = builder.init()?;
@@ -485,7 +494,7 @@ impl<EK: KvEngine, ER: RaftEngine> StoreRouter<EK, ER> {
     ) -> std::result::Result<(), TrySendError<Box<RaftMessage>>> {
         let id = msg.get_region_id();
         let peer_msg = PeerMsg::RaftMessage(msg);
-        let store_msg = match self.try_send(id, peer_msg) {
+        let store_msg = match self.router.try_send(id, peer_msg) {
             Either::Left(Ok(())) => return Ok(()),
             Either::Left(Err(TrySendError::Full(PeerMsg::RaftMessage(m)))) => {
                 return Err(TrySendError::Full(m));
@@ -496,7 +505,7 @@ impl<EK: KvEngine, ER: RaftEngine> StoreRouter<EK, ER> {
             Either::Right(PeerMsg::RaftMessage(m)) => StoreMsg::RaftMessage(m),
             _ => unreachable!(),
         };
-        match self.send_control(store_msg) {
+        match self.router.send_control(store_msg) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(StoreMsg::RaftMessage(m))) => Err(TrySendError::Full(m)),
             Err(TrySendError::Disconnected(StoreMsg::RaftMessage(m))) => {

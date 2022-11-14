@@ -20,16 +20,25 @@
 mod async_writer;
 mod snapshot;
 
-use std::cmp;
+use std::{cmp, path::PathBuf, sync::Arc};
 
-use engine_traits::{KvEngine, RaftEngine};
+use engine_traits::{KvEngine, MiscExt, OpenOptions, RaftEngine, TabletFactory};
 use error_code::ErrorCodeExt;
-use kvproto::raft_serverpb::RaftMessage;
+use kvproto::raft_serverpb::{PeerState, RaftMessage, RaftSnapshotData};
 use protobuf::Message as _;
-use raft::{eraftpb, Ready};
-use raftstore::store::{util, ExtraStates, FetchedLogs, Transport, WriteTask};
-use slog::{debug, error, trace, warn};
-use tikv_util::time::{duration_to_sec, monotonic_raw_now};
+use raft::{
+    eraftpb::{self, MessageType, Snapshot},
+    Ready,
+};
+use raftstore::{
+    coprocessor::ApplySnapshotObserver,
+    store::{util, ExtraStates, FetchedLogs, SnapKey, TabletSnapKey, Transport, WriteTask},
+};
+use slog::{debug, error, info, trace, warn};
+use tikv_util::{
+    box_err,
+    time::{duration_to_sec, monotonic_raw_now},
+};
 
 pub use self::{
     async_writer::AsyncWriter,
@@ -40,6 +49,7 @@ use crate::{
     fsm::PeerFsmDelegate,
     raft::{Peer, Storage},
     router::{ApplyTask, PeerTick},
+    Result,
 };
 
 impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER, T> {
@@ -314,7 +324,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         let ready_number = ready.number();
         let mut write_task = WriteTask::new(self.region_id(), self.peer_id(), ready_number);
         self.storage_mut()
-            .handle_raft_ready(&mut ready, &mut write_task);
+            .handle_raft_ready(&mut ready, &mut write_task, ctx);
         if !ready.persisted_messages().is_empty() {
             write_task.messages = ready
                 .take_persisted_messages()
@@ -363,10 +373,22 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         ctx: &mut StoreContext<EK, ER, T>,
         peer_id: u64,
         ready_number: u64,
+        need_scheduled: bool,
     ) {
         if peer_id != self.peer_id() {
             error!(self.logger, "peer id not matched"; "persisted_peer_id" => peer_id, "persisted_number" => ready_number);
             return;
+        }
+        if need_scheduled {
+            self.storage_mut().after_applied_snapshot();
+            let suffix = self.storage().raft_state().last_index;
+            let region_id = self.storage().get_region_id();
+            let tablet = ctx
+                .tablet_factory
+                .open_tablet(region_id, Some(suffix), OpenOptions::default())
+                .unwrap();
+            self.tablet_mut().set(tablet);
+            self.schedule_apply_fsm(ctx);
         }
         let persisted_message = self
             .async_writer
@@ -401,11 +423,23 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
 impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
     /// Apply the ready to the storage. If there is any states need to be
     /// persisted, it will be written to `write_task`.
-    fn handle_raft_ready(&mut self, ready: &mut Ready, write_task: &mut WriteTask<EK, ER>) {
+    fn handle_raft_ready<T: Transport>(
+        &mut self,
+        ready: &mut Ready,
+        write_task: &mut WriteTask<EK, ER>,
+        ctx: &mut StoreContext<EK, ER, T>,
+    ) {
         let prev_raft_state = self.entry_storage().raft_state().clone();
         let ever_persisted = self.ever_persisted();
 
-        // TODO: handle snapshot
+        if !ready.snapshot().is_empty() {
+            let _ = self.apply_snapshot(
+                ready.snapshot(),
+                write_task,
+                ctx.snap_mgr.clone(),
+                ctx.tablet_factory.clone(),
+            );
+        }
 
         let entry_storage = self.entry_storage_mut();
         if !ready.entries().is_empty() {

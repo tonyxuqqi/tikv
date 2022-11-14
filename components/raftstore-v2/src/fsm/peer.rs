@@ -225,10 +225,13 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
                 PeerMsg::Persisted {
                     peer_id,
                     ready_number,
-                } => self
-                    .fsm
-                    .peer_mut()
-                    .on_persisted(self.store_ctx, peer_id, ready_number),
+                    need_scheduled,
+                } => self.fsm.peer_mut().on_persisted(
+                    self.store_ctx,
+                    peer_id,
+                    ready_number,
+                    need_scheduled,
+                ),
                 PeerMsg::LogsFetched(fetched_logs) => {
                     self.fsm.peer_mut().on_logs_fetched(fetched_logs)
                 }
