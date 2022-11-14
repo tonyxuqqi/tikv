@@ -14,7 +14,10 @@ use raft::prelude::ConfChangeType;
 use raftstore_v2::router::PeerMsg;
 use tikv_util::store::new_peer;
 
-use crate::cluster::{Cluster, TestRouter};
+use crate::{
+    cluster::{Cluster, TestRouter},
+    test_transfer_leader::must_transfer_leader,
+};
 
 fn new_batch_split_region_request(
     split_keys: Vec<Vec<u8>>,
@@ -225,7 +228,7 @@ fn test_split() {
 
     cluster.dispatch(2, vec![]);
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let router1 = cluster.router(1);
+    let mut router1 = cluster.router(1);
     let meta = router1
         .must_query_debug_info(2, Duration::from_secs(3))
         .unwrap();
@@ -242,9 +245,6 @@ fn test_split() {
     let region = router0.region_detail(region_id);
     router0.wait_applied_to_current_term(2, Duration::from_secs(3));
 
-    // Region 2 ["", ""] peer(1, 3)
-    //   -> Region 2    ["", "k22"] peer(1, 3)
-    //      Region 1000 ["k22", ""] peer(1, 10)
     let (left, right) = split_region(
         &cluster,
         &mut router0,
@@ -258,14 +258,14 @@ fn test_split() {
         false,
     );
 
-    // Region 2 ["", "k22"] peer(1, 3)
-    //   -> Region 2    ["", "k11"]    peer(1, 3)
-    //      Region 1001 ["k11", "k22"] peer(1, 11)
+    // Perform transfer leader
+    must_transfer_leader(&cluster, region_id, 0, 1, peer1.clone());
+
     let _ = split_region(
         &cluster,
-        &mut router0,
+        &mut router1,
         left,
-        peer,
+        peer1,
         1001,
         new_peer(store_id, 15),
         b"k00",
@@ -274,14 +274,15 @@ fn test_split() {
         false,
     );
 
-    // Region 1000 ["k22", ""] peer(1, 10)
-    //   -> Region 1000 ["k22", "k33"] peer(1, 10)
-    //      Region 1002 ["k33", ""]    peer(1, 12)
+    // region_id 1000, store 4, peer_id 11
+    let peer2 = new_peer(cluster.node(1).id(), 11);
+    must_transfer_leader(&cluster, 1000, 0, 1, peer2.clone());
+
     let _ = split_region(
         &cluster,
-        &mut router0,
+        &mut router1,
         right,
-        new_peer(store_id, 10),
+        peer2,
         1002,
         new_peer(store_id, 20),
         b"k22",

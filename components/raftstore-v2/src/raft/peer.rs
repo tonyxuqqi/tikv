@@ -77,6 +77,7 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
 
     /// Check whether this proposal can be proposed based on its epoch.
     proposal_control: ProposalControl,
+    reactivate_memory_lock_ticks: usize,
 }
 
 impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
@@ -148,6 +149,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             txn_ext: Arc::default(),
             txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::Noop)),
             proposal_control: ProposalControl::new(0),
+            reactivate_memory_lock_ticks: 0,
         };
 
         // If this region has only one peer and I am the one, campaign directly.
@@ -485,6 +487,29 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     #[inline]
     pub fn txn_ext(&self) -> &Arc<TxnExt> {
         &self.txn_ext
+    }
+
+    /// Whether the snapshot is handling.
+    /// See the comments of `check_snap_status` for more details.
+    #[inline]
+    pub fn is_handling_snapshot(&self) -> bool {
+        // todo
+        false
+    }
+
+    /// Returns `true` if the raft group has replicated a snapshot but not
+    /// committed it yet.
+    #[inline]
+    pub fn has_pending_snapshot(&self) -> bool {
+        self.raft_group().snap().is_some()
+    }
+
+    pub fn set_reactivate_memory_lock_ticks(&mut self, tick: usize) {
+        self.reactivate_memory_lock_ticks = tick;
+    }
+
+    pub fn register_reactivate_memory_lock_tick(&mut self) {
+        // todo
     }
 
     pub fn generate_read_delegate(&self) -> ReadDelegate {
