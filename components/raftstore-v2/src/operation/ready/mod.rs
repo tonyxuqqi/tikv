@@ -409,6 +409,13 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 .open_tablet(region_id, Some(suffix), OpenOptions::default())
                 .unwrap();
             self.tablet_mut().set(tablet);
+            {
+                let mut meta = ctx.store_meta.lock().unwrap();
+                meta.readers
+                    .insert(self.region_id(), self.generate_read_delegate());
+                meta.tablet_caches
+                    .insert(self.region_id(), self.tablet().clone());
+            }
             self.schedule_apply_fsm(ctx);
         }
         let persisted_message = self
