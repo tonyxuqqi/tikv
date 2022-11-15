@@ -5,19 +5,22 @@ use std::{
     sync::Arc,
 };
 
+use causal_ts::CausalTsProviderImpl;
 use collections::HashMap;
+use concurrency_manager::ConcurrencyManager;
 use engine_traits::{KvEngine, RaftEngine, TabletFactory};
 use kvproto::{
     metapb, pdpb,
     raft_cmdpb::{AdminRequest, RaftCmdRequest},
 };
 use pd_client::PdClient;
-use raftstore::store::util::KeysInfoFormatter;
+use raftstore::store::{util::KeysInfoFormatter, TxnExt};
 use slog::{error, info, Logger};
 use tikv_util::{time::UnixSecs, worker::Runnable};
 use yatp::{task::future::TaskCell, Remote};
 
 mod heartbeat;
+mod misc;
 mod split;
 mod store_heartbeat;
 
@@ -42,6 +45,11 @@ pub enum Task {
     },
     ReportBatchSplit {
         regions: Vec<metapb::Region>,
+    },
+    UpdateMaxTimestamp {
+        region_id: u64,
+        initial_status: u64,
+        txn_ext: Arc<TxnExt>,
     },
 }
 
@@ -71,6 +79,11 @@ impl Display for Task {
                 KeysInfoFormatter(split_keys.iter())
             ),
             Task::ReportBatchSplit { ref regions } => write!(f, "report split {:?}", regions),
+            Task::UpdateMaxTimestamp { region_id, .. } => write!(
+                f,
+                "update the max timestamp for region {} in the concurrency manager",
+                region_id
+            ),
         }
     }
 }
@@ -95,6 +108,10 @@ where
 
     region_cpu_records: HashMap<u64, u32>,
 
+    concurrency_manager: ConcurrencyManager,
+
+    causal_ts_provider: Option<Arc<CausalTsProviderImpl>>,
+
     logger: Logger,
 }
 
@@ -110,6 +127,8 @@ where
         tablet_factory: Arc<dyn TabletFactory<EK>>,
         router: StoreRouter<EK, ER>,
         remote: Remote<TaskCell>,
+        concurrency_manager: ConcurrencyManager,
+        causal_ts_provider: Option<Arc<CausalTsProviderImpl>>, // used for rawkv apiv2
         logger: Logger,
     ) -> Self {
         Self {
@@ -122,6 +141,8 @@ where
             start_ts: UnixSecs::zero(),
             store_stat: store_heartbeat::StoreStat::default(),
             region_cpu_records: HashMap::default(),
+            concurrency_manager,
+            causal_ts_provider,
             logger,
         }
     }
@@ -146,6 +167,11 @@ where
                 right_derive,
             } => self.handle_ask_batch_split(region, split_keys, peer, right_derive),
             Task::ReportBatchSplit { regions } => self.handle_report_batch_split(regions),
+            Task::UpdateMaxTimestamp {
+                region_id,
+                initial_status,
+                txn_ext,
+            } => self.handle_update_max_timestamp(region_id, initial_status, txn_ext),
             _ => unimplemented!(),
         }
     }
