@@ -19,10 +19,10 @@
 use std::cmp;
 
 use batch_system::{Fsm, FsmScheduler, Mailbox};
-use engine_traits::{KvEngine, RaftEngine, WriteBatch, WriteOptions};
+use engine_traits::{KvEngine, RaftEngine, RaftLogBatch, WriteBatch, WriteOptions};
 use kvproto::{
     raft_cmdpb::{AdminCmdType, CmdType, RaftCmdRequest, RaftCmdResponse, RaftRequestHeader},
-    raft_serverpb::RegionLocalState,
+    raft_serverpb::{RaftApplyState, RegionLocalState},
 };
 use protobuf::Message;
 use raft::eraftpb::{ConfChange, ConfChangeV2, Entry, EntryType};
@@ -317,6 +317,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         self.proposal_control_advance_apply(apply_res.applied_index);
         let is_leader = self.is_leader();
         let progress_to_be_updated = self.entry_storage().applied_term() != apply_res.applied_term;
+        let region_id = self.region_id();
         let entry_storage = self.entry_storage_mut();
         entry_storage
             .apply_state_mut()
@@ -325,6 +326,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         if !is_leader {
             entry_storage.compact_entry_cache(apply_res.applied_index + 1);
         }
+        let mut wb = entry_storage.raft_engine().log_batch(10);
+        wb.put_apply_state(region_id, entry_storage.apply_state());
+        entry_storage.raft_engine().consume(&mut wb, false);
         self.handle_read_on_apply(
             ctx,
             apply_res.applied_term,
