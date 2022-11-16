@@ -13,8 +13,8 @@ use raftstore::{
     store::{
         fsm::Proposal,
         util::{Lease, RegionReadProgress},
-        Config, EntryStorage, PeerStat, ProposalQueue, ReadDelegate, ReadIndexQueue, ReadProgress,
-        TxnExt, LocksStatus,
+        Config, EntryStorage, LocksStatus, PeerStat, ProposalQueue, ReadDelegate, ReadIndexQueue,
+        ReadProgress, TxnExt,
     },
     Error,
 };
@@ -33,7 +33,7 @@ use crate::{
     batch::StoreContext,
     fsm::{ApplyFsm, ApplyScheduler},
     operation::{AsyncWriter, DestroyProgress, ProposalControl, SimpleWriteEncoder},
-    router::{CmdResChannel, QueryResChannel},
+    router::{CmdResChannel, PeerTick, QueryResChannel},
     tablet::CachedTablet,
     Result,
 };
@@ -74,7 +74,8 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     /// Transaction extensions related to this peer.
     txn_ext: Arc<TxnExt>,
     txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
-    need_register_reactivate_memory_lock_tick: bool,
+    need_schedule_tick: bool,
+    pending_ticks: Vec<PeerTick>,
 
     /// Check whether this proposal can be proposed based on its epoch.
     proposal_control: ProposalControl,
@@ -149,7 +150,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             txn_ext: Arc::default(),
             txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::Noop)),
             proposal_control: ProposalControl::new(0),
-            need_register_reactivate_memory_lock_tick: false,
+            need_schedule_tick: false,
+            pending_ticks: Vec::new(),
         };
 
         // If this region has only one peer and I am the one, campaign directly.
@@ -475,16 +477,19 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         self.raft_group().snap().is_some()
     }
 
+    #[inline]
     pub fn set_need_register_reactivate_memory_lock_tick(&mut self) {
-        self.need_register_reactivate_memory_lock_tick = true;
+        self.need_schedule_tick = true;
     }
 
-    /// Returns `true` if we need to register ReactivateMemoryLock tick
-    /// It will be set to false when it is called
-    pub fn need_register_reactivate_memory_lock_tick(&mut self) -> bool {
-        let ret = self.need_register_reactivate_memory_lock_tick;
-        self.need_register_reactivate_memory_lock_tick = false;
-        ret
+    #[inline]
+    pub fn need_schedule_tick(&self) -> bool {
+        self.need_schedule_tick
+    }
+
+    #[inline]
+    pub fn reset_need_schedule_tick(&mut self) {
+        self.need_schedule_tick = false;
     }
 
     pub fn activate_in_memory_pessimistic_locks(&mut self) {
@@ -562,5 +567,10 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         let term = self.term();
         self.proposal_control
             .advance_apply(apply_index, term, region);
+    }
+
+    #[inline]
+    pub fn take_pending_ticks(&mut self) -> Vec<PeerTick> {
+        mem::take(&mut self.pending_ticks)
     }
 }
