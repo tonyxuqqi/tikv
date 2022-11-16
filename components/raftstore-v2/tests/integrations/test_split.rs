@@ -249,7 +249,7 @@ fn test_split() {
         &cluster,
         &mut router0,
         region,
-        peer.clone(),
+        peer,
         1000,
         new_peer(store_id, 10),
         b"k11",

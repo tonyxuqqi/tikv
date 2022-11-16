@@ -14,7 +14,7 @@ use raftstore::{
         fsm::Proposal,
         util::{Lease, RegionReadProgress},
         Config, EntryStorage, PeerStat, ProposalQueue, ReadDelegate, ReadIndexQueue, ReadProgress,
-        TxnExt,
+        TxnExt, LocksStatus,
     },
     Error,
 };
@@ -74,10 +74,10 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     /// Transaction extensions related to this peer.
     txn_ext: Arc<TxnExt>,
     txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
+    need_register_reactivate_memory_lock_tick: bool,
 
     /// Check whether this proposal can be proposed based on its epoch.
     proposal_control: ProposalControl,
-    reactivate_memory_lock_ticks: usize,
 }
 
 impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
@@ -149,7 +149,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             txn_ext: Arc::default(),
             txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::Noop)),
             proposal_control: ProposalControl::new(0),
-            reactivate_memory_lock_ticks: 0,
+            need_register_reactivate_memory_lock_tick: false,
         };
 
         // If this region has only one peer and I am the one, campaign directly.
@@ -460,6 +460,48 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         self.apply_scheduler = Some(apply_scheduler);
     }
 
+    /// Whether the snapshot is handling.
+    /// See the comments of `check_snap_status` for more details.
+    #[inline]
+    pub fn is_handling_snapshot(&self) -> bool {
+        // todo
+        false
+    }
+
+    /// Returns `true` if the raft group has replicated a snapshot but not
+    /// committed it yet.
+    #[inline]
+    pub fn has_pending_snapshot(&self) -> bool {
+        self.raft_group().snap().is_some()
+    }
+
+    pub fn set_need_register_reactivate_memory_lock_tick(&mut self) {
+        self.need_register_reactivate_memory_lock_tick = true;
+    }
+
+    /// Returns `true` if we need to register ReactivateMemoryLock tick
+    /// It will be set to false when it is called
+    pub fn need_register_reactivate_memory_lock_tick(&mut self) -> bool {
+        let ret = self.need_register_reactivate_memory_lock_tick;
+        self.need_register_reactivate_memory_lock_tick = false;
+        ret
+    }
+
+    pub fn activate_in_memory_pessimistic_locks(&mut self) {
+        let mut pessimistic_locks = self.txn_ext.pessimistic_locks.write();
+        pessimistic_locks.status = LocksStatus::Normal;
+        pessimistic_locks.term = self.term();
+        pessimistic_locks.version = self.region().get_region_epoch().get_version();
+    }
+
+    pub fn clear_in_memory_pessimistic_locks(&mut self) {
+        let mut pessimistic_locks = self.txn_ext.pessimistic_locks.write();
+        pessimistic_locks.status = LocksStatus::NotLeader;
+        pessimistic_locks.clear();
+        pessimistic_locks.term = self.term();
+        pessimistic_locks.version = self.region().get_region_epoch().get_version();
+    }
+
     #[inline]
     pub fn post_split(&mut self) {
         self.reset_region_buckets();
@@ -487,29 +529,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     #[inline]
     pub fn txn_ext(&self) -> &Arc<TxnExt> {
         &self.txn_ext
-    }
-
-    /// Whether the snapshot is handling.
-    /// See the comments of `check_snap_status` for more details.
-    #[inline]
-    pub fn is_handling_snapshot(&self) -> bool {
-        // todo
-        false
-    }
-
-    /// Returns `true` if the raft group has replicated a snapshot but not
-    /// committed it yet.
-    #[inline]
-    pub fn has_pending_snapshot(&self) -> bool {
-        self.raft_group().snap().is_some()
-    }
-
-    pub fn set_reactivate_memory_lock_ticks(&mut self, tick: usize) {
-        self.reactivate_memory_lock_ticks = tick;
-    }
-
-    pub fn register_reactivate_memory_lock_tick(&mut self) {
-        // todo
     }
 
     pub fn generate_read_delegate(&self) -> ReadDelegate {
