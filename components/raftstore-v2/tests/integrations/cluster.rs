@@ -12,7 +12,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use causal_ts::CausalTsProviderImpl;
 use collections::HashSet;
 use concurrency_manager::ConcurrencyManager;
 use crossbeam::channel::{self, Receiver, Sender, TrySendError};
@@ -198,8 +197,6 @@ impl RunningState {
         path: &Path,
         cfg: Arc<VersionTrack<Config>>,
         transport: TestTransport,
-        concurrency_manager: ConcurrencyManager,
-        causal_ts_provider: Option<Arc<CausalTsProviderImpl>>,
         logger: &Logger,
     ) -> (TestRouter, Self) {
         let cf_opts = ALL_CFS
@@ -255,8 +252,8 @@ impl RunningState {
                 router.store_router(),
                 store_meta.clone(),
                 snap_mgr,
-                concurrency_manager,
-                causal_ts_provider,
+                ConcurrencyManager::new(TimeStamp::zero()), // todo
+                None,
             )
             .unwrap();
 
@@ -300,15 +297,8 @@ impl TestNode {
     }
 
     fn start(&mut self, cfg: Arc<VersionTrack<Config>>, trans: TestTransport) -> TestRouter {
-        let (router, state) = RunningState::new(
-            &self.pd_client,
-            self.path.path(),
-            cfg,
-            trans,
-            ConcurrencyManager::new(TimeStamp::zero()), // todo
-            None,
-            &self.logger,
-        );
+        let (router, state) =
+            RunningState::new(&self.pd_client, self.path.path(), cfg, trans, &self.logger);
         self.running_state = Some(state);
         router
     }
