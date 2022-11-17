@@ -21,10 +21,13 @@ use kvproto::{
     raft_serverpb::{PeerState, RaftMessage},
 };
 use pd_client::PdClient;
-use raft::INVALID_ID;
-use raftstore::store::{
-    fsm::store::PeerTickBatch, local_metrics::RaftMetrics, Config, ReadRunner, ReadTask,
-    StoreWriters, TabletSnapManager, Transport, WriteSenders,
+use raft::{StateRole, INVALID_ID};
+use raftstore::{
+    coprocessor::{CoprocessorHost, RegionChangeEvent},
+    store::{
+        fsm::store::PeerTickBatch, local_metrics::RaftMetrics, Config, ReadRunner, ReadTask,
+        StoreWriters, TabletSnapManager, Transport, WriteSenders,
+    },
 };
 use slog::Logger;
 use tikv_util::{
@@ -78,6 +81,8 @@ pub struct StoreContext<EK: KvEngine, ER: RaftEngine, T> {
 
     /// Disk usage for the store itself.
     pub self_disk_usage: DiskUsage,
+
+    pub coprocessor_host: CoprocessorHost<EK>,
 }
 
 /// A [`PollHandler`] that handles updates of [`StoreFsm`]s and [`PeerFsm`]s.
@@ -231,6 +236,7 @@ struct StorePollerBuilder<EK: KvEngine, ER: RaftEngine, T> {
     logger: Logger,
     store_meta: Arc<Mutex<StoreMeta<EK>>>,
     snap_mgr: TabletSnapManager,
+    coprocessor_host: CoprocessorHost<EK>,
 }
 
 impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
@@ -247,6 +253,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
         logger: Logger,
         store_meta: Arc<Mutex<StoreMeta<EK>>>,
         snap_mgr: TabletSnapManager,
+        coprocessor_host: CoprocessorHost<EK>,
     ) -> Self {
         let pool_size = cfg.value().apply_batch_system.pool_size;
         let max_pool_size = std::cmp::max(
@@ -272,6 +279,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
             write_senders: store_writers.senders(),
             store_meta,
             snap_mgr,
+            coprocessor_host,
         }
     }
 
@@ -293,6 +301,12 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
                     Some(p) => p,
                     None => return Ok(()),
                 };
+                self.coprocessor_host.on_region_changed(
+                    storage.region_state().get_region(),
+                    RegionChangeEvent::Create,
+                    StateRole::Follower,
+                );
+
                 let (sender, peer_fsm) = PeerFsm::new(&cfg, &*self.tablet_factory, storage)?;
                 meta.region_read_progress
                     .insert(region_id, peer_fsm.as_ref().peer().read_progress().clone());
@@ -347,6 +361,7 @@ where
             pd_scheduler: self.pd_scheduler.clone(),
             snap_mgr: self.snap_mgr.clone(),
             self_disk_usage: DiskUsage::Normal,
+            coprocessor_host: self.coprocessor_host.clone(),
         };
         let cfg_tracker = self.cfg.clone().tracker("raftstore".to_string());
         StorePoller::new(poll_ctx, cfg_tracker)
@@ -391,6 +406,7 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
         router: &StoreRouter<EK, ER>,
         store_meta: Arc<Mutex<StoreMeta<EK>>>,
         snap_mgr: TabletSnapManager,
+        mut coprocessor_host: CoprocessorHost<EK>,
     ) -> Result<()>
     where
         T: Transport + 'static,
@@ -418,6 +434,7 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
                 tablet_factory.clone(),
                 router.clone(),
                 workers.pd_worker.remote(),
+                coprocessor_host.clone(),
                 self.logger.clone(),
             ),
         );
@@ -435,6 +452,7 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
             self.logger.clone(),
             store_meta.clone(),
             snap_mgr,
+            coprocessor_host,
         );
         self.workers = Some(workers);
         let peers = builder.init()?;

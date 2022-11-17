@@ -34,7 +34,7 @@ use raft::{
     Ready, StateRole,
 };
 use raftstore::{
-    coprocessor::ApplySnapshotObserver,
+    coprocessor::{ApplySnapshotObserver, RoleChange},
     store::{
         util, ExtraStates, FetchedLogs, ReadProgress, SnapKey, TabletSnapKey, Transport, WriteTask,
     },
@@ -64,6 +64,8 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
         if self.fsm.peer_mut().tick() {
             self.fsm.peer_mut().set_has_ready();
         }
+        self.fsm.peer_mut().post_raft_group_tick();
+
         self.schedule_tick(PeerTick::Raft);
     }
 }
@@ -492,8 +494,18 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 }
                 _ => {}
             }
+            ctx.coprocessor_host.on_role_change(
+                self.region(),
+                RoleChange {
+                    state: ss.raft_state,
+                    leader_id: ss.leader_id,
+                    prev_lead_transferee: self.lead_transferee(),
+                    vote: self.raft_group().raft.vote,
+                },
+            );
             self.proposal_control_mut().maybe_update_term(term);
         }
+        self.set_lead_transferee(self.raft_group().raft.lead_transferee.unwrap_or_default());
     }
 
     /// If leader commits new admin commands, it may break lease assumption. So

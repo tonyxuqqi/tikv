@@ -14,6 +14,7 @@ use pd_client::{
     PdClient,
 };
 use prometheus::local::LocalHistogram;
+use raftstore::coprocessor::CoprocessorHost;
 use slog::{error, warn};
 use tikv_util::{metrics::RecordPairVec, store::QueryStats, time::UnixSecs, topn::TopN};
 
@@ -193,7 +194,9 @@ where
         }
 
         stats = collect_report_read_peer_stats(HOTSPOT_REPORT_CAPACITY, report_peers, stats);
-        let (capacity, used_size, available) = self.collect_engine_size().unwrap_or_default();
+        let (capacity, used_size, available) = self
+            .collect_engine_size(&self.coprocessor_host)
+            .unwrap_or_default();
         if available == 0 {
             warn!(self.logger, "no available space");
         }
@@ -259,7 +262,13 @@ where
     }
 
     /// Returns (capacity, used, available).
-    fn collect_engine_size(&self) -> Option<(u64, u64, u64)> {
+    fn collect_engine_size(
+        &self,
+        coprocessor_host: &CoprocessorHost<EK>,
+    ) -> Option<(u64, u64, u64)> {
+        if let Some(engine_size) = coprocessor_host.on_compute_engine_size() {
+            return Some((engine_size.capacity, engine_size.used, engine_size.avail));
+        }
         let disk_stats = match fs2::statvfs(self.tablet_factory.tablets_path()) {
             Err(e) => {
                 error!(

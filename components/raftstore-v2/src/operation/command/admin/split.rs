@@ -296,6 +296,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             let mut meta = store_ctx.store_meta.lock().unwrap();
             let reader = meta.readers.get_mut(&derived.get_id()).unwrap();
             self.set_region(
+                &store_ctx.coprocessor_host,
                 reader,
                 derived.clone(),
                 RegionChangeReason::Split,
@@ -439,7 +440,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             // todo: check if the last region needs to split again
         }
 
-        self.schedule_apply_fsm(store_ctx);
+        self.activate(store_ctx);
     }
 }
 

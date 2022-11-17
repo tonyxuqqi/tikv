@@ -28,9 +28,12 @@ use kvproto::{
 };
 use pd_client::RpcClient;
 use raft::eraftpb::MessageType;
-use raftstore::store::{
-    region_meta::{RegionLocalState, RegionMeta},
-    Config, TabletSnapKey, TabletSnapManager, Transport, RAFT_INIT_LOG_INDEX,
+use raftstore::{
+    coprocessor::CoprocessorHost,
+    store::{
+        region_meta::{RegionLocalState, RegionMeta},
+        Config, TabletSnapKey, TabletSnapManager, Transport, RAFT_INIT_LOG_INDEX,
+    },
 };
 use raftstore_v2::{
     create_store_batch_system,
@@ -250,6 +253,7 @@ impl RunningState {
                 router.store_router(),
                 store_meta.clone(),
                 snap_mgr,
+                CoprocessorHost::default(),
             )
             .unwrap();
 

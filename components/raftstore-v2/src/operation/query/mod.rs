@@ -20,7 +20,7 @@ use kvproto::{
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse, StatusCmdType},
     raft_serverpb::RaftApplyState,
 };
-use raft::Ready;
+use raft::{Ready, StateRole};
 use raftstore::{
     errors::RAFTSTORE_IS_BUSY,
     store::{
@@ -420,11 +420,18 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             }
         }
         self.pending_reads_mut().gc();
-        self.read_progress_mut().update_applied_core(applied_index);
+        self.read_progress_mut()
+            .update_applied(applied_index, &ctx.coprocessor_host);
+
+        self.read_progress_mut()
+            .update_applied(applied_index, &ctx.coprocessor_host);
 
         // Only leaders need to update applied_term.
         if progress_to_be_updated && self.is_leader() {
-            // TODO: add coprocessor_host hook
+            if applied_term == self.term() {
+                ctx.coprocessor_host
+                    .on_applied_current_term(StateRole::Leader, self.region());
+            }
             let progress = ReadProgress::applied_term(applied_term);
             // TODO: remove it
             self.add_reader_if_necessary(&ctx.store_meta);

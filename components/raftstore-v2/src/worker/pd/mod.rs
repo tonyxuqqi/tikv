@@ -12,7 +12,7 @@ use kvproto::{
     raft_cmdpb::{AdminRequest, RaftCmdRequest},
 };
 use pd_client::PdClient;
-use raftstore::store::util::KeysInfoFormatter;
+use raftstore::{coprocessor::CoprocessorHost, store::util::KeysInfoFormatter};
 use slog::{error, info, Logger};
 use tikv_util::{time::UnixSecs, worker::Runnable};
 use yatp::{task::future::TaskCell, Remote};
@@ -95,6 +95,8 @@ where
 
     region_cpu_records: HashMap<u64, u32>,
 
+    coprocessor_host: CoprocessorHost<EK>,
+
     logger: Logger,
 }
 
@@ -110,6 +112,7 @@ where
         tablet_factory: Arc<dyn TabletFactory<EK>>,
         router: StoreRouter<EK, ER>,
         remote: Remote<TaskCell>,
+        coprocessor_host: CoprocessorHost<EK>,
         logger: Logger,
     ) -> Self {
         Self {
@@ -122,6 +125,7 @@ where
             start_ts: UnixSecs::zero(),
             store_stat: store_heartbeat::StoreStat::default(),
             region_cpu_records: HashMap::default(),
+            coprocessor_host,
             logger,
         }
     }
