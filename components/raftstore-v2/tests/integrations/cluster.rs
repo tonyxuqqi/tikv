@@ -26,7 +26,6 @@ use kvproto::{
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse},
     raft_serverpb::RaftMessage,
 };
-use pd_client::RpcClient;
 use raft::{eraftpb::MessageType, StateRole};
 use raftstore::{
     coprocessor::{RegionChangeEvent, RoleChange},
@@ -43,7 +42,7 @@ use raftstore_v2::{
 };
 use slog::{debug, o, Logger};
 use tempfile::TempDir;
-use test_pd::mocker::Service;
+use test_pd_client::TestPdClient;
 use tikv_util::{
     config::{ReadableDuration, VersionTrack},
     store::new_peer,
@@ -191,11 +190,12 @@ pub struct RunningState {
     pub transport: TestTransport,
     // We need this to clear the ref counts of CachedTablet when shutdown
     store_meta: Arc<Mutex<StoreMeta<KvTestEngine>>>,
+    pub root_region_id: u64,
 }
 
 impl RunningState {
     fn new(
-        pd_client: &Arc<RpcClient>,
+        pd_client: &Arc<TestPdClient>,
         path: &Path,
         cfg: Arc<VersionTrack<Config>>,
         transport: TestTransport,
@@ -218,6 +218,7 @@ impl RunningState {
         let store_id = bootstrap.bootstrap_store().unwrap();
         let mut store = Store::default();
         store.set_id(store_id);
+        let mut region_id = 2;
         if let Some(region) = bootstrap.bootstrap_first_region(&store, store_id).unwrap() {
             if factory.exists(region.get_id(), RAFT_INIT_LOG_INDEX) {
                 factory
@@ -231,6 +232,7 @@ impl RunningState {
                     OpenOptions::default().set_create_new(true),
                 )
                 .unwrap();
+            region_id = region.get_id();
         }
 
         let (router, mut system) = create_store_batch_system::<KvTestEngine, RaftTestEngine>(
@@ -266,8 +268,18 @@ impl RunningState {
             cfg,
             transport,
             store_meta,
+            root_region_id: region_id,
         };
         (TestRouter(router), state)
+    }
+
+    pub fn peer_id(&self, region_id: u64) -> Option<u64> {
+        let meta = self.store_meta.lock().unwrap();
+        let kv = meta.readers.get_key_value(&region_id);
+        if let Some(kv) = kv {
+            return Some(kv.1.peer_id);
+        }
+        None
     }
 }
 
@@ -278,15 +290,14 @@ impl Drop for RunningState {
 }
 
 pub struct TestNode {
-    pd_client: Arc<RpcClient>,
+    pd_client: Arc<TestPdClient>,
     path: TempDir,
     running_state: Option<RunningState>,
     logger: Logger,
 }
 
 impl TestNode {
-    fn with_pd(pd_server: &test_pd::Server<Service>, logger: Logger) -> TestNode {
-        let pd_client = Arc::new(test_pd::util::new_client(pd_server.bind_addrs(), None));
+    fn with_pd(pd_client: Arc<TestPdClient>, logger: Logger) -> TestNode {
         let path = TempDir::new().unwrap();
 
         TestNode {
@@ -329,6 +340,14 @@ impl TestNode {
 
     pub fn id(&self) -> u64 {
         self.running_state().unwrap().store_id
+    }
+
+    pub fn root_region_id(&self) -> u64 {
+        self.running_state().unwrap().root_region_id
+    }
+
+    pub fn peer_id(&self, region_id: u64) -> Option<u64> {
+        self.running_state().unwrap().peer_id(region_id)
     }
 }
 
@@ -400,7 +419,7 @@ pub fn disable_all_auto_ticks(cfg: &mut Config) {
 }
 
 pub struct Cluster {
-    pd_server: test_pd::Server<Service>,
+    pd_client: Arc<TestPdClient>,
     nodes: Vec<TestNode>,
     receivers: Vec<Receiver<RaftMessage>>,
     routers: Vec<TestRouter>,
@@ -419,10 +438,9 @@ impl Cluster {
     }
 
     pub fn with_node_count(count: usize, config: Option<Config>) -> Self {
-        let pd_server = test_pd::Server::new(1);
         let logger = slog_global::borrow_global().new(o!());
         let mut cluster = Cluster {
-            pd_server,
+            pd_client: Arc::new(TestPdClient::new(1, false)),
             nodes: vec![],
             receivers: vec![],
             routers: vec![],
@@ -435,7 +453,7 @@ impl Cluster {
         };
         disable_all_auto_ticks(&mut cfg);
         for _ in 1..=count {
-            let mut node = TestNode::with_pd(&cluster.pd_server, cluster.logger.clone());
+            let mut node = TestNode::with_pd(cluster.pd_client.clone(), cluster.logger.clone());
             let (tx, rx) = new_test_transport();
             let router = node.start(Arc::new(VersionTrack::new(cfg.clone())), tx);
             cluster.nodes.push(node);
@@ -458,6 +476,10 @@ impl Cluster {
         self.routers[offset].clone()
     }
 
+    pub fn root_region_id(&self) -> u64 {
+        self.nodes[0].root_region_id()
+    }
+
     pub fn trig_heartbeat(&self, node_offset: usize, region_id: u64) {
         for _i in 1..=self
             .node(node_offset)
@@ -469,6 +491,21 @@ impl Cluster {
         {
             self.router(node_offset)
                 .send(region_id, PeerMsg::Tick(PeerTick::Raft))
+                .unwrap()
+        }
+    }
+
+    pub fn trig_split_check(&self, node_offset: usize, region_id: u64) {
+        for _i in 1..=self
+            .node(node_offset)
+            .running_state()
+            .unwrap()
+            .cfg
+            .value()
+            .raft_heartbeat_ticks
+        {
+            self.router(node_offset)
+                .send(region_id, PeerMsg::Tick(PeerTick::SplitRegionCheck))
                 .unwrap()
         }
     }

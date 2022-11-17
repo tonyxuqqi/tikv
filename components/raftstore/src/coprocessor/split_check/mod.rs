@@ -11,7 +11,7 @@ use tikv_util::box_try;
 pub use self::{
     half::{get_region_approximate_middle, HalfCheckObserver},
     keys::{get_region_approximate_keys, KeysCheckObserver},
-    size::{get_region_approximate_size, SizeCheckObserver},
+    size::{get_approximate_split_keys, get_region_approximate_size, SizeCheckObserver},
     table::TableCheckObserver,
 };
 use super::{config::Config, error::Result, Bucket, KeyEntry, ObserverContext, SplitChecker};
