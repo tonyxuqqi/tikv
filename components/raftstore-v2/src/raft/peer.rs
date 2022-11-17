@@ -12,7 +12,7 @@ use raftstore::{
     coprocessor::{CoprocessorHost, RegionChangeEvent, RegionChangeReason},
     store::{
         fsm::Proposal,
-        util::{Lease, RegionReadProgress},
+        util::{Lease, LockManagerObserver, RegionReadProgress},
         Config, EntryStorage, PeerStat, ProposalQueue, ReadDelegate, ReadIndexQueue, ReadProgress,
         TxnExt,
     },
@@ -187,7 +187,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     /// has been preserved in a durable device.
     pub fn set_region(
         &mut self,
-        host: &CoprocessorHost<impl KvEngine>,
+        lock_manager_observer: &Arc<dyn LockManagerObserver>,
         reader: &mut ReadDelegate,
         region: metapb::Region,
         reason: RegionChangeReason,
@@ -235,12 +235,13 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             pessimistic_locks.version = self.region().get_region_epoch().get_version();
         }
 
-        // self.pending_remove ?
-        host.on_region_changed(
-            self.region(),
-            RegionChangeEvent::Update(reason),
-            self.get_role(),
-        );
+        if self.serving() {
+            lock_manager_observer.on_region_changed(
+                self.region(),
+                RegionChangeEvent::Update(reason),
+                self.get_role(),
+            );
+        }
     }
 
     #[inline]
@@ -564,7 +565,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     pub fn activate<T>(&mut self, ctx: &mut StoreContext<EK, ER, T>) {
         self.schedule_apply_fsm(ctx);
 
-        ctx.coprocessor_host.on_region_changed(
+        ctx.lock_manager_observer.on_region_changed(
             self.region(),
             RegionChangeEvent::Create,
             self.get_role(),

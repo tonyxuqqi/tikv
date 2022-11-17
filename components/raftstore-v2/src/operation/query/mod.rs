@@ -420,18 +420,11 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             }
         }
         self.pending_reads_mut().gc();
-        self.read_progress_mut()
-            .update_applied(applied_index, &ctx.coprocessor_host);
-
-        self.read_progress_mut()
-            .update_applied(applied_index, &ctx.coprocessor_host);
+        self.read_progress_mut().update_applied_core(applied_index);
 
         // Only leaders need to update applied_term.
         if progress_to_be_updated && self.is_leader() {
-            if applied_term == self.term() {
-                ctx.coprocessor_host
-                    .on_applied_current_term(StateRole::Leader, self.region());
-            }
+            // TODO: add coprocessor_host hook
             let progress = ReadProgress::applied_term(applied_term);
             // TODO: remove it
             self.add_reader_if_necessary(&ctx.store_meta);

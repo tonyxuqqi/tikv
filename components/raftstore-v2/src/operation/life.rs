@@ -19,7 +19,13 @@ use kvproto::{
     metapb::Region,
     raft_serverpb::{PeerState, RaftMessage},
 };
-use raftstore::store::{util, ExtraStates, WriteTask};
+use raftstore::{
+    coprocessor::RegionChangeEvent,
+    store::{
+        util::{self, LockManagerObserver},
+        ExtraStates, WriteTask,
+    },
+};
 use slog::{debug, error, info, warn};
 use tikv_util::store::find_peer;
 
@@ -291,7 +297,11 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     ///
     /// After destroy is finished, `finish_destroy` should be called to clean up
     /// memory states.
-    pub fn start_destroy(&mut self, write_task: &mut WriteTask<EK, ER>) {
+    pub fn start_destroy<T>(
+        &mut self,
+        ctx: &mut StoreContext<EK, ER, T>,
+        write_task: &mut WriteTask<EK, ER>,
+    ) {
         let entry_storage = self.storage().entry_storage();
         if self.postpond_destroy() {
             return;
@@ -312,6 +322,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         extra_states.set_raft_state(entry_storage.raft_state().clone());
         write_task.extra_write.set_v2(extra_states);
         self.destroy_progress_mut().start();
+
+        ctx.lock_manager_observer.on_region_changed(
+            self.region(),
+            RegionChangeEvent::Destroy,
+            self.get_role(),
+        );
     }
 
     /// Do clean up for destroy. The peer is permanently destroyed when

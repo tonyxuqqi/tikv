@@ -25,7 +25,7 @@ use kvproto::{
 use protobuf::{self, Message};
 use raft::{
     eraftpb::{self, ConfChangeType, ConfState, MessageType, Snapshot},
-    Changer, RawNode, INVALID_INDEX,
+    Changer, RawNode, StateRole, INVALID_INDEX,
 };
 use raft_proto::ConfChangeI;
 use tikv_util::{
@@ -38,7 +38,11 @@ use time::{Duration, Timespec};
 use txn_types::{TimeStamp, WriteBatchFlags};
 
 use super::{metrics::PEER_ADMIN_CMD_COUNTER_VEC, peer_storage, Config};
-use crate::{coprocessor::CoprocessorHost, store::snap::SNAPSHOT_VERSION, Error, Result};
+use crate::{
+    coprocessor::{CoprocessorHost, RegionChangeEvent, RoleChange},
+    store::snap::SNAPSHOT_VERSION,
+    Error, Result,
+};
 
 const INVALID_TIMESTAMP: u64 = u64::MAX;
 
@@ -1193,6 +1197,16 @@ impl RegionReadProgress {
         }
     }
 
+    // TODO: remove it when coprocessor hook is implemented in v2.
+    pub fn update_applied_core(&self, applied: u64) {
+        let mut core = self.core.lock().unwrap();
+        if let Some(ts) = core.update_applied(applied) {
+            if !core.pause {
+                self.safe_ts.store(ts, AtomicOrdering::Release);
+            }
+        }
+    }
+
     pub fn update_safe_ts(&self, apply_index: u64, ts: u64) {
         if apply_index == 0 || ts == 0 {
             return;
@@ -1600,6 +1614,13 @@ impl LatencyInspector {
     pub fn finish(self) {
         (self.cb)(self.id, self.duration);
     }
+}
+
+// to be removed later
+pub trait LockManagerObserver: Send + Sync {
+    fn on_role_change(&self, region: &Region, role_change: RoleChange);
+
+    fn on_region_changed(&self, region: &Region, event: RegionChangeEvent, role: StateRole);
 }
 
 #[cfg(test)]

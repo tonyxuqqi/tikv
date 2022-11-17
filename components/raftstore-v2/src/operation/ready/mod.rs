@@ -361,7 +361,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 .collect();
         }
         if !self.serving() {
-            self.start_destroy(&mut write_task);
+            self.start_destroy(ctx, &mut write_task);
         }
         // Ready number should increase monotonically.
         assert!(self.async_writer.known_largest_number() < ready.number());
@@ -494,7 +494,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 }
                 _ => {}
             }
-            ctx.coprocessor_host.on_role_change(
+            ctx.lock_manager_observer.on_role_change(
                 self.region(),
                 RoleChange {
                     state: ss.raft_state,

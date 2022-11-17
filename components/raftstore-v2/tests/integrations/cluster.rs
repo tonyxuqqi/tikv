@@ -27,11 +27,12 @@ use kvproto::{
     raft_serverpb::RaftMessage,
 };
 use pd_client::RpcClient;
-use raft::eraftpb::MessageType;
+use raft::{eraftpb::MessageType, StateRole};
 use raftstore::{
-    coprocessor::CoprocessorHost,
+    coprocessor::{RegionChangeEvent, RoleChange},
     store::{
         region_meta::{RegionLocalState, RegionMeta},
+        util::LockManagerObserver,
         Config, TabletSnapKey, TabletSnapManager, Transport, RAFT_INIT_LOG_INDEX,
     },
 };
@@ -253,7 +254,7 @@ impl RunningState {
                 router.store_router(),
                 store_meta.clone(),
                 snap_mgr,
-                CoprocessorHost::default(),
+                Arc::new(DummyLockManagerObserver {}),
             )
             .unwrap();
 
@@ -551,4 +552,12 @@ impl Cluster {
             }
         }
     }
+}
+
+struct DummyLockManagerObserver {}
+
+impl LockManagerObserver for DummyLockManagerObserver {
+    fn on_region_changed(&self, _: &metapb::Region, _: RegionChangeEvent, _: StateRole) {}
+
+    fn on_role_change(&self, _: &metapb::Region, _: RoleChange) {}
 }
