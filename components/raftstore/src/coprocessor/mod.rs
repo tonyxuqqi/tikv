@@ -41,9 +41,9 @@ pub use self::{
         RegionInfoProvider, SeekRegionCallback,
     },
     split_check::{
-        get_region_approximate_keys, get_region_approximate_middle, get_region_approximate_size,
-        HalfCheckObserver, Host as SplitCheckerHost, KeysCheckObserver, SizeCheckObserver,
-        TableCheckObserver,
+        get_approximate_split_keys, get_region_approximate_keys, get_region_approximate_middle,
+        get_region_approximate_size, HalfCheckObserver, Host as SplitCheckerHost,
+        KeysCheckObserver, SizeCheckObserver, TableCheckObserver,
     },
 };
 pub use crate::store::{Bucket, KeyEntry};

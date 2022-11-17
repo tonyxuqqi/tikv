@@ -2,7 +2,7 @@
 
 use std::{thread, time::Duration};
 
-use engine_traits::{OpenOptions, Peekable, TabletFactory};
+use engine_traits::{MiscExt, OpenOptions, Peekable, TabletAccessor, TabletFactory};
 use futures::executor::block_on;
 use kvproto::{
     metapb, pdpb,
@@ -12,10 +12,11 @@ use kvproto::{
 };
 use raft::prelude::ConfChangeType;
 use raftstore_v2::router::PeerMsg;
-use tikv_util::store::new_peer;
+use tikv_util::{config::ReadableSize, store::new_peer};
+use txn_types::Key;
 
 use crate::{
-    cluster::{Cluster, TestRouter},
+    cluster::{v2_default_config, Cluster, TestRouter},
     test_transfer_leader::must_transfer_leader,
 };
 
@@ -65,12 +66,30 @@ fn put_data(
     node_off_for_verify: usize,
     key: &[u8],
 ) {
+    put_data_with_value(
+        cluster,
+        region_id,
+        node_off,
+        node_off_for_verify,
+        key,
+        b"value",
+    );
+}
+
+fn put_data_with_value(
+    cluster: &Cluster,
+    region_id: u64,
+    node_off: usize,
+    node_off_for_verify: usize,
+    key: &[u8],
+    value: &[u8],
+) {
     let router = cluster.router(node_off);
     let mut req = router.new_request_for(region_id);
     let mut put_req = Request::default();
     put_req.set_cmd_type(CmdType::Put);
     put_req.mut_put().set_key(key.to_vec());
-    put_req.mut_put().set_value(b"value".to_vec());
+    put_req.mut_put().set_value(value.to_vec());
     req.mut_requests().push(put_req);
 
     router.wait_applied_to_current_term(region_id, Duration::from_secs(3));
@@ -98,7 +117,13 @@ fn put_data(
     let resp = block_on(sub.result()).unwrap();
 
     assert!(!resp.get_header().has_error(), "{:?}", resp);
-    assert_eq!(tablet.get_value(key).unwrap().unwrap(), b"value");
+    assert_eq!(
+        tablet
+            .get_value(keys::data_key(key).as_slice())
+            .unwrap()
+            .unwrap(),
+        value
+    );
     std::thread::sleep(std::time::Duration::from_millis(20));
 
     // Verify the data is ready in the other node
@@ -108,7 +133,13 @@ fn put_data(
     let tablet = tablet_factory
         .open_tablet(region_id, None, OpenOptions::default().set_cache_only(true))
         .unwrap();
-    assert_eq!(tablet.get_value(key).unwrap().unwrap(), b"value");
+    assert_eq!(
+        tablet
+            .get_value(keys::data_key(key).as_slice())
+            .unwrap()
+            .unwrap(),
+        value
+    );
 }
 
 fn put(router: &mut TestRouter, cluster: &Cluster, region_id: u64, key: &[u8]) -> RaftCmdResponse {
@@ -202,9 +233,10 @@ fn split_region(
 fn test_split() {
     let cluster = Cluster::with_node_count(3, None);
     let mut router0 = cluster.router(0);
+    let region_id = cluster.root_region_id();
 
     // Add another peer node
-    let mut req = router0.new_request_for(2);
+    let mut req = router0.new_request_for(region_id);
     let admin_req = req.mut_admin_request();
     admin_req.set_cmd_type(AdminCmdType::ChangePeer);
     admin_req
@@ -213,44 +245,44 @@ fn test_split() {
     let peer1 = new_peer(cluster.node(1).id(), 5);
     admin_req.mut_change_peer().set_peer(peer1.clone());
     let req_clone = req.clone();
-    let resp = router0.command(2, req_clone).unwrap();
+    let resp = router0.command(region_id, req_clone).unwrap();
     assert!(!resp.get_header().has_error(), "{:?}", resp);
     let epoch = req.get_header().get_region_epoch();
     let new_conf_ver = epoch.get_conf_ver() + 1;
     let leader_peer = req.get_header().get_peer().clone();
     let meta = router0
-        .must_query_debug_info(2, Duration::from_secs(3))
+        .must_query_debug_info(region_id, Duration::from_secs(3))
         .unwrap();
     assert_eq!(meta.region_state.epoch.version, epoch.get_version());
     assert_eq!(meta.region_state.epoch.conf_ver, new_conf_ver);
     assert_eq!(meta.region_state.peers, vec![leader_peer, peer1.clone()]);
     let peer0_id = meta.raft_status.id;
 
-    cluster.dispatch(2, vec![]);
+    cluster.dispatch(region_id, vec![]);
     std::thread::sleep(std::time::Duration::from_millis(20));
     let mut router1 = cluster.router(1);
     let meta = router1
-        .must_query_debug_info(2, Duration::from_secs(3))
+        .must_query_debug_info(region_id, Duration::from_secs(3))
         .unwrap();
     assert_eq!(peer0_id, meta.raft_status.soft_state.leader_id);
     assert_eq!(meta.raft_status.id, peer1.id, "{:?}", meta);
     assert_eq!(meta.region_state.epoch.version, epoch.get_version());
     assert_eq!(meta.region_state.epoch.conf_ver, new_conf_ver);
 
-    put_data(&cluster, 2, 0, 1, b"key1");
+    put_data(&cluster, region_id, 0, 1, b"key1");
 
-    let region_id = 2;
     let store_id = cluster.node(0).id();
-    let peer = new_peer(store_id, 3);
+    let peer_id = cluster.node(0).peer_id(region_id).unwrap();
+    let peer = new_peer(store_id, peer_id);
     let region = router0.region_detail(region_id);
-    router0.wait_applied_to_current_term(2, Duration::from_secs(3));
+    router0.wait_applied_to_current_term(region_id, Duration::from_secs(3));
 
     let (left, right) = split_region(
         &cluster,
         &mut router0,
         region,
         peer.clone(),
-        1000,
+        2000,
         new_peer(store_id, 10),
         b"k11",
         b"k33",
@@ -258,6 +290,7 @@ fn test_split() {
         false,
     );
 
+    println!("must_transfer_leader peer1");
     // Perform transfer leader
     must_transfer_leader(&cluster, region_id, 0, 1, peer1.clone());
 
@@ -266,7 +299,7 @@ fn test_split() {
         &mut router1,
         left,
         peer1,
-        1001,
+        2001,
         new_peer(store_id, 15),
         b"k00",
         b"k11",
@@ -275,19 +308,57 @@ fn test_split() {
     );
 
     // region_id 1000, store 4, peer_id 11
+    println!("must_transfer_leader peer2");
     let peer2 = new_peer(cluster.node(1).id(), 11);
-    must_transfer_leader(&cluster, 1000, 0, 1, peer2.clone());
+    must_transfer_leader(&cluster, 2000, 0, 1, peer2.clone());
 
     let _ = split_region(
         &cluster,
         &mut router1,
         right,
         peer2,
-        1002,
+        2002,
         new_peer(store_id, 20),
         b"k22",
         b"k33",
         b"k33",
         false,
     );
+}
+
+#[test]
+fn test_split_check() {
+    let mut config = v2_default_config();
+    config.region_split_size = ReadableSize::mb(2);
+    config.region_max_size = ReadableSize::mb(4);
+    let val = vec![0; 1024 * 1024];
+    let val = val.as_slice();
+    let cluster = Cluster::with_node_count(1, Some(config));
+    let router0 = cluster.router(0);
+    let node = cluster.node(0);
+    let tablet_factory = node.tablet_factory();
+    let region_id = node.root_region_id();
+    for i in 0..5 {
+        let key = Key::from_raw(format!("{:05}", i).as_bytes());
+        let key = key.append_ts(1.into());
+        let key = key.as_encoded();
+        put_data_with_value(&cluster, region_id, 0, 0, key, val);
+        tablet_factory.for_each_opened_tablet(&mut |_id, _suffix, db| {
+            db.flush_cfs(true).unwrap();
+        });
+    }
+
+    router0.wait_applied_to_current_term(region_id, Duration::from_secs(3));
+
+    let region = router0.region_detail(region_id);
+    assert!(region.get_start_key().is_empty() && region.get_end_key().is_empty());
+
+    cluster.trig_split_check(0, region_id);
+    for _i in 0..5 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        cluster.trig_heartbeat(0, region_id);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    let region = router0.region_detail(region_id);
+    assert!(!region.get_start_key().is_empty() || !region.get_end_key().is_empty());
 }

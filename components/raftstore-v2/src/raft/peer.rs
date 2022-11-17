@@ -78,6 +78,7 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     /// Check whether this proposal can be proposed based on its epoch.
     proposal_control: ProposalControl,
     reactivate_memory_lock_ticks: usize,
+    may_skip_split_check: bool,
 }
 
 impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
@@ -150,6 +151,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::Noop)),
             proposal_control: ProposalControl::new(0),
             reactivate_memory_lock_ticks: 0,
+            may_skip_split_check: false,
         };
 
         // If this region has only one peer and I am the one, campaign directly.
@@ -543,5 +545,15 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         let term = self.term();
         self.proposal_control
             .advance_apply(apply_index, term, region);
+    }
+
+    #[inline]
+    pub fn may_skip_split_check(&self) -> bool {
+        self.may_skip_split_check
+    }
+
+    #[inline]
+    pub fn set_may_skip_split_check(&mut self, skip: bool) {
+        self.may_skip_split_check = skip;
     }
 }

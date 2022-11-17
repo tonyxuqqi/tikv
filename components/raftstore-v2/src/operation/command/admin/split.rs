@@ -25,42 +25,56 @@
 //!   created by the store, and here init it using the data sent from the parent
 //!   peer.
 
-use std::collections::VecDeque;
+use std::{borrow::Cow, collections::VecDeque};
 
 use crossbeam::channel::{SendError, TrySendError};
 use engine_traits::{
     Checkpointer, DeleteStrategy, KvEngine, OpenOptions, RaftEngine, RaftLogBatch, Range,
-    CF_DEFAULT, SPLIT_PREFIX,
+    TabletFactory, CF_DEFAULT, SPLIT_PREFIX,
 };
 use fail::fail_point;
 use keys::enc_end_key;
 use kvproto::{
     metapb::{self, Region, RegionEpoch},
-    raft_cmdpb::{AdminRequest, AdminResponse, RaftCmdRequest, SplitRequest},
+    raft_cmdpb::{AdminCmdType, AdminRequest, AdminResponse, RaftCmdRequest, SplitRequest},
     raft_serverpb::RegionLocalState,
 };
 use protobuf::Message;
 use raft::RawNode;
 use raftstore::{
-    coprocessor::RegionChangeReason,
+    coprocessor::{
+        get_approximate_split_keys, get_region_approximate_keys, get_region_approximate_size,
+        split_observer::{is_valid_split_key, strip_timestamp_if_exists},
+        RegionChangeReason,
+    },
     store::{
         fsm::apply::validate_batch_split,
         metrics::PEER_ADMIN_CMD_COUNTER,
         util::{self, KeysInfoFormatter},
-        PeerPessimisticLocks, PeerStat, ProposalContext, RAFT_INIT_LOG_INDEX,
+        PeerPessimisticLocks, PeerStat, ProposalContext, Transport, RAFT_INIT_LOG_INDEX,
     },
-    Result,
+    Error, Result,
 };
 use slog::{error, info, warn, Logger};
-use tikv_util::box_err;
+use tikv_util::{box_err, config::ReadableSize, worker::ScheduleError};
 
 use crate::{
     batch::StoreContext,
     fsm::{ApplyResReporter, PeerFsmDelegate},
     operation::AdminCmdResult,
     raft::{write_initial_states, Apply, Peer, Storage},
-    router::{ApplyRes, PeerMsg, StoreMsg},
+    router::{ApplyRes, CmdResChannel, PeerMsg, PeerTick, StoreMsg},
+    worker::PdTask,
 };
+
+pub struct SplitRegion {
+    pub region_epoch: RegionEpoch,
+    // It's an encoded key.
+    // TODO: support meta key.
+    pub split_keys: Vec<Vec<u8>>,
+    pub ch: CmdResChannel,
+    pub source: Cow<'static, str>,
+}
 
 #[derive(Debug)]
 pub struct SplitResult {
@@ -77,6 +91,16 @@ pub struct SplitInit {
 
     /// In-memory pessimistic locks that should be inherited from parent region
     pub locks: PeerPessimisticLocks,
+}
+
+impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER, T> {
+    pub fn on_split_region_check(&mut self) {
+        if !self.fsm.peer_mut().maybe_split(self.store_ctx) {
+            if !self.fsm.peer().may_skip_split_check() {
+                self.schedule_tick(PeerTick::SplitRegionCheck);
+            }
+        }
+    }
 }
 
 impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
@@ -338,6 +362,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 _ => unreachable!(),
             }
         }
+        self.set_may_skip_split_check(false);
     }
 
     pub fn on_split_init<T>(
@@ -440,6 +465,183 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         }
 
         self.schedule_apply_fsm(store_ctx);
+    }
+
+    /// Check if it needs to split.
+    ///
+    /// Returns false means the check is aborted, should re-check later.
+    fn maybe_split<T>(&mut self, store_ctx: &mut StoreContext<EK, ER, T>) -> bool {
+        if !self.is_leader() {
+            return true;
+        }
+        // Refresh cache.
+        self.tablet_mut().latest();
+        let Some(tablet) = self.tablet().cache() else { return false };
+        // We don't have coprocessor yet, so use store config for now.
+        let mut split_size = store_ctx.cfg.region_split_size.0;
+        if split_size == 0 {
+            split_size = ReadableSize::gb(4).0;
+        }
+        let mut max_size = store_ctx.cfg.region_max_size.0;
+        if max_size == 0 {
+            max_size = split_size * 3 / 2;
+        }
+        let region_count =
+            get_region_approximate_size(tablet, self.region(), split_size * 10).map(|s| {
+                if s > max_size {
+                    s / split_size
+                } else {
+                    0
+                }
+            });
+        match region_count {
+            Ok(0) => true,
+            Err(e) => {
+                error!(self.logger, "failed to check split"; "error" => ?e);
+                false
+            }
+            Ok(n) => match get_approximate_split_keys(tablet, self.region(), n) {
+                Ok(keys) => {
+                    let region_epoch = self.region().get_region_epoch().clone();
+                    self.on_prepare_split_region(
+                        store_ctx,
+                        region_epoch,
+                        keys,
+                        "split_check".into(),
+                    );
+                    true
+                }
+                Err(e) => {
+                    error!(self.logger, "failed to gen split keys"; "error" => ?e);
+                    false
+                }
+            },
+        }
+    }
+
+    fn on_prepare_split_region<T>(
+        &mut self,
+        ctx: &mut StoreContext<EK, ER, T>,
+        region_epoch: metapb::RegionEpoch,
+        split_keys: Vec<Vec<u8>>,
+        source: &str,
+    ) {
+        info!(
+            self.logger,
+            "on split";
+            "split_keys" => %KeysInfoFormatter(split_keys.iter()),
+            "source" => source,
+        );
+        if let Err(e) = self.validate_split_region(&region_epoch, &split_keys) {
+            error!(self.logger, "validate_batch_split failed";
+                   "error" => ?e,
+            );
+            // cb.invoke_with_response(new_error(e));
+            return;
+        }
+        let region = self.region();
+        let task = PdTask::AskBatchSplit {
+            region: region.clone(),
+            split_keys,
+            peer: self.peer().clone(),
+            right_derive: ctx.cfg.right_derive_when_split,
+        };
+        if let Err(ScheduleError::Stopped(t)) = ctx.pd_scheduler.schedule(task) {
+            error!(
+                self.logger,
+                "failed to notify pd to split: Stopped";
+            );
+
+            // TODO: how to notify caller;
+            return;
+        }
+        self.set_may_skip_split_check(true);
+    }
+
+    fn validate_split_region(
+        &mut self,
+        epoch: &metapb::RegionEpoch,
+        split_keys: &[Vec<u8>],
+    ) -> Result<()> {
+        if split_keys.is_empty() {
+            error!(
+                self.logger,
+                "no split key is specified.";
+            );
+            return Err(box_err!(
+                "{} {} no split key is specified.",
+                self.region_id(),
+                self.peer_id()
+            ));
+        }
+        for key in split_keys {
+            if key.is_empty() {
+                error!(
+                    self.logger,
+                    "split key should not be empty!!!";
+                );
+                return Err(box_err!(
+                    "region: {} peer: {} split key should not be empty",
+                    self.region_id(),
+                    self.peer_id()
+                ));
+            }
+        }
+        if !self.is_leader() {
+            // region on this store is no longer leader, skipped.
+            info!(
+                self.logger,
+                "not leader, skip.";
+            );
+            return Err(Error::NotLeader(self.region_id(), self.leader()));
+        }
+
+        let region = self.region();
+        let latest_epoch = region.get_region_epoch();
+
+        // This is a little difference for `check_region_epoch` in region split case.
+        // Here we just need to check `version` because `conf_ver` will be update
+        // to the latest value of the peer, and then send to PD.
+        if latest_epoch.get_version() != epoch.get_version() {
+            info!(
+                self.logger,
+                "epoch changed, retry later";
+                "prev_epoch" => ?region.get_region_epoch(),
+                "epoch" => ?epoch,
+            );
+            return Err(Error::EpochNotMatch(
+                format!(
+                    "region_id: {} peer_id: {} epoch changed {:?} != {:?}, retry later",
+                    self.region_id(),
+                    self.peer_id(),
+                    latest_epoch,
+                    epoch
+                ),
+                vec![region.to_owned()],
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn on_split_region<T>(&mut self, store_ctx: &mut StoreContext<EK, ER, T>, sr: SplitRegion) {
+        info!(
+            self.logger,
+            "on split";
+            "split_keys" => %KeysInfoFormatter(sr.split_keys.iter()),
+            "source" => %sr.source,
+        );
+        let mut req = RaftCmdRequest::default();
+        req.mut_header().set_region_epoch(sr.region_epoch);
+        req.mut_header().set_peer(self.peer().clone());
+        let admin_req = req.mut_admin_request();
+        admin_req.set_cmd_type(AdminCmdType::BatchSplit);
+        for key in sr.split_keys {
+            admin_req.mut_splits().mut_requests().push(SplitRequest {
+                split_key: key,
+                ..Default::default()
+            });
+        }
+        self.on_admin_command(store_ctx, req, sr.ch);
     }
 }
 

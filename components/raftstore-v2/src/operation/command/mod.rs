@@ -59,7 +59,7 @@ mod admin;
 mod control;
 mod write;
 
-pub use admin::{AdminCmdResult, SplitInit, SplitResult};
+pub use admin::{AdminCmdResult, SplitInit, SplitRegion, SplitResult};
 pub use control::ProposalControl;
 pub use write::{SimpleWriteDecoder, SimpleWriteEncoder};
 
