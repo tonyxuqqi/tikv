@@ -22,7 +22,7 @@ use kvproto::{
 use raftstore::{
     coprocessor::RegionChangeEvent,
     store::{
-        util::{self, LockManagerObserver},
+        util::{self, LockManagerNotifier},
         ExtraStates, WriteTask,
     },
 };

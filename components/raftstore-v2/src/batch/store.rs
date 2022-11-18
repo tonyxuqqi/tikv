@@ -25,7 +25,7 @@ use raft::{StateRole, INVALID_ID};
 use raftstore::{
     coprocessor::RegionChangeEvent,
     store::{
-        fsm::store::PeerTickBatch, local_metrics::RaftMetrics, util::LockManagerObserver, Config,
+        fsm::store::PeerTickBatch, local_metrics::RaftMetrics, util::LockManagerNotifier, Config,
         ReadRunner, ReadTask, StoreWriters, TabletSnapManager, Transport, WriteSenders,
     },
 };
@@ -82,7 +82,7 @@ pub struct StoreContext<EK: KvEngine, ER: RaftEngine, T> {
     /// Disk usage for the store itself.
     pub self_disk_usage: DiskUsage,
 
-    pub lock_manager_observer: Arc<dyn LockManagerObserver>,
+    pub lock_manager_observer: Arc<dyn LockManagerNotifier>,
 }
 
 /// A [`PollHandler`] that handles updates of [`StoreFsm`]s and [`PeerFsm`]s.
@@ -236,7 +236,7 @@ struct StorePollerBuilder<EK: KvEngine, ER: RaftEngine, T> {
     logger: Logger,
     store_meta: Arc<Mutex<StoreMeta<EK>>>,
     snap_mgr: TabletSnapManager,
-    lock_manager_observer: Arc<dyn LockManagerObserver>,
+    lock_manager_observer: Arc<dyn LockManagerNotifier>,
 }
 
 impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
@@ -253,7 +253,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
         logger: Logger,
         store_meta: Arc<Mutex<StoreMeta<EK>>>,
         snap_mgr: TabletSnapManager,
-        lock_manager_observer: Arc<dyn LockManagerObserver>,
+        lock_manager_observer: Arc<dyn LockManagerNotifier>,
     ) -> Self {
         let pool_size = cfg.value().apply_batch_system.pool_size;
         let max_pool_size = std::cmp::max(
@@ -406,7 +406,7 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
         router: &StoreRouter<EK, ER>,
         store_meta: Arc<Mutex<StoreMeta<EK>>>,
         snap_mgr: TabletSnapManager,
-        lock_manager_observer: Arc<dyn LockManagerObserver>,
+        lock_manager_observer: Arc<dyn LockManagerNotifier>,
     ) -> Result<()>
     where
         T: Transport + 'static,

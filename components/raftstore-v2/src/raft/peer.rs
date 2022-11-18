@@ -12,7 +12,7 @@ use raftstore::{
     coprocessor::{CoprocessorHost, RegionChangeEvent, RegionChangeReason},
     store::{
         fsm::Proposal,
-        util::{Lease, LockManagerObserver, RegionReadProgress},
+        util::{Lease, LockManagerNotifier, RegionReadProgress},
         Config, EntryStorage, PeerStat, ProposalQueue, ReadDelegate, ReadIndexQueue, ReadProgress,
         TxnExt,
     },
@@ -189,7 +189,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     /// has been preserved in a durable device.
     pub fn set_region(
         &mut self,
-        lock_manager_observer: &Arc<dyn LockManagerObserver>,
+        lock_manager_observer: &Arc<dyn LockManagerNotifier>,
         reader: &mut ReadDelegate,
         region: metapb::Region,
         reason: RegionChangeReason,

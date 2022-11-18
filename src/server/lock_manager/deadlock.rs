@@ -26,7 +26,7 @@ use raftstore::{
         BoxRegionChangeObserver, BoxRoleObserver, Coprocessor, CoprocessorHost, ObserverContext,
         RegionChangeEvent, RegionChangeObserver, RoleChange, RoleObserver,
     },
-    store::util::{is_region_initialized, LockManagerObserver},
+    store::util::{is_region_initialized, LockManagerNotifier},
 };
 use security::SecurityManager;
 use tikv_util::{
@@ -606,7 +606,7 @@ impl RegionChangeObserver for RoleChangeNotifier {
     }
 }
 
-impl LockManagerObserver for RoleChangeNotifier {
+impl LockManagerNotifier for RoleChangeNotifier {
     fn on_role_change(&self, region: &Region, role_change: RoleChange) {
         let mut ctx = ObserverContext::new(region);
         RoleObserver::on_role_change(self, &mut ctx, &role_change);

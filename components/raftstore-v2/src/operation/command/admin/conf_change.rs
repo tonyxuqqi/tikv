@@ -21,7 +21,7 @@ use raftstore::{
     coprocessor::{RegionChangeEvent, RegionChangeObserver, RegionChangeReason},
     store::{
         metrics::{PEER_ADMIN_CMD_COUNTER_VEC, PEER_PROPOSE_LOG_SIZE_HISTOGRAM},
-        util::{self, ChangePeerI, ConfChangeKind, LockManagerObserver},
+        util::{self, ChangePeerI, ConfChangeKind, LockManagerNotifier},
         ProposalContext,
     },
     Error, Result,
