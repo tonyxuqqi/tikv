@@ -423,7 +423,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 meta.tablet_caches
                     .insert(self.region_id(), self.tablet().clone());
             }
-            self.schedule_apply_fsm(ctx);
+            self.activate(ctx);
         }
         let persisted_message = self
             .async_writer
