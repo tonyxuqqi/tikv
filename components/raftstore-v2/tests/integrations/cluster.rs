@@ -13,6 +13,7 @@ use std::{
 };
 
 use collections::HashSet;
+use concurrency_manager::ConcurrencyManager;
 use crossbeam::channel::{self, Receiver, Sender, TrySendError};
 use engine_test::{
     ctor::{CfOptions, DbOptions},
@@ -47,6 +48,7 @@ use tikv_util::{
     config::{ReadableDuration, VersionTrack},
     store::new_peer,
 };
+use txn_types::TimeStamp;
 
 #[derive(Clone)]
 pub struct TestRouter(RaftRouter<KvTestEngine, RaftTestEngine>);
@@ -256,6 +258,8 @@ impl RunningState {
                 router.store_router(),
                 store_meta.clone(),
                 snap_mgr,
+                ConcurrencyManager::new(TimeStamp::zero()), // todo
+                None,
                 Arc::new(DummyLockManagerObserver {}),
             )
             .unwrap();

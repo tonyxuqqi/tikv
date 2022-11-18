@@ -59,6 +59,8 @@ time = "0.1"
 tracker = { workspace = true }
 txn_types = { workspace = true }
 yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
+concurrency_manager = { workspace = true }
+causal_ts = { workspace = true }
 
 [dev-dependencies]
 engine_test = { workspace = true }

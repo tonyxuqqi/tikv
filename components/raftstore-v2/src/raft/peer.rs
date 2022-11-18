@@ -1,6 +1,9 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{mem, sync::Arc};
+use std::{
+    mem,
+    sync::{atomic::Ordering, Arc},
+};
 
 use collections::HashMap;
 use crossbeam::atomic::AtomicCell;
@@ -35,6 +38,7 @@ use crate::{
     operation::{AsyncWriter, DestroyProgress, ProposalControl, SimpleWriteEncoder},
     router::{CmdResChannel, QueryResChannel},
     tablet::CachedTablet,
+    worker::PdTask,
     Result,
 };
 
@@ -562,6 +566,31 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             .advance_apply(apply_index, term, region);
     }
 
+    pub fn require_updating_max_ts(&self, pd_scheduler: &Scheduler<PdTask>) {
+        let epoch = self.region().get_region_epoch();
+        let term_low_bits = self.term() & ((1 << 32) - 1); // 32 bits
+        let version_lot_bits = epoch.get_version() & ((1 << 31) - 1); // 31 bits
+        let initial_status = (term_low_bits << 32) | (version_lot_bits << 1);
+        self.txn_ext
+            .max_ts_sync_status
+            .store(initial_status, Ordering::SeqCst);
+        info!(
+            self.logger,
+            "require updating max ts";
+            "initial_status" => initial_status,
+        );
+        if let Err(e) = pd_scheduler.schedule(PdTask::UpdateMaxTimestamp {
+            region_id: self.region().id,
+            initial_status,
+            txn_ext: self.txn_ext.clone(),
+        }) {
+            error!(
+                self.logger,
+                "failed to update max ts";
+                "err" => ?e,
+            );
+        }
+    }
     /// Register self to apply_scheduler so that the peer is then usable.
     /// Also trigger `RegionChangeEvent::Create` here.
     pub fn activate<T>(&mut self, ctx: &mut StoreContext<EK, ER, T>) {

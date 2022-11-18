@@ -4274,7 +4274,9 @@ version = "0.1.0"
 dependencies = [
  "batch-system",
  "bytes",
+ "causal_ts",
  "collections",
+ "concurrency_manager",
  "crossbeam",
  "engine_test",
  "engine_traits",
