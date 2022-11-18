@@ -95,10 +95,10 @@ pub struct SplitInit {
 
 impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER, T> {
     pub fn on_split_region_check(&mut self) {
-        if !self.fsm.peer_mut().maybe_split(self.store_ctx) {
-            if !self.fsm.peer().may_skip_split_check() {
-                self.schedule_tick(PeerTick::SplitRegionCheck);
-            }
+        if !self.fsm.peer_mut().maybe_split(self.store_ctx)
+            && !self.fsm.peer().may_skip_split_check()
+        {
+            self.schedule_tick(PeerTick::SplitRegionCheck);
         }
     }
 }
@@ -320,6 +320,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             let mut meta = store_ctx.store_meta.lock().unwrap();
             let reader = meta.readers.get_mut(&derived.get_id()).unwrap();
             self.set_region(
+                &store_ctx.lock_manager_observer,
                 reader,
                 derived.clone(),
                 RegionChangeReason::Split,
@@ -464,7 +465,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             // todo: check if the last region needs to split again
         }
 
-        self.schedule_apply_fsm(store_ctx);
+        self.activate(store_ctx);
     }
 
     /// Check if it needs to split.
@@ -486,14 +487,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         if max_size == 0 {
             max_size = split_size * 3 / 2;
         }
-        let region_count =
-            get_region_approximate_size(tablet, self.region(), split_size * 10).map(|s| {
-                if s > max_size {
-                    s / split_size
-                } else {
-                    0
-                }
-            });
+        let region_count = get_region_approximate_size(tablet, self.region(), split_size * 10)
+            .map(|s| if s > max_size { s / split_size } else { 0 });
         match region_count {
             Ok(0) => true,
             Err(e) => {
@@ -503,12 +498,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             Ok(n) => match get_approximate_split_keys(tablet, self.region(), n) {
                 Ok(keys) => {
                     let region_epoch = self.region().get_region_epoch().clone();
-                    self.on_prepare_split_region(
-                        store_ctx,
-                        region_epoch,
-                        keys,
-                        "split_check".into(),
-                    );
+                    self.on_prepare_split_region(store_ctx, region_epoch, keys, "split_check");
                     true
                 }
                 Err(e) => {

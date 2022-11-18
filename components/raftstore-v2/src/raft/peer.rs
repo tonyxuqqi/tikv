@@ -12,7 +12,7 @@ use raftstore::{
     coprocessor::{CoprocessorHost, RegionChangeEvent, RegionChangeReason},
     store::{
         fsm::Proposal,
-        util::{Lease, RegionReadProgress},
+        util::{Lease, LockManagerNotifier, RegionReadProgress},
         Config, EntryStorage, PeerStat, ProposalQueue, ReadDelegate, ReadIndexQueue, ReadProgress,
         TxnExt,
     },
@@ -66,6 +66,9 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     pending_reads: ReadIndexQueue<QueryResChannel>,
     read_progress: Arc<RegionReadProgress>,
     leader_lease: Lease,
+
+    /// lead_transferee if this peer(leader) is in a leadership transferring.
+    lead_transferee: u64,
 
     /// region buckets.
     region_buckets: Option<BucketStat>,
@@ -151,6 +154,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::Noop)),
             proposal_control: ProposalControl::new(0),
             reactivate_memory_lock_ticks: 0,
+            lead_transferee: raft::INVALID_ID,
             may_skip_split_check: false,
         };
 
@@ -185,7 +189,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     /// has been preserved in a durable device.
     pub fn set_region(
         &mut self,
-        // host: &CoprocessorHost<impl KvEngine>,
+        lock_manager_observer: &Arc<dyn LockManagerNotifier>,
         reader: &mut ReadDelegate,
         region: metapb::Region,
         reason: RegionChangeReason,
@@ -233,7 +237,13 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             pessimistic_locks.version = self.region().get_region_epoch().get_version();
         }
 
-        // todo: CoprocessorHost
+        if self.serving() {
+            lock_manager_observer.on_region_changed(
+                self.region(),
+                RegionChangeEvent::Update(reason),
+                self.get_role(),
+            );
+        }
     }
 
     #[inline]
@@ -366,6 +376,11 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             .iter()
             .find(|p| p.get_id() == peer_id)
             .cloned()
+    }
+
+    #[inline]
+    pub fn get_role(&self) -> StateRole {
+        self.raft_group.raft.state
     }
 
     #[inline]
@@ -545,6 +560,34 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         let term = self.term();
         self.proposal_control
             .advance_apply(apply_index, term, region);
+    }
+
+    /// Register self to apply_scheduler so that the peer is then usable.
+    /// Also trigger `RegionChangeEvent::Create` here.
+    pub fn activate<T>(&mut self, ctx: &mut StoreContext<EK, ER, T>) {
+        self.schedule_apply_fsm(ctx);
+
+        ctx.lock_manager_observer.on_region_changed(
+            self.region(),
+            RegionChangeEvent::Create,
+            self.get_role(),
+        );
+    }
+
+    #[inline]
+    pub fn lead_transferee(&self) -> u64 {
+        self.lead_transferee
+    }
+
+    #[inline]
+    pub fn set_lead_transferee(&mut self, lead_transferee: u64) {
+        self.lead_transferee = lead_transferee;
+    }
+
+    /// Update states of the peer which can be changed in the previous raft
+    /// tick.
+    pub fn post_raft_group_tick(&mut self) {
+        self.lead_transferee = self.raft_group.raft.lead_transferee.unwrap_or_default();
     }
 
     #[inline]
