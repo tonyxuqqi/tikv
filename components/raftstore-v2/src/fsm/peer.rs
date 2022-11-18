@@ -189,6 +189,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
 
     fn on_start(&mut self) {
         self.schedule_tick(PeerTick::Raft);
+        self.schedule_tick(PeerTick::SplitRegionCheck);
         if self.fsm.peer.storage().is_initialized() {
             self.fsm.peer.schedule_apply_fsm(self.store_ctx);
         }
@@ -207,7 +208,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
             PeerTick::Raft => self.on_raft_tick(),
             PeerTick::PdHeartbeat => self.on_pd_heartbeat(),
             PeerTick::RaftLogGc => unimplemented!(),
-            PeerTick::SplitRegionCheck => unimplemented!(),
+            PeerTick::SplitRegionCheck => self.on_split_region_check(),
             PeerTick::CheckMerge => unimplemented!(),
             PeerTick::CheckPeerStaleState => unimplemented!(),
             PeerTick::EntryCacheEvict => unimplemented!(),
@@ -237,7 +238,12 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
                     self.on_command(cmd.request, cmd.ch)
                 }
                 PeerMsg::Tick(tick) => self.on_tick(tick),
-                PeerMsg::ApplyRes(res) => self.fsm.peer.on_apply_res(self.store_ctx, res),
+                PeerMsg::ApplyRes(res) => {
+                    self.fsm.peer.on_apply_res(self.store_ctx, res);
+                    if !self.fsm.peer.may_skip_split_check() {
+                        self.schedule_tick(PeerTick::SplitRegionCheck);
+                    }
+                }
                 PeerMsg::SplitInit(msg) => self.fsm.peer.on_split_init(self.store_ctx, msg),
                 PeerMsg::Start => self.on_start(),
                 PeerMsg::Noop => unimplemented!(),
@@ -258,6 +264,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
                     self.fsm.peer_mut().on_snapshot_generated(snap_res)
                 }
                 PeerMsg::QueryDebugInfo(ch) => self.fsm.peer_mut().on_query_debug_info(ch),
+                PeerMsg::SplitRegion(sr) => self.fsm.peer_mut().on_split_region(self.store_ctx, sr),
                 #[cfg(feature = "testexport")]
                 PeerMsg::WaitFlush(ch) => self.fsm.peer_mut().on_wait_flush(ch),
             }

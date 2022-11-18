@@ -34,7 +34,7 @@ use raft::{
     Ready, StateRole,
 };
 use raftstore::{
-    coprocessor::ApplySnapshotObserver,
+    coprocessor::{ApplySnapshotObserver, RoleChange},
     store::{
         util, ExtraStates, FetchedLogs, ReadProgress, SnapKey, TabletSnapKey, Transport, WriteTask,
     },
@@ -64,6 +64,8 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
         if self.fsm.peer_mut().tick() {
             self.fsm.peer_mut().set_has_ready();
         }
+        self.fsm.peer_mut().post_raft_group_tick();
+
         self.schedule_tick(PeerTick::Raft);
     }
 }
@@ -359,7 +361,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 .collect();
         }
         if !self.serving() {
-            self.start_destroy(&mut write_task);
+            self.start_destroy(ctx, &mut write_task);
         }
         // Ready number should increase monotonically.
         assert!(self.async_writer.known_largest_number() < ready.number());
@@ -421,7 +423,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 meta.tablet_caches
                     .insert(self.region_id(), self.tablet().clone());
             }
-            self.schedule_apply_fsm(ctx);
+            self.activate(ctx);
         }
         let persisted_message = self
             .async_writer
@@ -486,6 +488,10 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     // Init the in-memory pessimistic lock table when the peer becomes leader.
                     self.activate_in_memory_pessimistic_locks();
 
+                    // A more recent read may happen on the old leader. So max ts should
+                    // be updated after a peer becomes leader.
+                    self.require_updating_max_ts(&ctx.pd_scheduler);
+
                     // Exit entry cache warmup state when the peer becomes leader.
                     self.entry_storage_mut().clear_entry_cache_warmup_state();
                 }
@@ -496,8 +502,18 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 }
                 _ => {}
             }
+            ctx.lock_manager_observer.on_role_change(
+                self.region(),
+                RoleChange {
+                    state: ss.raft_state,
+                    leader_id: ss.leader_id,
+                    prev_lead_transferee: self.lead_transferee(),
+                    vote: self.raft_group().raft.vote,
+                },
+            );
             self.proposal_control_mut().maybe_update_term(term);
         }
+        self.set_lead_transferee(self.raft_group().raft.lead_transferee.unwrap_or_default());
     }
 
     /// If leader commits new admin commands, it may break lease assumption. So

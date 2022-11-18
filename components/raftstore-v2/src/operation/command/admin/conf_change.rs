@@ -18,9 +18,10 @@ use protobuf::Message;
 use raft::prelude::*;
 use raft_proto::ConfChangeI;
 use raftstore::{
+    coprocessor::{RegionChangeEvent, RegionChangeObserver, RegionChangeReason},
     store::{
         metrics::{PEER_ADMIN_CMD_COUNTER_VEC, PEER_PROPOSE_LOG_SIZE_HISTOGRAM},
-        util::{self, ChangePeerI, ConfChangeKind},
+        util::{self, ChangePeerI, ConfChangeKind, LockManagerNotifier},
         ProposalContext,
     },
     Error, Result,
@@ -127,7 +128,11 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         Ok(proposal_index)
     }
 
-    pub fn on_apply_res_conf_change(&mut self, conf_change: ConfChangeResult) {
+    pub fn on_apply_res_conf_change<T>(
+        &mut self,
+        ctx: &mut StoreContext<EK, ER, T>,
+        conf_change: ConfChangeResult,
+    ) {
         // TODO: cancel generating snapshot.
 
         // Snapshot is applied in memory without waiting for all entries being
@@ -144,6 +149,13 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         let remove_self = conf_change.region_state.get_state() == PeerState::Tombstone;
         self.storage_mut()
             .set_region_state(conf_change.region_state);
+
+        ctx.lock_manager_observer.on_region_changed(
+            self.region(),
+            RegionChangeEvent::Update(RegionChangeReason::ChangePeer),
+            self.get_role(),
+        );
+
         if self.is_leader() {
             info!(
                 self.logger,

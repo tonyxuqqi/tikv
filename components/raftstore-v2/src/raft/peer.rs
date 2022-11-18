@@ -1,6 +1,9 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{mem, sync::Arc};
+use std::{
+    mem,
+    sync::{atomic::Ordering, Arc},
+};
 
 use collections::HashMap;
 use crossbeam::atomic::AtomicCell;
@@ -12,7 +15,7 @@ use raftstore::{
     coprocessor::{CoprocessorHost, RegionChangeEvent, RegionChangeReason},
     store::{
         fsm::Proposal,
-        util::{Lease, RegionReadProgress},
+        util::{Lease, LockManagerNotifier, RegionReadProgress},
         Config, EntryStorage, LocksStatus, PeerStat, ProposalQueue, ReadDelegate, ReadIndexQueue,
         ReadProgress, TxnExt,
     },
@@ -35,6 +38,7 @@ use crate::{
     operation::{AsyncWriter, DestroyProgress, ProposalControl, SimpleWriteEncoder},
     router::{CmdResChannel, PeerTick, QueryResChannel},
     tablet::CachedTablet,
+    worker::PdTask,
     Result,
 };
 
@@ -67,6 +71,9 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     read_progress: Arc<RegionReadProgress>,
     leader_lease: Lease,
 
+    /// lead_transferee if this peer(leader) is in a leadership transferring.
+    lead_transferee: u64,
+
     /// region buckets.
     region_buckets: Option<BucketStat>,
     last_region_buckets: Option<BucketStat>,
@@ -79,6 +86,8 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
 
     /// Check whether this proposal can be proposed based on its epoch.
     proposal_control: ProposalControl,
+    reactivate_memory_lock_ticks: usize,
+    may_skip_split_check: bool,
 }
 
 impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
@@ -152,6 +161,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             proposal_control: ProposalControl::new(0),
             need_schedule_tick: false,
             pending_ticks: Vec::new(),
+            reactivate_memory_lock_ticks: 0,
+            lead_transferee: raft::INVALID_ID,
+            may_skip_split_check: false,
         };
 
         // If this region has only one peer and I am the one, campaign directly.
@@ -185,7 +197,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     /// has been preserved in a durable device.
     pub fn set_region(
         &mut self,
-        // host: &CoprocessorHost<impl KvEngine>,
+        lock_manager_observer: &Arc<dyn LockManagerNotifier>,
         reader: &mut ReadDelegate,
         region: metapb::Region,
         reason: RegionChangeReason,
@@ -233,7 +245,13 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             pessimistic_locks.version = self.region().get_region_epoch().get_version();
         }
 
-        // todo: CoprocessorHost
+        if self.serving() {
+            lock_manager_observer.on_region_changed(
+                self.region(),
+                RegionChangeEvent::Update(reason),
+                self.get_role(),
+            );
+        }
     }
 
     #[inline]
@@ -366,6 +384,11 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             .iter()
             .find(|p| p.get_id() == peer_id)
             .cloned()
+    }
+
+    #[inline]
+    pub fn get_role(&self) -> StateRole {
+        self.raft_group.raft.state
     }
 
     #[inline]
@@ -572,5 +595,68 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     #[inline]
     pub fn take_pending_ticks(&mut self) -> Vec<PeerTick> {
         mem::take(&mut self.pending_ticks)
+    }
+
+    pub fn require_updating_max_ts(&self, pd_scheduler: &Scheduler<PdTask>) {
+        let epoch = self.region().get_region_epoch();
+        let term_low_bits = self.term() & ((1 << 32) - 1); // 32 bits
+        let version_lot_bits = epoch.get_version() & ((1 << 31) - 1); // 31 bits
+        let initial_status = (term_low_bits << 32) | (version_lot_bits << 1);
+        self.txn_ext
+            .max_ts_sync_status
+            .store(initial_status, Ordering::SeqCst);
+        info!(
+            self.logger,
+            "require updating max ts";
+            "initial_status" => initial_status,
+        );
+        if let Err(e) = pd_scheduler.schedule(PdTask::UpdateMaxTimestamp {
+            region_id: self.region().id,
+            initial_status,
+            txn_ext: self.txn_ext.clone(),
+        }) {
+            error!(
+                self.logger,
+                "failed to update max ts";
+                "err" => ?e,
+            );
+        }
+    }
+    /// Register self to apply_scheduler so that the peer is then usable.
+    /// Also trigger `RegionChangeEvent::Create` here.
+    pub fn activate<T>(&mut self, ctx: &mut StoreContext<EK, ER, T>) {
+        self.schedule_apply_fsm(ctx);
+
+        ctx.lock_manager_observer.on_region_changed(
+            self.region(),
+            RegionChangeEvent::Create,
+            self.get_role(),
+        );
+    }
+
+    #[inline]
+    pub fn lead_transferee(&self) -> u64 {
+        self.lead_transferee
+    }
+
+    #[inline]
+    pub fn set_lead_transferee(&mut self, lead_transferee: u64) {
+        self.lead_transferee = lead_transferee;
+    }
+
+    /// Update states of the peer which can be changed in the previous raft
+    /// tick.
+    pub fn post_raft_group_tick(&mut self) {
+        self.lead_transferee = self.raft_group.raft.lead_transferee.unwrap_or_default();
+    }
+
+    #[inline]
+    pub fn may_skip_split_check(&self) -> bool {
+        self.may_skip_split_check
+    }
+
+    #[inline]
+    pub fn set_may_skip_split_check(&mut self, skip: bool) {
+        self.may_skip_split_check = skip;
     }
 }
