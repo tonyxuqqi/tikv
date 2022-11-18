@@ -15,7 +15,7 @@ use super::{
     },
     ApplyRes,
 };
-use crate::operation::SplitInit;
+use crate::operation::{SplitInit, SplitRegion};
 
 #[derive(Debug, Clone, Copy, PartialEq, Hash)]
 #[repr(u8)]
@@ -141,6 +141,7 @@ pub enum PeerMsg {
         need_scheduled: bool,
     },
     QueryDebugInfo(DebugInfoChannel),
+    SplitRegion(SplitRegion),
     /// A message that used to check if a flush is happened.
     #[cfg(feature = "testexport")]
     WaitFlush(super::FlushChannel),
@@ -187,6 +188,7 @@ impl fmt::Debug for PeerMsg {
             PeerMsg::LogsFetched(fetched) => write!(fmt, "LogsFetched {:?}", fetched),
             PeerMsg::SnapshotGenerated(_) => write!(fmt, "SnapshotGenerated"),
             PeerMsg::QueryDebugInfo(_) => write!(fmt, "QueryDebugInfo"),
+            PeerMsg::SplitRegion(_) => write!(fmt, "SplitRegion"),
             #[cfg(feature = "testexport")]
             PeerMsg::WaitFlush(_) => write!(fmt, "FlushMessages"),
         }

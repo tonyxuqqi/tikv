@@ -8,6 +8,7 @@ mod ready;
 
 pub use command::{
     AdminCmdResult, CommittedEntries, ProposalControl, SimpleWriteDecoder, SimpleWriteEncoder,
+    SplitRegion,
 };
 pub use life::DestroyProgress;
 pub use ready::{AsyncWriter, GenSnapTask, SnapState};

@@ -4302,6 +4302,7 @@ dependencies = [
  "smallvec",
  "tempfile",
  "test_pd",
+ "test_pd_client",
  "test_util",
  "tikv_util",
  "time",
