@@ -20,7 +20,7 @@ use kvproto::{
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse, StatusCmdType},
     raft_serverpb::RaftApplyState,
 };
-use raft::{Ready, StateRole};
+use raft::Ready;
 use raftstore::{
     errors::RAFTSTORE_IS_BUSY,
     store::{
