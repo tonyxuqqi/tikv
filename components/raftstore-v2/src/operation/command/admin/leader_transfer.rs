@@ -31,7 +31,7 @@ use crate::{
     batch::StoreContext,
     fsm::ApplyResReporter,
     raft::{Apply, Peer},
-    router::{CmdResChannel, PeerMsg},
+    router::{CmdResChannel, PeerMsg, PeerTick},
 };
 
 fn get_transfer_leader_cmd(msg: &RaftCmdRequest) -> Option<&TransferLeaderRequest> {
@@ -66,9 +66,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     /// locks to propose (detected in function on_transfer_leader_msg).
     ///    1. Leader firstly proposes pessimistic locks and then proposes a
     ///       TransferLeader command.
-    ///    2. ack_transfer_leader_msg on follower again:
-    ///        The follower applies the TransferLeader command and replies an
-    ///        ACK with special context TRANSFER_LEADER_COMMAND_REPLY_CTX.
+    ///    2. The follower applies the TransferLeader command and replies an
+    ///       ACK with special context TRANSFER_LEADER_COMMAND_REPLY_CTX.
     ///
     /// See also: tikv/rfcs#37.
     pub fn propose_transfer_leader<T>(
@@ -336,8 +335,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             return true;
         }
         pessimistic_locks.status = LocksStatus::TransferringLeader;
-        self.set_reactivate_memory_lock_ticks(0);
-        self.register_reactivate_memory_lock_tick();
+        self.set_need_register_reactivate_memory_lock_tick();
+        self.pending_ticks_mut()
+            .push(PeerTick::ReactivateMemoryLock);
 
         // 2. Propose pessimistic locks
         if pessimistic_locks.is_empty() {
@@ -381,7 +381,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             "propose {} locks before transferring leader", cmd.get_requests().len();
         );
         let (PeerMsg::RaftCommand(req), sub) = PeerMsg::raft_command(cmd) else {unreachable!()};
-        self.on_admin_command(ctx, req.request, req.ch);
+        self.on_write_command(ctx, req.request, req.ch);
         true
     }
 }
