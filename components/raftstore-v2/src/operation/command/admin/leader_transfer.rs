@@ -31,7 +31,7 @@ use crate::{
     batch::StoreContext,
     fsm::ApplyResReporter,
     raft::{Apply, Peer},
-    router::{CmdResChannel, PeerMsg},
+    router::{CmdResChannel, PeerMsg, PeerTick},
 };
 
 fn get_transfer_leader_cmd(msg: &RaftCmdRequest) -> Option<&TransferLeaderRequest> {
@@ -336,6 +336,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         }
         pessimistic_locks.status = LocksStatus::TransferringLeader;
         self.set_need_register_reactivate_memory_lock_tick();
+        self.pending_ticks_mut()
+            .push(PeerTick::ReactivateMemoryLock);
 
         // 2. Propose pessimistic locks
         if pessimistic_locks.is_empty() {

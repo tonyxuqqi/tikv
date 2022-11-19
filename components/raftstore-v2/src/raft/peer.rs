@@ -593,6 +593,11 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     }
 
     #[inline]
+    pub fn pending_ticks_mut(&mut self) -> &mut Vec<PeerTick> {
+        &mut self.pending_ticks
+    }
+
+    #[inline]
     pub fn take_pending_ticks(&mut self) -> Vec<PeerTick> {
         mem::take(&mut self.pending_ticks)
     }
