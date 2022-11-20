@@ -19,10 +19,10 @@
 use std::cmp;
 
 use batch_system::{Fsm, FsmScheduler, Mailbox};
-use engine_traits::{KvEngine, RaftEngine, WriteBatch, WriteOptions};
+use engine_traits::{KvEngine, RaftEngine, RaftLogBatch, WriteBatch, WriteOptions};
 use kvproto::{
     raft_cmdpb::{AdminCmdType, CmdType, RaftCmdRequest, RaftCmdResponse, RaftRequestHeader},
-    raft_serverpb::RegionLocalState,
+    raft_serverpb::{RaftApplyState, RegionLocalState},
 };
 use protobuf::Message;
 use raft::eraftpb::{ConfChange, ConfChangeV2, Entry, EntryType};
@@ -59,7 +59,7 @@ mod admin;
 mod control;
 mod write;
 
-pub use admin::{AdminCmdResult, SplitInit, SplitResult};
+pub use admin::{AdminCmdResult, SplitInit, SplitRegion, SplitResult};
 pub use control::ProposalControl;
 pub use write::{SimpleWriteDecoder, SimpleWriteEncoder};
 
@@ -298,8 +298,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
 
         for admin_res in apply_res.admin_result {
             match admin_res {
+                AdminCmdResult::None => unreachable!(),
                 AdminCmdResult::ConfChange(conf_change) => {
-                    self.on_apply_res_conf_change(conf_change)
+                    self.on_apply_res_conf_change(ctx, conf_change)
                 }
                 AdminCmdResult::SplitRegion(SplitResult {
                     regions,
@@ -307,6 +308,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     tablet_index,
                 }) => self.on_ready_split_region(ctx, derived_index, tablet_index, regions),
                 AdminCmdResult::SplitRegion(_) => unimplemented!(),
+                AdminCmdResult::TransferLeader(term) => self.on_transfer_leader(ctx, term),
             }
         }
 
@@ -315,6 +317,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         self.proposal_control_advance_apply(apply_res.applied_index);
         let is_leader = self.is_leader();
         let progress_to_be_updated = self.entry_storage().applied_term() != apply_res.applied_term;
+        let region_id = self.region_id();
         let entry_storage = self.entry_storage_mut();
         entry_storage
             .apply_state_mut()
@@ -323,6 +326,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         if !is_leader {
             entry_storage.compact_entry_cache(apply_res.applied_index + 1);
         }
+        let mut wb = entry_storage.raft_engine().log_batch(10);
+        wb.put_apply_state(region_id, entry_storage.apply_state());
+        entry_storage.raft_engine().consume(&mut wb, false);
         self.handle_read_on_apply(
             ctx,
             apply_res.applied_term,
@@ -450,7 +456,9 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
                 AdminCmdType::PrepareMerge => unimplemented!(),
                 AdminCmdType::CommitMerge => unimplemented!(),
                 AdminCmdType::RollbackMerge => unimplemented!(),
-                AdminCmdType::TransferLeader => unreachable!(),
+                AdminCmdType::TransferLeader => {
+                    self.apply_transfer_leader(admin_req, entry.term)?
+                }
                 AdminCmdType::ChangePeer => {
                     self.apply_conf_change(entry.get_index(), admin_req, conf_change.unwrap())?
                 }
@@ -467,7 +475,10 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
                 }
             };
 
-            self.push_admin_result(admin_result);
+            match admin_result {
+                AdminCmdResult::None => (),
+                _ => self.push_admin_result(admin_result),
+            }
             let mut resp = new_response(req.get_header());
             resp.set_admin_response(admin_resp);
             Ok(resp)

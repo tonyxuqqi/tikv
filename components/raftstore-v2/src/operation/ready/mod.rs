@@ -20,16 +20,30 @@
 mod async_writer;
 mod snapshot;
 
-use std::cmp;
+use std::{cmp, path::PathBuf, sync::Arc};
 
-use engine_traits::{KvEngine, RaftEngine};
+use engine_traits::{KvEngine, MiscExt, OpenOptions, RaftEngine, TabletFactory};
 use error_code::ErrorCodeExt;
-use kvproto::{raft_cmdpb::AdminCmdType, raft_serverpb::RaftMessage};
+use kvproto::{
+    raft_cmdpb::AdminCmdType,
+    raft_serverpb::{PeerState, RaftMessage, RaftSnapshotData},
+};
 use protobuf::Message as _;
-use raft::{eraftpb, Ready, StateRole};
-use raftstore::store::{util, ExtraStates, FetchedLogs, ReadProgress, Transport, WriteTask};
-use slog::{debug, error, trace, warn};
-use tikv_util::time::{duration_to_sec, monotonic_raw_now};
+use raft::{
+    eraftpb::{self, MessageType, Snapshot},
+    Ready, StateRole,
+};
+use raftstore::{
+    coprocessor::{ApplySnapshotObserver, RoleChange},
+    store::{
+        util, ExtraStates, FetchedLogs, ReadProgress, SnapKey, TabletSnapKey, Transport, WriteTask,
+    },
+};
+use slog::{debug, error, info, trace, warn};
+use tikv_util::{
+    box_err,
+    time::{duration_to_sec, monotonic_raw_now},
+};
 
 pub use self::{
     async_writer::AsyncWriter,
@@ -40,7 +54,9 @@ use crate::{
     fsm::PeerFsmDelegate,
     raft::{Peer, Storage},
     router::{ApplyTask, PeerTick},
+    Result,
 };
+
 impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER, T> {
     /// Raft relies on periodic ticks to keep the state machine sync with other
     /// peers.
@@ -48,6 +64,8 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
         if self.fsm.peer_mut().tick() {
             self.fsm.peer_mut().set_has_ready();
         }
+        self.fsm.peer_mut().post_raft_group_tick();
+
         self.schedule_tick(PeerTick::Raft);
     }
 }
@@ -109,12 +127,17 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             unimplemented!();
             // return;
         }
+
         // TODO: drop all msg append when the peer is uninitialized and has conflict
         // ranges with other peers.
         self.insert_peer_cache(msg.take_from_peer());
-        if let Err(e) = self.raft_group_mut().step(msg.take_message()) {
+
+        if msg.get_message().get_msg_type() == MessageType::MsgTransferLeader {
+            self.on_transfer_leader_msg(ctx, msg.get_message(), msg.disk_usage)
+        } else if let Err(e) = self.raft_group_mut().step(msg.take_message()) {
             error!(self.logger, "raft step error"; "err" => ?e);
         }
+
         self.set_has_ready();
     }
 
@@ -329,7 +352,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         let ready_number = ready.number();
         let mut write_task = WriteTask::new(self.region_id(), self.peer_id(), ready_number);
         self.storage_mut()
-            .handle_raft_ready(&mut ready, &mut write_task);
+            .handle_raft_ready(&mut ready, &mut write_task, ctx);
         if !ready.persisted_messages().is_empty() {
             write_task.messages = ready
                 .take_persisted_messages()
@@ -338,7 +361,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 .collect();
         }
         if !self.serving() {
-            self.start_destroy(&mut write_task);
+            self.start_destroy(ctx, &mut write_task);
         }
         // Ready number should increase monotonically.
         assert!(self.async_writer.known_largest_number() < ready.number());
@@ -378,10 +401,29 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         ctx: &mut StoreContext<EK, ER, T>,
         peer_id: u64,
         ready_number: u64,
+        need_scheduled: bool,
     ) {
         if peer_id != self.peer_id() {
             error!(self.logger, "peer id not matched"; "persisted_peer_id" => peer_id, "persisted_number" => ready_number);
             return;
+        }
+        if need_scheduled {
+            self.storage_mut().after_applied_snapshot();
+            let suffix = self.storage().raft_state().last_index;
+            let region_id = self.storage().get_region_id();
+            let tablet = ctx
+                .tablet_factory
+                .open_tablet(region_id, Some(suffix), OpenOptions::default())
+                .unwrap();
+            self.tablet_mut().set(tablet);
+            {
+                let mut meta = ctx.store_meta.lock().unwrap();
+                meta.readers
+                    .insert(self.region_id(), self.generate_read_delegate());
+                meta.tablet_caches
+                    .insert(self.region_id(), self.tablet().clone());
+            }
+            self.activate(ctx);
         }
         let persisted_message = self
             .async_writer
@@ -443,17 +485,35 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     // latency.
                     self.raft_group_mut().skip_bcast_commit(false);
 
+                    // Init the in-memory pessimistic lock table when the peer becomes leader.
+                    self.activate_in_memory_pessimistic_locks();
+
+                    // A more recent read may happen on the old leader. So max ts should
+                    // be updated after a peer becomes leader.
+                    self.require_updating_max_ts(&ctx.pd_scheduler);
+
                     // Exit entry cache warmup state when the peer becomes leader.
                     self.entry_storage_mut().clear_entry_cache_warmup_state();
                 }
                 StateRole::Follower => {
                     self.leader_lease_mut().expire();
                     self.storage_mut().cancel_generating_snap(None);
+                    self.clear_in_memory_pessimistic_locks();
                 }
                 _ => {}
             }
+            ctx.lock_manager_observer.on_role_change(
+                self.region(),
+                RoleChange {
+                    state: ss.raft_state,
+                    leader_id: ss.leader_id,
+                    prev_lead_transferee: self.lead_transferee(),
+                    vote: self.raft_group().raft.vote,
+                },
+            );
             self.proposal_control_mut().maybe_update_term(term);
         }
+        self.set_lead_transferee(self.raft_group().raft.lead_transferee.unwrap_or_default());
     }
 
     /// If leader commits new admin commands, it may break lease assumption. So
@@ -499,11 +559,23 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
 impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
     /// Apply the ready to the storage. If there is any states need to be
     /// persisted, it will be written to `write_task`.
-    fn handle_raft_ready(&mut self, ready: &mut Ready, write_task: &mut WriteTask<EK, ER>) {
+    fn handle_raft_ready<T: Transport>(
+        &mut self,
+        ready: &mut Ready,
+        write_task: &mut WriteTask<EK, ER>,
+        ctx: &mut StoreContext<EK, ER, T>,
+    ) {
         let prev_raft_state = self.entry_storage().raft_state().clone();
         let ever_persisted = self.ever_persisted();
 
-        // TODO: handle snapshot
+        if !ready.snapshot().is_empty() {
+            let _ = self.apply_snapshot(
+                ready.snapshot(),
+                write_task,
+                ctx.snap_mgr.clone(),
+                ctx.tablet_factory.clone(),
+            );
+        }
 
         let entry_storage = self.entry_storage_mut();
         if !ready.entries().is_empty() {

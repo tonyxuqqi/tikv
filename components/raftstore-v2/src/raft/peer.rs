@@ -1,6 +1,9 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::{mem, sync::Arc};
+use std::{
+    mem,
+    sync::{atomic::Ordering, Arc},
+};
 
 use collections::HashMap;
 use crossbeam::atomic::AtomicCell;
@@ -12,9 +15,9 @@ use raftstore::{
     coprocessor::{CoprocessorHost, RegionChangeEvent, RegionChangeReason},
     store::{
         fsm::Proposal,
-        util::{Lease, RegionReadProgress},
-        Config, EntryStorage, PeerStat, ProposalQueue, ReadDelegate, ReadIndexQueue, ReadProgress,
-        TxnExt,
+        util::{Lease, LockManagerNotifier, RegionReadProgress},
+        Config, EntryStorage, LocksStatus, PeerStat, ProposalQueue, ReadDelegate, ReadIndexQueue,
+        ReadProgress, TxnExt,
     },
     Error,
 };
@@ -33,8 +36,9 @@ use crate::{
     batch::StoreContext,
     fsm::{ApplyFsm, ApplyScheduler},
     operation::{AsyncWriter, DestroyProgress, ProposalControl, SimpleWriteEncoder},
-    router::{CmdResChannel, QueryResChannel},
+    router::{CmdResChannel, PeerTick, QueryResChannel},
     tablet::CachedTablet,
+    worker::PdTask,
     Result,
 };
 
@@ -67,6 +71,9 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     read_progress: Arc<RegionReadProgress>,
     leader_lease: Lease,
 
+    /// lead_transferee if this peer(leader) is in a leadership transferring.
+    lead_transferee: u64,
+
     /// region buckets.
     region_buckets: Option<BucketStat>,
     last_region_buckets: Option<BucketStat>,
@@ -74,9 +81,13 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     /// Transaction extensions related to this peer.
     txn_ext: Arc<TxnExt>,
     txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
+    need_schedule_tick: bool,
+    pending_ticks: Vec<PeerTick>,
 
     /// Check whether this proposal can be proposed based on its epoch.
     proposal_control: ProposalControl,
+    reactivate_memory_lock_ticks: usize,
+    may_skip_split_check: bool,
 }
 
 impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
@@ -148,6 +159,11 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             txn_ext: Arc::default(),
             txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::Noop)),
             proposal_control: ProposalControl::new(0),
+            need_schedule_tick: false,
+            pending_ticks: Vec::new(),
+            reactivate_memory_lock_ticks: 0,
+            lead_transferee: raft::INVALID_ID,
+            may_skip_split_check: false,
         };
 
         // If this region has only one peer and I am the one, campaign directly.
@@ -181,7 +197,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     /// has been preserved in a durable device.
     pub fn set_region(
         &mut self,
-        // host: &CoprocessorHost<impl KvEngine>,
+        lock_manager_observer: &Arc<dyn LockManagerNotifier>,
         reader: &mut ReadDelegate,
         region: metapb::Region,
         reason: RegionChangeReason,
@@ -229,7 +245,13 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             pessimistic_locks.version = self.region().get_region_epoch().get_version();
         }
 
-        // todo: CoprocessorHost
+        if self.serving() {
+            lock_manager_observer.on_region_changed(
+                self.region(),
+                RegionChangeEvent::Update(reason),
+                self.get_role(),
+            );
+        }
     }
 
     #[inline]
@@ -365,6 +387,11 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     }
 
     #[inline]
+    pub fn get_role(&self) -> StateRole {
+        self.raft_group.raft.state
+    }
+
+    #[inline]
     pub fn is_leader(&self) -> bool {
         self.raft_group.raft.state == StateRole::Leader
     }
@@ -458,6 +485,51 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         self.apply_scheduler = Some(apply_scheduler);
     }
 
+    /// Whether the snapshot is handling.
+    /// See the comments of `check_snap_status` for more details.
+    #[inline]
+    pub fn is_handling_snapshot(&self) -> bool {
+        // todo
+        false
+    }
+
+    /// Returns `true` if the raft group has replicated a snapshot but not
+    /// committed it yet.
+    #[inline]
+    pub fn has_pending_snapshot(&self) -> bool {
+        self.raft_group().snap().is_some()
+    }
+
+    #[inline]
+    pub fn set_need_register_reactivate_memory_lock_tick(&mut self) {
+        self.need_schedule_tick = true;
+    }
+
+    #[inline]
+    pub fn need_schedule_tick(&self) -> bool {
+        self.need_schedule_tick
+    }
+
+    #[inline]
+    pub fn reset_need_schedule_tick(&mut self) {
+        self.need_schedule_tick = false;
+    }
+
+    pub fn activate_in_memory_pessimistic_locks(&mut self) {
+        let mut pessimistic_locks = self.txn_ext.pessimistic_locks.write();
+        pessimistic_locks.status = LocksStatus::Normal;
+        pessimistic_locks.term = self.term();
+        pessimistic_locks.version = self.region().get_region_epoch().get_version();
+    }
+
+    pub fn clear_in_memory_pessimistic_locks(&mut self) {
+        let mut pessimistic_locks = self.txn_ext.pessimistic_locks.write();
+        pessimistic_locks.status = LocksStatus::NotLeader;
+        pessimistic_locks.clear();
+        pessimistic_locks.term = self.term();
+        pessimistic_locks.version = self.region().get_region_epoch().get_version();
+    }
+
     #[inline]
     pub fn post_split(&mut self) {
         self.reset_region_buckets();
@@ -466,6 +538,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     pub fn reset_region_buckets(&mut self) {
         if self.region_buckets.is_some() {
             self.last_region_buckets = self.region_buckets.take();
+            self.region_buckets = None;
         }
     }
 
@@ -484,10 +557,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     #[inline]
     pub fn txn_ext(&self) -> &Arc<TxnExt> {
         &self.txn_ext
-    }
-
-    pub fn heartbeat_pd<T>(&self, store_ctx: &StoreContext<EK, ER, T>) {
-        // todo
     }
 
     pub fn generate_read_delegate(&self) -> ReadDelegate {
@@ -521,5 +590,78 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         let term = self.term();
         self.proposal_control
             .advance_apply(apply_index, term, region);
+    }
+
+    #[inline]
+    pub fn pending_ticks_mut(&mut self) -> &mut Vec<PeerTick> {
+        &mut self.pending_ticks
+    }
+
+    #[inline]
+    pub fn take_pending_ticks(&mut self) -> Vec<PeerTick> {
+        mem::take(&mut self.pending_ticks)
+    }
+
+    pub fn require_updating_max_ts(&self, pd_scheduler: &Scheduler<PdTask>) {
+        let epoch = self.region().get_region_epoch();
+        let term_low_bits = self.term() & ((1 << 32) - 1); // 32 bits
+        let version_lot_bits = epoch.get_version() & ((1 << 31) - 1); // 31 bits
+        let initial_status = (term_low_bits << 32) | (version_lot_bits << 1);
+        self.txn_ext
+            .max_ts_sync_status
+            .store(initial_status, Ordering::SeqCst);
+        info!(
+            self.logger,
+            "require updating max ts";
+            "initial_status" => initial_status,
+        );
+        if let Err(e) = pd_scheduler.schedule(PdTask::UpdateMaxTimestamp {
+            region_id: self.region().id,
+            initial_status,
+            txn_ext: self.txn_ext.clone(),
+        }) {
+            error!(
+                self.logger,
+                "failed to update max ts";
+                "err" => ?e,
+            );
+        }
+    }
+    /// Register self to apply_scheduler so that the peer is then usable.
+    /// Also trigger `RegionChangeEvent::Create` here.
+    pub fn activate<T>(&mut self, ctx: &mut StoreContext<EK, ER, T>) {
+        self.schedule_apply_fsm(ctx);
+
+        ctx.lock_manager_observer.on_region_changed(
+            self.region(),
+            RegionChangeEvent::Create,
+            self.get_role(),
+        );
+    }
+
+    #[inline]
+    pub fn lead_transferee(&self) -> u64 {
+        self.lead_transferee
+    }
+
+    #[inline]
+    pub fn set_lead_transferee(&mut self, lead_transferee: u64) {
+        self.lead_transferee = lead_transferee;
+    }
+
+    /// Update states of the peer which can be changed in the previous raft
+    /// tick.
+    pub fn post_raft_group_tick(&mut self) {
+        self.lead_transferee = self.raft_group.raft.lead_transferee.unwrap_or_default();
+    }
+
+    #[inline]
+    pub fn may_skip_split_check(&self) -> bool {
+        self.may_skip_split_check
+    }
+
+    #[inline]
+    pub fn set_may_skip_split_check(&mut self, skip: bool) {
+        self.may_skip_split_check = skip;
     }
 }

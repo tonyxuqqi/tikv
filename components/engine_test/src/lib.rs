@@ -128,12 +128,17 @@ pub mod kv {
             db_opt: DbOptions,
             cf_opts: Vec<(&'static str, KvTestCfOptions)>,
         ) -> Self {
-            Self {
+            let f = Self {
                 root_path: root_path.to_path_buf(),
                 db_opt,
                 cf_opts,
                 root_db: Arc::new(Mutex::default()),
+            };
+            let tablet_path = f.tablets_path();
+            if !tablet_path.exists() {
+                std::fs::create_dir_all(f.tablets_path()).unwrap();
             }
+            f
         }
 
         fn create_tablet(&self, tablet_path: &Path) -> Result<KvTestEngine> {
