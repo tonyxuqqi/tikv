@@ -2,15 +2,32 @@
 
 use std::sync::{Arc, Mutex};
 
+use concurrency_manager::ConcurrencyManager;
 use engine_traits::{KvEngine, OpenOptions, RaftEngine, TabletFactory};
+use futures::executor::block_on;
 use kvproto::{metapb, replication_modepb::ReplicationStatus};
 use pd_client::PdClient;
-use raftstore::store::{GlobalReplicationState, TabletSnapManager, Transport, RAFT_INIT_LOG_INDEX};
+use raft::StateRole;
+use raftstore::{
+    coprocessor::{RegionChangeEvent, RoleChange},
+    store::{
+        util::LockManagerNotifier, GlobalReplicationState, TabletSnapManager, Transport,
+        RAFT_INIT_LOG_INDEX,
+    },
+};
 use raftstore_v2::{router::RaftRouter, Bootstrap, StoreSystem};
 use slog::{o, Logger};
 use tikv_util::{config::VersionTrack, worker::Worker};
 
 use crate::server::{node::init_store, Result};
+
+struct DummyLockManagerObserver {}
+
+impl LockManagerNotifier for DummyLockManagerObserver {
+    fn on_region_changed(&self, _: &metapb::Region, _: RegionChangeEvent, _: StateRole) {}
+
+    fn on_role_change(&self, _: &metapb::Region, _: RoleChange) {}
+}
 
 /// A wrapper for the raftstore which runs Multi-Raft.
 // TODO: we will rename another better name like RaftStore later.
@@ -171,15 +188,24 @@ where
         self.has_started = true;
         let cfg = self.store_cfg.clone();
 
+        // Initialize concurrency manager
+        let latest_ts =
+            block_on(self.pd_client.get_tso()).expect("failed to get timestamp from PD");
+        let concurrency_manager = ConcurrencyManager::new(latest_ts);
+
         self.system.start(
             store_id,
             cfg,
             raft_engine,
             self.factory.clone(),
             trans,
+            self.pd_client.clone(),
             router.store_router(),
             router.store_meta().clone(),
             snap_mgr,
+            concurrency_manager,
+            None,
+            Arc::new(DummyLockManagerObserver {}),
         )?;
         Ok(())
     }
