@@ -81,7 +81,7 @@ impl Default for Config {
         let cpu_num = SysQuota::cpu_cores_quota();
         Config {
             data_dir: DEFAULT_DATA_DIR.to_owned(),
-            engine: EngineType::RaftKv,
+            engine: EngineType::RaftKvV2,
             gc_ratio_threshold: DEFAULT_GC_RATIO_THRESHOLD,
             max_key_size: DEFAULT_MAX_KEY_SIZE,
             scheduler_concurrency: DEFAULT_SCHED_CONCURRENCY,
