@@ -168,24 +168,6 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T> StoreFsmDelegate<'a, EK, ER, T> {
         }
     }
 
-    pub fn schedule_tick(&mut self, tick: StoreTick, timeout: Duration) {
-        if !is_zero_duration(&timeout) {
-            let mb = self.store_ctx.router.control_mailbox();
-            let logger = self.fsm.store.logger().clone();
-            let delay = self.store_ctx.timer.delay(timeout).compat().map(move |_| {
-                if let Err(e) = mb.force_send(StoreMsg::Tick(tick)) {
-                    info!(
-                        logger,
-                        "failed to schedule store tick, are we shutting down?";
-                        "tick" => ?tick,
-                        "err" => ?e
-                    );
-                }
-            });
-            poll_future_notify(delay);
-        }
-    }
-
     fn on_tick(&mut self, tick: StoreTick) {
         match tick {
             StoreTick::PdStoreHeartbeat => self.on_pd_store_heartbeat(),

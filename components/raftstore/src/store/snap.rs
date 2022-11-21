@@ -1970,22 +1970,22 @@ impl TabletSnapManager {
 
     pub fn get_tablet_checkpointer_path(&self, key: &TabletSnapKey) -> PathBuf {
         let suffix = key.get_gen_suffix();
-        PathBuf::from(&self.base).join(&suffix)
+        PathBuf::from(&self.base).join(suffix)
     }
 
     pub fn get_recv_tablet_path(&self, key: &TabletSnapKey) -> PathBuf {
         let prefix = format!("{}_{}", SNAP_REV_PREFIX, key);
-        PathBuf::from(&self.base).join(&prefix)
+        PathBuf::from(&self.base).join(prefix)
     }
 
     pub fn get_final_name_for_recv(&self, key: &TabletSnapKey) -> PathBuf {
         let prefix = format!("{}_{}", SNAP_REV_PREFIX, key);
-        PathBuf::from(&self.base).join(&prefix)
+        PathBuf::from(&self.base).join(prefix)
     }
 
     pub fn get_tmp_name_for_recv(&self, key: &TabletSnapKey) -> PathBuf {
         let prefix = format!("{}_{}{}", SNAP_REV_PREFIX, key, TMP_FILE_SUFFIX);
-        PathBuf::from(&self.base).join(&prefix)
+        PathBuf::from(&self.base).join(prefix)
     }
 }
 

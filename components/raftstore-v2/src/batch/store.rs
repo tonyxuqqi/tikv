@@ -447,18 +447,6 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
             ),
         );
 
-        let pd_scheduler = workers.pd_worker.start(
-            "pd-worker",
-            PdRunner::new(
-                pd_client,
-                raft_engine.clone(),
-                tablet_factory.clone(),
-                router.clone(),
-                workers.pd_worker.remote(),
-                self.logger.clone(),
-            ),
-        );
-
         let mut builder = StorePollerBuilder::new(
             cfg.clone(),
             store_id,

@@ -7,13 +7,9 @@ use engine_traits::{KvEngine, OpenOptions, RaftEngine, TabletFactory};
 use futures::executor::block_on;
 use kvproto::{metapb, replication_modepb::ReplicationStatus};
 use pd_client::PdClient;
-use raft::StateRole;
-use raftstore::{
-    coprocessor::{RegionChangeEvent, RoleChange},
-    store::{
-        util::LockManagerNotifier, GlobalReplicationState, TabletSnapManager, Transport,
-        RAFT_INIT_LOG_INDEX,
-    },
+use raftstore::store::{
+    util::LockManagerNotifier, GlobalReplicationState, TabletSnapManager, Transport,
+    RAFT_INIT_LOG_INDEX,
 };
 use raftstore_v2::{router::RaftRouter, Bootstrap, StoreSystem};
 use slog::{o, Logger};

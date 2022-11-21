@@ -320,7 +320,7 @@ impl TestNode {
         &self.running_state().unwrap().factory
     }
 
-    pub fn pd_client(&self) -> &Arc<RpcClient> {
+    pub fn pd_client(&self) -> &Arc<TestPdClient> {
         &self.pd_client
     }
 

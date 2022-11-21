@@ -14,7 +14,6 @@ use kvproto::{
     raft_cmdpb::{AdminRequest, RaftCmdRequest},
 };
 use pd_client::PdClient;
-use raftstore::store::util::KeysInfoFormatter;
 use raftstore::store::{util::KeysInfoFormatter, TxnExt};
 use slog::{error, info, Logger};
 use tikv_util::{time::UnixSecs, worker::Runnable};
