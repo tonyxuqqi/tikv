@@ -193,14 +193,25 @@ fn test_config_change_and_apply_snapshot() {
         let tablet = tablet_factory
             .open_tablet(region_id, None, OpenOptions::default().set_cache_only(true))
             .unwrap();
-        assert!(tablet.get_value(keys::data_key(b"key").as_slice()).unwrap().is_none());
+        assert!(
+            tablet
+                .get_value(keys::data_key(b"key").as_slice())
+                .unwrap()
+                .is_none()
+        );
         let (msg, mut sub) = PeerMsg::raft_command(req.clone());
         router.send(region_id, msg).unwrap();
         assert!(block_on(sub.wait_proposed()));
         assert!(block_on(sub.wait_committed()));
         let resp = block_on(sub.result()).unwrap();
         assert!(!resp.get_header().has_error(), "{:?}", resp);
-        assert_eq!(tablet.get_value(keys::data_key(b"key").as_slice()).unwrap().unwrap(), b"value");
+        assert_eq!(
+            tablet
+                .get_value(keys::data_key(b"key").as_slice())
+                .unwrap()
+                .unwrap(),
+            b"value"
+        );
 
         let mut delete_req = Request::default();
         delete_req.set_cmd_type(CmdType::Delete);
@@ -213,7 +224,10 @@ fn test_config_change_and_apply_snapshot() {
         assert!(block_on(sub.wait_committed()));
         let resp = block_on(sub.result()).unwrap();
         assert!(!resp.get_header().has_error(), "{:?}", resp);
-        assert_matches!(tablet.get_value(keys::data_key(b"key").as_slice()), Ok(None));
+        assert_matches!(
+            tablet.get_value(keys::data_key(b"key").as_slice()),
+            Ok(None)
+        );
     }
     println!("finish write test");
     let mut req = router0.new_request_for(region_id);
@@ -272,7 +286,12 @@ fn test_config_change_and_apply_snapshot() {
         let tablet = tablet_factory
             .open_tablet(region_id, None, OpenOptions::default().set_cache_only(true))
             .unwrap();
-        assert!(tablet.get_value(keys::data_key(b"key").as_slice()).unwrap().is_none());
+        assert!(
+            tablet
+                .get_value(keys::data_key(b"key").as_slice())
+                .unwrap()
+                .is_none()
+        );
         let (msg, mut sub) = PeerMsg::raft_command(req.clone());
         router.send(region_id, msg).unwrap();
         cluster.dispatch(region_id, vec![]);
@@ -291,7 +310,13 @@ fn test_config_change_and_apply_snapshot() {
         println!("after wait_committed");
         let resp = block_on(sub.result()).unwrap();
         assert!(!resp.get_header().has_error(), "{:?}", resp);
-        assert_eq!(tablet.get_value(keys::data_key(b"key").as_slice()).unwrap().unwrap(), b"value");
+        assert_eq!(
+            tablet
+                .get_value(keys::data_key(b"key").as_slice())
+                .unwrap()
+                .unwrap(),
+            b"value"
+        );
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // use tablet with node 1 to verify the write.
@@ -302,7 +327,13 @@ fn test_config_change_and_apply_snapshot() {
         let tablet_1 = tablet_factory_1
             .open_tablet(region_id, None, OpenOptions::default().set_cache_only(true))
             .unwrap();
-        assert_eq!(tablet_1.get_value(keys::data_key(b"key").as_slice()).unwrap().unwrap(), b"value");
+        assert_eq!(
+            tablet_1
+                .get_value(keys::data_key(b"key").as_slice())
+                .unwrap()
+                .unwrap(),
+            b"value"
+        );
 
         let mut delete_req = Request::default();
         delete_req.set_cmd_type(CmdType::Delete);
@@ -321,7 +352,10 @@ fn test_config_change_and_apply_snapshot() {
         assert!(block_on(sub.wait_committed()));
         let resp = block_on(sub.result()).unwrap();
         assert!(!resp.get_header().has_error(), "{:?}", resp);
-        assert_matches!(tablet.get_value(keys::data_key(b"key").as_slice()), Ok(None));
+        assert_matches!(
+            tablet.get_value(keys::data_key(b"key").as_slice()),
+            Ok(None)
+        );
     }
     println!("finish 2nd write test");
 

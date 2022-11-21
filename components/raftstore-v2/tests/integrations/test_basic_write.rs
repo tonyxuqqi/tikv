@@ -99,7 +99,7 @@ fn test_basic_write() {
     );
 
     // Make it step down and follower should reject write.
-    let mut msg = Box::new(RaftMessage::default());
+    let mut msg: Box<RaftMessage> = Box::default();
     msg.set_region_id(region_id);
     msg.set_to_peer(new_peer(store_id, peer_id));
     msg.mut_region_epoch().set_conf_ver(INIT_EPOCH_CONF_VER);
@@ -131,14 +131,25 @@ fn test_put_delete() {
     let tablet = tablet_factory
         .open_tablet(region_id, None, OpenOptions::default().set_cache_only(true))
         .unwrap();
-    assert!(tablet.get_value(keys::data_key(b"key").as_slice()).unwrap().is_none());
+    assert!(
+        tablet
+            .get_value(keys::data_key(b"key").as_slice())
+            .unwrap()
+            .is_none()
+    );
     let (msg, mut sub) = PeerMsg::raft_command(req.clone());
     router.send(region_id, msg).unwrap();
     assert!(block_on(sub.wait_proposed()));
     assert!(block_on(sub.wait_committed()));
     let resp = block_on(sub.result()).unwrap();
     assert!(!resp.get_header().has_error(), "{:?}", resp);
-    assert_eq!(tablet.get_value(keys::data_key(b"key").as_slice()).unwrap().unwrap(), b"value");
+    assert_eq!(
+        tablet
+            .get_value(keys::data_key(b"key").as_slice())
+            .unwrap()
+            .unwrap(),
+        b"value"
+    );
 
     let mut delete_req = Request::default();
     delete_req.set_cmd_type(CmdType::Delete);
@@ -151,5 +162,8 @@ fn test_put_delete() {
     assert!(block_on(sub.wait_committed()));
     let resp = block_on(sub.result()).unwrap();
     assert!(!resp.get_header().has_error(), "{:?}", resp);
-    assert_matches!(tablet.get_value(keys::data_key(b"key").as_slice()), Ok(None));
+    assert_matches!(
+        tablet.get_value(keys::data_key(b"key").as_slice()),
+        Ok(None)
+    );
 }

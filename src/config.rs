@@ -3066,7 +3066,7 @@ impl TikvConfig {
             return Err("raftdb.wal_dir can't be same as rocksdb.wal_dir".into());
         }
 
-        let default_tablet_path = format!("{}/2_5", kv_db_path); 
+        let default_tablet_path = format!("{}/2_5", kv_db_path);
         RaftDataStateMachine::new(
             &self.storage.data_dir,
             &self.raft_store.raftdb_path,
