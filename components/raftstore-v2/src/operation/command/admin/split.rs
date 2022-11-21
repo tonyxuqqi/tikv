@@ -296,6 +296,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     ) {
         fail_point!("on_split", self.peer().get_store_id() == 3, |_| {});
 
+        info!(
+            self.logger,
+            "on_ready_split_region";
+            "regions" => ?regions,
+        );
+
         let derived = &regions[derived_index];
         let derived_epoch = derived.get_region_epoch().clone();
         let region_id = derived.get_id();
