@@ -5,14 +5,13 @@
 use std::{cell::RefCell, mem, sync::Arc};
 
 use collections::HashMap;
-use engine_traits::{PerfContext, PerfContextExt, PerfContextKind, PerfLevel};
+use engine_traits::PerfContext;
 use kvproto::{kvrpcpb::KeyRange, metapb, pdpb::QueryKind};
 use pd_client::BucketMeta;
 use prometheus::*;
 use prometheus_static_metric::*;
 use raftstore::store::{util::build_key_range, ReadStats};
-use tikv_kv::{with_tls_engine, Engine};
-use tracker::get_tls_tracker_token;
+use tikv_kv::Engine;
 
 use crate::{
     server::metrics::{GcKeysCF as ServerGcKeysCF, GcKeysDetail as ServerGcKeysDetail},

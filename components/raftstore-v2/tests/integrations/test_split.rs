@@ -54,7 +54,7 @@ fn must_split(region_id: u64, req: RaftCmdRequest, cluster: &Cluster, router: &m
     assert!(block_on(sub.wait_committed()));
     block_on(sub.result()).unwrap();
 
-    // todo: when persistent implementation is ready, we can use tablet index of
+    // TODO: when persistent implementation is ready, we can use tablet index of
     // the parent to check whether the split is done. Now, just sleep a second.
     thread::sleep(Duration::from_millis(100));
 }

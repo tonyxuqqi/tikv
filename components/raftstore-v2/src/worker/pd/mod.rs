@@ -24,7 +24,7 @@ mod misc;
 mod split;
 mod store_heartbeat;
 
-pub use heartbeat::Task as HeartbeatTask;
+pub use heartbeat::HeartbeatTask;
 
 use crate::{
     batch::StoreRouter,
@@ -177,7 +177,6 @@ where
                 initial_status,
                 txn_ext,
             } => self.handle_update_max_timestamp(region_id, initial_status, txn_ext),
-            _ => unimplemented!(),
         }
     }
 }

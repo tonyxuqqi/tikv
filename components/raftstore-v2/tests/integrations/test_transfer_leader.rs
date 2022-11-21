@@ -14,7 +14,13 @@ use tikv_util::store::new_peer;
 
 use crate::cluster::Cluster;
 
-fn put_data(cluster: &Cluster, region_id: u64, node_off: usize, node_off_for_verify: usize, key: &[u8]) {
+fn put_data(
+    cluster: &Cluster,
+    region_id: u64,
+    node_off: usize,
+    node_off_for_verify: usize,
+    key: &[u8],
+) {
     let router = cluster.router(node_off);
     let mut req = router.new_request_for(region_id);
     let mut put_req = Request::default();
@@ -47,7 +53,13 @@ fn put_data(cluster: &Cluster, region_id: u64, node_off: usize, node_off_for_ver
 
     let resp = block_on(sub.result()).unwrap();
     assert!(!resp.get_header().has_error(), "{:?}", resp);
-    assert_eq!(tablet.get_value(keys::data_key(key).as_slice()).unwrap().unwrap(), b"value");
+    assert_eq!(
+        tablet
+            .get_value(keys::data_key(key).as_slice())
+            .unwrap()
+            .unwrap(),
+        b"value"
+    );
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Verify the data is ready in the other node
@@ -57,7 +69,13 @@ fn put_data(cluster: &Cluster, region_id: u64, node_off: usize, node_off_for_ver
     let tablet = tablet_factory
         .open_tablet(region_id, None, OpenOptions::default().set_cache_only(true))
         .unwrap();
-    assert_eq!(tablet.get_value(keys::data_key(key).as_slice()).unwrap().unwrap(), b"value");
+    assert_eq!(
+        tablet
+            .get_value(keys::data_key(key).as_slice())
+            .unwrap()
+            .unwrap(),
+        b"value"
+    );
 }
 
 pub fn must_transfer_leader(

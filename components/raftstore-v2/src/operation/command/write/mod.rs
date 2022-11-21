@@ -115,9 +115,11 @@ impl<EK: KvEngine, R> Apply<EK, R> {
         util::check_key_in_region(key, self.region_state().get_region())?;
         let res = if cf.is_empty() || cf == CF_DEFAULT {
             // TODO: use write_vector
-            self.write_batch_or_default().put(keys::data_key(key).as_slice(), value)
+            self.write_batch_or_default()
+                .put(keys::data_key(key).as_slice(), value)
         } else {
-            self.write_batch_or_default().put_cf(cf, keys::data_key(key).as_slice(), value)
+            self.write_batch_or_default()
+                .put_cf(cf, keys::data_key(key).as_slice(), value)
         };
         res.unwrap_or_else(|e| {
             panic!(
@@ -140,9 +142,11 @@ impl<EK: KvEngine, R> Apply<EK, R> {
         util::check_key_in_region(key, self.region_state().get_region())?;
         let res = if cf.is_empty() || cf == CF_DEFAULT {
             // TODO: use write_vector
-            self.write_batch_or_default().delete(keys::data_key(key).as_slice())
+            self.write_batch_or_default()
+                .delete(keys::data_key(key).as_slice())
         } else {
-            self.write_batch_or_default().delete_cf(cf, keys::data_key(key).as_slice())
+            self.write_batch_or_default()
+                .delete_cf(cf, keys::data_key(key).as_slice())
         };
         res.unwrap_or_else(|e| {
             panic!(
