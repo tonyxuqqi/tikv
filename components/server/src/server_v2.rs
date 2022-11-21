@@ -564,6 +564,7 @@ impl<ER: RaftEngine> TikvServer<ER> {
             tikv::config::Module::PessimisticTxn,
             Box::new(lock_mgr.config_manager()),
         );
+        let role_change_notifier = lock_mgr.generate_notifier();
 
         // The `DebugService` and `DiagnosticsService` will share the same thread pool
         let props = tikv_util::thread_group::current_properties();
@@ -738,6 +739,7 @@ impl<ER: RaftEngine> TikvServer<ER> {
             server.transport(),
             &raft_router,
             snap_mgr,
+            Arc::new(role_change_notifier),
         )
         .unwrap_or_else(|e| fatal!("failed to start node: {}", e));
 

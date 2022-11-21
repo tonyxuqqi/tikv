@@ -99,6 +99,7 @@ where
         trans: T,
         router: &RaftRouter<EK, ER>,
         snap_mgr: TabletSnapManager,
+        lock_manager_observer: Arc<dyn LockManagerNotifier>,
     ) -> Result<()>
     where
         T: Transport + 'static,
@@ -131,7 +132,7 @@ where
         let status = self.pd_client.put_store(self.store.clone())?;
         self.load_all_stores(status);
 
-        self.start_store(raft_engine, trans, router, snap_mgr)?;
+        self.start_store(raft_engine, trans, router, snap_mgr, lock_manager_observer)?;
 
         Ok(())
     }
@@ -175,6 +176,7 @@ where
         trans: T,
         router: &RaftRouter<EK, ER>,
         snap_mgr: TabletSnapManager,
+        lock_manager_observer: Arc<dyn LockManagerNotifier>,
     ) -> Result<()>
     where
         T: Transport + 'static,
@@ -205,7 +207,7 @@ where
             snap_mgr,
             concurrency_manager,
             None,
-            Arc::new(DummyLockManagerObserver {}),
+            lock_manager_observer,
         )?;
         Ok(())
     }
