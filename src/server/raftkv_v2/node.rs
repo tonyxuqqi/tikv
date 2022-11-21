@@ -21,14 +21,6 @@ use tikv_util::{config::VersionTrack, worker::Worker};
 
 use crate::server::{node::init_store, Result};
 
-struct DummyLockManagerObserver {}
-
-impl LockManagerNotifier for DummyLockManagerObserver {
-    fn on_region_changed(&self, _: &metapb::Region, _: RegionChangeEvent, _: StateRole) {}
-
-    fn on_role_change(&self, _: &metapb::Region, _: RoleChange) {}
-}
-
 /// A wrapper for the raftstore which runs Multi-Raft.
 // TODO: we will rename another better name like RaftStore later.
 pub struct NodeV2<C: PdClient + 'static, EK: KvEngine, ER: RaftEngine> {
@@ -99,6 +91,7 @@ where
         trans: T,
         router: &RaftRouter<EK, ER>,
         snap_mgr: TabletSnapManager,
+        lock_manager_observer: Arc<dyn LockManagerNotifier>,
     ) -> Result<()>
     where
         T: Transport + 'static,
@@ -131,7 +124,7 @@ where
         let status = self.pd_client.put_store(self.store.clone())?;
         self.load_all_stores(status);
 
-        self.start_store(raft_engine, trans, router, snap_mgr)?;
+        self.start_store(raft_engine, trans, router, snap_mgr, lock_manager_observer)?;
 
         Ok(())
     }
@@ -175,6 +168,7 @@ where
         trans: T,
         router: &RaftRouter<EK, ER>,
         snap_mgr: TabletSnapManager,
+        lock_manager_observer: Arc<dyn LockManagerNotifier>,
     ) -> Result<()>
     where
         T: Transport + 'static,
@@ -205,7 +199,7 @@ where
             snap_mgr,
             concurrency_manager,
             None,
-            Arc::new(DummyLockManagerObserver {}),
+            lock_manager_observer,
         )?;
         Ok(())
     }
