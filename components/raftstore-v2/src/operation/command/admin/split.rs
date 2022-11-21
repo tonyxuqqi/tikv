@@ -296,6 +296,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     ) {
         fail_point!("on_split", self.peer().get_store_id() == 3, |_| {});
 
+        info!(
+            self.logger,
+            "on_ready_split_region";
+            "regions" => ?regions,
+        );
+
         let derived = &regions[derived_index];
         let derived_epoch = derived.get_region_epoch().clone();
         let region_id = derived.get_id();
@@ -329,6 +335,27 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         }
 
         self.post_split();
+
+        if self.is_leader() {
+            // Notify pd immediately to let it update the region meta.
+            info!(
+                self.logger,
+                "notify pd with split";
+                "split_count" => regions.len(),
+            );
+            // Now pd only uses ReportBatchSplit for history operation show,
+            // so we send it independently here.
+            let task = PdTask::ReportBatchSplit {
+                regions: regions.to_vec(),
+            };
+            if let Err(e) = store_ctx.pd_scheduler.schedule(task) {
+                error!(
+                    self.logger,
+                    "failed to notify pd";
+                    "err" => %e,
+                );
+            }
+        }
 
         let last_region_id = regions.last().unwrap().get_id();
         for (new_region, locks) in regions.into_iter().zip(region_locks) {
@@ -498,7 +525,13 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             Ok(n) => match get_approximate_split_keys(tablet, self.region(), n) {
                 Ok(keys) => {
                     let region_epoch = self.region().get_region_epoch().clone();
-                    self.on_prepare_split_region(store_ctx, region_epoch, keys, "split_check");
+                    self.on_prepare_split_region(
+                        store_ctx,
+                        region_epoch,
+                        keys,
+                        None,
+                        "split_check",
+                    );
                     true
                 }
                 Err(e) => {
@@ -509,11 +542,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         }
     }
 
-    fn on_prepare_split_region<T>(
+    pub fn on_prepare_split_region<T>(
         &mut self,
         ctx: &mut StoreContext<EK, ER, T>,
         region_epoch: metapb::RegionEpoch,
         split_keys: Vec<Vec<u8>>,
+        ch: Option<CmdResChannel>,
         source: &str,
     ) {
         info!(
@@ -535,6 +569,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             split_keys,
             peer: self.peer().clone(),
             right_derive: ctx.cfg.right_derive_when_split,
+            ch,
         };
         if let Err(ScheduleError::Stopped(t)) = ctx.pd_scheduler.schedule(task) {
             error!(

@@ -26,7 +26,10 @@ mod store_heartbeat;
 
 pub use heartbeat::HeartbeatTask;
 
-use crate::{batch::StoreRouter, router::PeerMsg};
+use crate::{
+    batch::StoreRouter,
+    router::{CmdResChannel, PeerMsg},
+};
 
 pub enum Task {
     Heartbeat(HeartbeatTask),
@@ -42,6 +45,7 @@ pub enum Task {
         split_keys: Vec<Vec<u8>>,
         peer: metapb::Peer,
         right_derive: bool,
+        ch: Option<CmdResChannel>,
     },
     ReportBatchSplit {
         regions: Vec<metapb::Region>,
@@ -165,7 +169,8 @@ where
                 split_keys,
                 peer,
                 right_derive,
-            } => self.handle_ask_batch_split(region, split_keys, peer, right_derive),
+                ch,
+            } => self.handle_ask_batch_split(region, split_keys, peer, right_derive, ch),
             Task::ReportBatchSplit { regions } => self.handle_report_batch_split(regions),
             Task::UpdateMaxTimestamp {
                 region_id,
@@ -199,6 +204,7 @@ pub fn send_admin_request<EK, ER>(
     epoch: metapb::RegionEpoch,
     peer: metapb::Peer,
     request: AdminRequest,
+    ch: Option<CmdResChannel>,
 ) where
     EK: KvEngine,
     ER: RaftEngine,
@@ -211,7 +217,13 @@ pub fn send_admin_request<EK, ER>(
     req.mut_header().set_peer(peer);
     req.set_admin_request(request);
 
-    let (msg, _) = PeerMsg::raft_command(req);
+    let (mut msg, _) = PeerMsg::raft_command(req);
+    if ch.is_some() {
+        match msg {
+            PeerMsg::RaftCommand(ref mut req) => req.ch = ch.unwrap(),
+            _ => unreachable!(),
+        }
+    }
     if let Err(e) = router.send(region_id, msg) {
         error!(
             logger,

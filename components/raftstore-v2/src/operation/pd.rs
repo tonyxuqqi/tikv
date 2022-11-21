@@ -183,6 +183,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             split_keys,
             peer: self.peer().clone(),
             right_derive: ctx.cfg.right_derive_when_split,
+            ch: None,
         };
         if let Err(e) = ctx.pd_scheduler.schedule(task) {
             error!(

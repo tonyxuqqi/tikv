@@ -2,7 +2,7 @@
 
 mod node;
 
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc};
 
 use collections::HashMap;
 use crossbeam::channel::TrySendError;
@@ -10,7 +10,7 @@ use engine_traits::{CfName, KvEngine, MvccProperties, RaftEngine};
 use futures::{future::BoxFuture, Future};
 use keys::NoPrefix;
 use kvproto::{
-    kvrpcpb::Context,
+    kvrpcpb::{Context, SplitRegionResponse},
     metapb::{Region, RegionEpoch},
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse, Request},
     raft_serverpb::RaftMessage,
@@ -18,12 +18,12 @@ use kvproto::{
 pub use node::NodeV2;
 use raft::SnapshotStatus;
 use raftstore::{
-    store::{cmd_resp, RegionSnapshot},
+    store::{cmd_resp, RegionSnapshot, SnapError},
     DiscardReason,
 };
 use raftstore_v2::{
     router::{CmdResChannel, CmdResSubscriber, PeerMsg, RaftRequest, RaftRouter},
-    StoreRouter,
+    SplitRegion, StoreRouter,
 };
 use tikv_kv::{
     raft_extension::RaftExtension, Engine, Modify, OnReturnCallback, SnapContext, WriteData,
@@ -44,12 +44,12 @@ use crate::{
 struct Wrap(CmdResSubscriber);
 
 impl WriteSubscriber for Wrap {
-    type ProposedWaiter<'a> = impl Future<Output = bool> + Send + 'a where Self: 'a;
+    type ProposedWaiter<'a> = impl Future<Output=bool> + Send + 'a where Self: 'a;
     fn wait_proposed(&mut self) -> Self::ProposedWaiter<'_> {
         self.0.wait_proposed()
     }
 
-    type CommittedWaiter<'a> = impl Future<Output = bool> + Send + 'a where Self: 'a;
+    type CommittedWaiter<'a> = impl Future<Output=bool> + Send + 'a where Self: 'a;
     fn wait_committed(&mut self) -> Self::CommittedWaiter<'_> {
         self.0.wait_committed()
     }
@@ -115,13 +115,23 @@ impl<EK: KvEngine, ER: RaftEngine> RaftExtension for RouterWrap<EK, ER> {
     #[inline]
     fn split(
         &self,
-        _region_id: u64,
-        _region_epoch: RegionEpoch,
-        _split_keys: Vec<Vec<u8>>,
-        _source: String,
+        region_id: u64,
+        region_epoch: RegionEpoch,
+        split_keys: Vec<Vec<u8>>,
+        source: String,
     ) -> BoxFuture<'static, kv::Result<Vec<Region>>> {
-        // TODO
-        unimplemented!()
+        let (split_req, sub) = PeerMsg::split_request(region_epoch, split_keys, source);
+        let res = self.router.send_peer_msg(region_id, split_req);
+        Box::pin(async move {
+            res?;
+            match sub.result().await {
+                Some(mut resp) => Ok(resp.mut_admin_response().mut_splits().take_regions().into()),
+                None => Err(box_err!(
+                    "Get None response for split request, region_id {}",
+                    region_id
+                )),
+            }
+        })
     }
 
     type ReadIndexRes = impl Future<Output = kv::Result<u64>>;
@@ -343,6 +353,7 @@ where
                     Ok(snap)
                 }
                 Err(mut resp) => {
+                    check_raft_cmd_response(&mut resp)?;
                     let resps = resp.mut_responses();
                     let e = if resps
                         .get(0)

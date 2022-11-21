@@ -4,7 +4,7 @@
 use std::fmt;
 
 use engine_traits::Snapshot;
-use kvproto::{raft_cmdpb::RaftCmdRequest, raft_serverpb::RaftMessage};
+use kvproto::{metapb::RegionEpoch, raft_cmdpb::RaftCmdRequest, raft_serverpb::RaftMessage};
 use raft::eraftpb::Snapshot as RaftSnapshot;
 use raftstore::store::{metrics::RaftEventDurationType, FetchedLogs, GenSnapRes};
 use tikv_util::time::Instant;
@@ -156,6 +156,23 @@ impl PeerMsg {
     pub fn raft_command(req: RaftCmdRequest) -> (Self, CmdResSubscriber) {
         let (ch, sub) = CmdResChannel::pair();
         (PeerMsg::RaftCommand(RaftRequest::new(req, ch)), sub)
+    }
+
+    pub fn split_request(
+        region_epoch: RegionEpoch,
+        split_keys: Vec<Vec<u8>>,
+        source: String,
+    ) -> (Self, CmdResSubscriber) {
+        let (ch, sub) = CmdResChannel::pair();
+        (
+            PeerMsg::SplitRegion(SplitRegion {
+                region_epoch,
+                split_keys,
+                source: source.into(),
+                ch,
+            }),
+            sub,
+        )
     }
 }
 

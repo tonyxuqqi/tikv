@@ -5,6 +5,7 @@ use std::sync::mpsc;
 
 use crossbeam::channel::{SendError, TrySendError};
 use engine_traits::{KvEngine, RaftEngine, Snapshot};
+use error_code::raftstore;
 use kvproto::raft_serverpb::RaftMessage;
 use tikv_util::{error, warn};
 
