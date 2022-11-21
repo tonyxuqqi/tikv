@@ -21,14 +21,6 @@ use tikv_util::{config::VersionTrack, worker::Worker};
 
 use crate::server::{node::init_store, Result};
 
-struct DummyLockManagerObserver {}
-
-impl LockManagerNotifier for DummyLockManagerObserver {
-    fn on_region_changed(&self, _: &metapb::Region, _: RegionChangeEvent, _: StateRole) {}
-
-    fn on_role_change(&self, _: &metapb::Region, _: RoleChange) {}
-}
-
 /// A wrapper for the raftstore which runs Multi-Raft.
 // TODO: we will rename another better name like RaftStore later.
 pub struct NodeV2<C: PdClient + 'static, EK: KvEngine, ER: RaftEngine> {
