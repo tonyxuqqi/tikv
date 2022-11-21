@@ -30,6 +30,7 @@ use raftstore::{
         fsm::store::PeerTickBatch, local_metrics::RaftMetrics, util::LockManagerNotifier, Config,
         ReadRunner, ReadTask, StoreWriters, TabletSnapManager, Transport, WriteSenders,
     },
+    DiscardReason,
 };
 use slog::Logger;
 use tikv_util::{
@@ -544,6 +545,14 @@ impl<EK: KvEngine, ER: RaftEngine> StoreRouter<EK, ER> {
                 Err(TrySendError::Disconnected(m))
             }
             _ => unreachable!(),
+        }
+    }
+
+    pub fn send_peer_msg(&self, region_id: u64, msg: PeerMsg) -> Result<()> {
+        match self.router.send(region_id, msg) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(Error::Transport(DiscardReason::Full)),
+            Err(TrySendError::Disconnected(_)) => Err(Error::RegionNotFound(region_id)),
         }
     }
 }
