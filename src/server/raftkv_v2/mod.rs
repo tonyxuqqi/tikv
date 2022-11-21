@@ -353,6 +353,7 @@ where
                     Ok(snap)
                 }
                 Err(mut resp) => {
+                    check_raft_cmd_response(&mut resp)?;
                     let resps = resp.mut_responses();
                     let e = if resps
                         .get(0)

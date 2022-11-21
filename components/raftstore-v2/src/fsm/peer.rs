@@ -204,6 +204,11 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
     }
 
     fn on_tick(&mut self, tick: PeerTick) {
+        info!(
+            self.store_ctx.logger,
+            "Ticking";
+            "tick" => ?tick,
+        );
         match tick {
             PeerTick::Raft => self.on_raft_tick(),
             PeerTick::PdHeartbeat => self.on_pd_heartbeat(),
@@ -264,7 +269,13 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
                     self.fsm.peer_mut().on_snapshot_generated(snap_res)
                 }
                 PeerMsg::QueryDebugInfo(ch) => self.fsm.peer_mut().on_query_debug_info(ch),
-                PeerMsg::SplitRegion(sr) => self.fsm.peer_mut().on_split_region(self.store_ctx, sr),
+                PeerMsg::SplitRegion(sr) => self.fsm.peer_mut().on_prepare_split_region(
+                    self.store_ctx,
+                    sr.region_epoch,
+                    sr.split_keys,
+                    Some(sr.ch),
+                    &sr.source,
+                ),
                 #[cfg(feature = "testexport")]
                 PeerMsg::WaitFlush(ch) => self.fsm.peer_mut().on_wait_flush(ch),
             }
