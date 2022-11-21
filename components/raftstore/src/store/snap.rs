@@ -56,6 +56,7 @@ pub const SNAPSHOT_CFS_ENUM_PAIR: &[(CfNames, CfName)] = &[
     (CfNames::write, CF_WRITE),
 ];
 pub const SNAPSHOT_VERSION: u64 = 2;
+pub const TABLET_SNAPSHOT_VERSION: u64 = 3;
 pub const IO_LIMITER_CHUNK_SIZE: usize = 4 * 1024;
 
 /// Name prefix for the self-generated snapshot file.
@@ -149,6 +150,10 @@ impl SnapKey {
             snap_data.get_region().get_id(),
             snap,
         ))
+    }
+
+    pub fn get_snapshot_recv_path(&self) -> String {
+        format!("{}_{}", SNAP_REV_PREFIX, self)
     }
 }
 
@@ -557,7 +562,7 @@ impl Snapshot {
             for (i, file_path) in file_paths.iter().enumerate() {
                 if cf_file.size[i] > 0 {
                     let path = Path::new(file_path);
-                    let file = File::open(&path)?;
+                    let file = File::open(path)?;
                     cf_file
                         .file_for_sending
                         .push(Box::new(file) as Box<dyn Read + Send>);
@@ -600,7 +605,7 @@ impl Snapshot {
                 let f = OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .open(&file_path)?;
+                    .open(file_path)?;
                 cf_file.file_for_recving.push(CfFileForRecving {
                     file: f,
                     encrypter: None,
@@ -788,7 +793,7 @@ impl Snapshot {
                 if !for_send && !plain_file_used(cf_file.cf) {
                     sst_importer::prepare_sst_for_ingestion(
                         file_path,
-                        &Path::new(&clone_file_paths[i]),
+                        Path::new(&clone_file_paths[i]),
                         self.mgr.encryption_key_manager.as_deref(),
                     )?;
                 }
@@ -972,7 +977,7 @@ impl Snapshot {
             } else {
                 // delete snapshot files according to meta file
                 for clone_file_path in clone_file_paths {
-                    delete_file_if_exist(&clone_file_path).unwrap();
+                    delete_file_if_exist(clone_file_path).unwrap();
                 }
             }
 
@@ -983,7 +988,7 @@ impl Snapshot {
                     try_delete_snapshot_files!(cf_file, gen_tmp_file_name);
                 } else {
                     for tmp_file_path in tmp_file_paths {
-                        delete_file_if_exist(&tmp_file_path).unwrap();
+                        delete_file_if_exist(tmp_file_path).unwrap();
                     }
                 }
             }
@@ -994,7 +999,7 @@ impl Snapshot {
                 try_delete_snapshot_files!(cf_file);
             } else {
                 for file_path in &file_paths {
-                    delete_file_if_exist(&file_path).unwrap();
+                    delete_file_if_exist(file_path).unwrap();
                 }
                 if let Some(ref mgr) = self.mgr.encryption_key_manager {
                     for file_path in &file_paths {
@@ -1047,7 +1052,7 @@ impl Snapshot {
         snap_data.set_version(SNAPSHOT_VERSION);
         snap_data.set_meta(self.meta_file.meta.as_ref().unwrap().clone());
 
-        SNAPSHOT_BUILD_TIME_HISTOGRAM.observe(duration_to_sec(t.saturating_elapsed()) as f64);
+        SNAPSHOT_BUILD_TIME_HISTOGRAM.observe(duration_to_sec(t.saturating_elapsed()));
         SNAPSHOT_KV_COUNT_HISTOGRAM.observe(total_count as f64);
         SNAPSHOT_SIZE_HISTOGRAM.observe(total_size as f64);
         info!(
@@ -1115,7 +1120,7 @@ impl Snapshot {
                 || (cf_file
                     .file_paths()
                     .iter()
-                    .all(|file_path| file_exists(&Path::new(file_path))))
+                    .all(|file_path| file_exists(Path::new(file_path))))
         }) && file_exists(&self.meta_file.path)
     }
 
@@ -1184,7 +1189,7 @@ impl Snapshot {
             let tmp_paths = cf_file.tmp_file_paths();
             let paths = cf_file.file_paths();
             for (i, tmp_path) in tmp_paths.iter().enumerate() {
-                file_system::rename(&tmp_path, &paths[i])?;
+                file_system::rename(tmp_path, &paths[i])?;
             }
         }
         sync_dir(&self.dir_path)?;
@@ -1488,7 +1493,7 @@ impl SnapManager {
             "{}_{}{}{}",
             DEL_RANGE_PREFIX, sst_id, SST_FILE_SUFFIX, TMP_FILE_SUFFIX
         );
-        let path = PathBuf::from(&self.core.base).join(&filename);
+        let path = PathBuf::from(&self.core.base).join(filename);
         path.to_str().unwrap().to_string()
     }
 
@@ -1802,7 +1807,7 @@ impl SnapManagerCore {
                 }
                 r?;
             } else {
-                file_system::rename(&tmp_file_path, &file_paths[i])?;
+                file_system::rename(tmp_file_path, &file_paths[i])?;
             }
             let file = Path::new(&file_paths[i]);
             let (checksum, size) = calc_checksum_and_size(file, mgr)?;
@@ -1910,6 +1915,14 @@ impl TabletSnapKey {
         let term = snap.get_metadata().get_term();
         TabletSnapKey::new(region_id, to_peer, term, index)
     }
+
+    pub fn get_recv_suffix(&self) -> String {
+        format!("{}_{}", SNAP_REV_PREFIX, self)
+    }
+
+    pub fn get_gen_suffix(&self) -> String {
+        format!("{}_{}", SNAP_GEN_PREFIX, self)
+    }
 }
 
 impl Display for TabletSnapKey {
@@ -1956,7 +1969,22 @@ impl TabletSnapManager {
     }
 
     pub fn get_tablet_checkpointer_path(&self, key: &TabletSnapKey) -> PathBuf {
-        let prefix = format!("{}_{}", SNAP_GEN_PREFIX, key);
+        let suffix = key.get_gen_suffix();
+        PathBuf::from(&self.base).join(&suffix)
+    }
+
+    pub fn get_recv_tablet_path(&self, key: &TabletSnapKey) -> PathBuf {
+        let prefix = format!("{}_{}", SNAP_REV_PREFIX, key);
+        PathBuf::from(&self.base).join(&prefix)
+    }
+
+    pub fn get_final_name_for_recv(&self, key: &TabletSnapKey) -> PathBuf {
+        let prefix = format!("{}_{}", SNAP_REV_PREFIX, key);
+        PathBuf::from(&self.base).join(&prefix)
+    }
+
+    pub fn get_tmp_name_for_recv(&self, key: &TabletSnapKey) -> PathBuf {
+        let prefix = format!("{}_{}{}", SNAP_REV_PREFIX, key, TMP_FILE_SUFFIX);
         PathBuf::from(&self.base).join(&prefix)
     }
 }

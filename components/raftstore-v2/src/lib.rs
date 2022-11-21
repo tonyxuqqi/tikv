@@ -22,7 +22,7 @@
 // using a standalone modules.
 
 #![allow(unused)]
-#![feature(let_else)]
+#![feature(let_chains)]
 #![feature(array_windows)]
 #![feature(div_duration)]
 
@@ -39,4 +39,4 @@ pub(crate) use batch::StoreContext;
 pub use batch::{create_store_batch_system, StoreRouter, StoreSystem};
 pub use bootstrap::Bootstrap;
 pub use fsm::StoreMeta;
-pub use raftstore::{Error, Result};
+pub use raftstore::{store::Config, Error, Result};

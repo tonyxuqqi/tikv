@@ -91,10 +91,9 @@ use tikv::{
     read_pool::{build_yatp_read_pool, ReadPool, ReadPoolConfigManager},
     server::{
         config::{Config as ServerConfig, ServerConfigManager},
-        create_raft_storage,
         gc_worker::{AutoGcConfig, GcWorker},
         lock_manager::LockManager,
-        raftkv::ReplicaReadLockChecker,
+        raftkv::{ReplicaReadLockChecker, RouterExtension},
         resolve,
         service::{DebugService, DiagnosticsService},
         status_server::StatusServer,
@@ -107,7 +106,7 @@ use tikv::{
         config_manager::StorageConfigManger,
         mvcc::MvccConsistencyCheckObserver,
         txn::flow_controller::{EngineFlowController, FlowController},
-        Engine,
+        Engine, Storage,
     },
 };
 use tikv_util::{
@@ -223,7 +222,7 @@ struct TikvServer<ER: RaftEngine> {
     store_path: PathBuf,
     snap_mgr: Option<SnapManager>, // Will be filled in `init_servers`.
     encryption_key_manager: Option<Arc<DataKeyManager>>,
-    engines: Option<TikvEngines<RocksEngine, ER>>,
+    engines: Option<TikvEngines<RocksEngine, ER, LocalRaftKv<RocksEngine, ER>>>,
     servers: Option<Servers<RocksEngine, ER>>,
     region_info_accessor: RegionInfoAccessor,
     coprocessor_host: Option<CoprocessorHost<RocksEngine>>,
@@ -239,10 +238,10 @@ struct TikvServer<ER: RaftEngine> {
     br_snap_recovery_mode: bool, // use for br snapshot recovery
 }
 
-struct TikvEngines<EK: KvEngine, ER: RaftEngine> {
+struct TikvEngines<EK: KvEngine, ER: RaftEngine, E: Engine> {
     engines: Engines<EK, ER>,
     store_meta: Arc<Mutex<StoreMeta>>,
-    engine: RaftKv<EK, ServerRaftStoreRouter<EK, ER>>,
+    engine: E,
 }
 
 struct Servers<EK: KvEngine, ER: RaftEngine> {
@@ -257,14 +256,11 @@ struct Servers<EK: KvEngine, ER: RaftEngine> {
 }
 
 type LocalServer<EK, ER> =
-    Server<RaftRouter<EK, ER>, resolve::PdStoreAddrResolver, LocalRaftKv<EK, ER>>;
+    Server<RouterExtension<EK, ServerRaftStoreRouter<EK, ER>>, resolve::PdStoreAddrResolver>;
 type LocalRaftKv<EK, ER> = RaftKv<EK, ServerRaftStoreRouter<EK, ER>>;
 
-impl<ER> TikvServer<ER>
-where
-    ER: RaftEngine,
-{
-    fn init<F: KvFormat>(mut config: TikvConfig) -> TikvServer<ER> {
+impl<ER: RaftEngine> TikvServer<ER> {
+    fn init<F: KvFormat>(mut config: TikvConfig) -> Self {
         tikv_util::thread_group::set_properties(Some(GroupProperties::default()));
         // It is okay use pd config and security config before `init_config`,
         // because these configs must be provided by command line, and only
@@ -319,8 +315,11 @@ where
         let background_worker = WorkerBuilder::new("background")
             .thread_count(thread_count)
             .create();
-        let (resolver, state) =
-            resolve::new_resolver(Arc::clone(&pd_client), &background_worker, router.clone());
+        let (resolver, state) = resolve::new_resolver(
+            Arc::clone(&pd_client),
+            &background_worker,
+            RouterExtension::new(router.clone()),
+        );
 
         let mut coprocessor_host = Some(CoprocessorHost::new(
             router.clone(),
@@ -473,7 +472,7 @@ where
         let cur_port = cur_addr.port();
         let lock_dir = get_lock_dir();
 
-        let search_base = env::temp_dir().join(&lock_dir);
+        let search_base = env::temp_dir().join(lock_dir);
         file_system::create_dir_all(&search_base)
             .unwrap_or_else(|_| panic!("create {} failed", search_base.display()));
 
@@ -542,7 +541,7 @@ where
         disk::set_disk_reserved_space(reserve_space);
         let path =
             Path::new(&self.config.storage.data_dir).join(file_system::SPACE_PLACEHOLDER_FILE);
-        if let Err(e) = file_system::remove_file(&path) {
+        if let Err(e) = file_system::remove_file(path) {
             warn!("failed to remove space holder on starting: {}", e);
         }
 
@@ -594,6 +593,7 @@ where
 
     fn init_engines(&mut self, engines: Engines<RocksEngine, ER>) {
         let store_meta = Arc::new(Mutex::new(StoreMeta::new(PENDING_MSG_CAP)));
+        info!("using raft kv v1");
         let engine = RaftKv::new(
             ServerRaftStoreRouter::new(
                 self.router.clone(),
@@ -614,16 +614,10 @@ where
         });
     }
 
-    fn init_gc_worker(
-        &mut self,
-    ) -> GcWorker<
-        RaftKv<RocksEngine, ServerRaftStoreRouter<RocksEngine, ER>>,
-        RaftRouter<RocksEngine, ER>,
-    > {
+    fn init_gc_worker(&mut self) -> GcWorker<LocalRaftKv<RocksEngine, ER>> {
         let engines = self.engines.as_ref().unwrap();
         let gc_worker = GcWorker::new(
             engines.engine.clone(),
-            self.router.clone(),
             self.flow_info_sender.take().unwrap(),
             self.config.gc.clone(),
             self.pd_client.feature_gate().clone(),
@@ -758,7 +752,7 @@ where
             storage_read_pools.handle()
         };
 
-        let storage = create_raft_storage::<_, _, _, F, _>(
+        let storage = Storage::<_, _, F>::from_engine(
             engines.engine.clone(),
             &self.config.storage,
             storage_read_pool_handle,
@@ -914,7 +908,12 @@ where
                 Arc::clone(&self.quota_limiter),
             ),
             coprocessor_v2::Endpoint::new(&self.config.coprocessor_v2),
-            self.router.clone(),
+            self.engines
+                .as_ref()
+                .unwrap()
+                .engine
+                .raft_extension()
+                .clone(),
             self.resolver.clone(),
             snap_mgr.clone(),
             gc_worker.clone(),
@@ -1172,7 +1171,12 @@ where
         let debug_service = DebugService::new(
             engines.engines.clone(),
             servers.server.get_debug_thread_pool().clone(),
-            self.router.clone(),
+            self.engines
+                .as_ref()
+                .unwrap()
+                .engine
+                .raft_extension()
+                .clone(),
             self.cfg_controller.as_ref().unwrap().clone(),
         );
         if servers
@@ -1480,7 +1484,7 @@ where
                     .join(Path::new(file_system::SPACE_PLACEHOLDER_FILE));
 
                 let placeholder_size: u64 =
-                    file_system::get_file_size(&placeholer_file_path).unwrap_or(0);
+                    file_system::get_file_size(placeholer_file_path).unwrap_or(0);
 
                 let used_size = snap_size + kv_size + raft_size + placeholder_size;
                 let capacity = if config_disk_capacity == 0 || disk_cap < config_disk_capacity {
@@ -1552,7 +1556,12 @@ where
                 self.config.server.status_thread_pool_size,
                 self.cfg_controller.take().unwrap(),
                 Arc::new(self.config.security.clone()),
-                self.router.clone(),
+                self.engines
+                    .as_ref()
+                    .unwrap()
+                    .engine
+                    .raft_extension()
+                    .clone(),
                 self.store_path.clone(),
             ) {
                 Ok(status_server) => Box::new(status_server),
@@ -1864,9 +1873,8 @@ trait Stop {
     fn stop(self: Box<Self>);
 }
 
-impl<E, R> Stop for StatusServer<E, R>
+impl<R> Stop for StatusServer<R>
 where
-    E: 'static,
     R: 'static + Send,
 {
     fn stop(self: Box<Self>) {

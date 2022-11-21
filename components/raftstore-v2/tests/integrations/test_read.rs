@@ -15,7 +15,7 @@ fn test_read_index() {
     let cluster = Cluster::with_config(config);
     let router = cluster.router(0);
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let region_id = 2;
+    let region_id = cluster.root_region_id();
     let mut req = router.new_request_for(region_id);
     let mut request_inner = Request::default();
     request_inner.set_cmd_type(CmdType::Snap);
@@ -60,7 +60,7 @@ fn test_snap_without_read_index() {
     let cluster = Cluster::default();
     let router = cluster.router(0);
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let region_id = 2;
+    let region_id = cluster.root_region_id();
     let mut req = router.new_request_for(region_id);
     let mut request_inner = Request::default();
     request_inner.set_cmd_type(CmdType::Snap);
@@ -86,7 +86,7 @@ fn test_query_with_write_cmd() {
     let cluster = Cluster::default();
     let router = cluster.router(0);
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let region_id = 2;
+    let region_id = cluster.root_region_id();
     let mut req = router.new_request_for(2);
 
     for write_cmd in [
@@ -113,7 +113,7 @@ fn test_snap_with_invalid_parameter() {
     let cluster = Cluster::default();
     let router = cluster.router(0);
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let region_id = 2;
+    let region_id = cluster.root_region_id();
     let mut req = router.new_request_for(region_id);
     let mut request_inner = Request::default();
     request_inner.set_cmd_type(CmdType::Snap);
@@ -166,13 +166,13 @@ fn test_local_read() {
     let cluster = Cluster::default();
     let mut router = cluster.router(0);
     std::thread::sleep(std::time::Duration::from_millis(200));
-    let region_id = 2;
+    let region_id = cluster.root_region_id();
     let mut req = router.new_request_for(region_id);
     let mut request_inner = Request::default();
     request_inner.set_cmd_type(CmdType::Snap);
     req.mut_requests().push(request_inner);
 
-    block_on(async { router.get_snapshot(req.clone()).await.unwrap() });
+    block_on(async { router.snapshot(req.clone()).await.unwrap() });
     let res = router.query(region_id, req.clone()).unwrap();
     let resp = res.read().unwrap();
     // The read index will be 0 as the retry process in the `get_snapshot` will

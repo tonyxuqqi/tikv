@@ -70,12 +70,13 @@ fn test_life_by_message() {
     let test_leader_id = 6;
     assert_peer_not_exist(test_region_id, test_peer_id, &router);
 
+    let store_id = cluster.node(0).id();
     // Build a correct message.
-    let mut msg = Box::new(RaftMessage::default());
+    let mut msg = Box::<RaftMessage>::default();
     msg.set_region_id(test_region_id);
-    msg.set_to_peer(new_peer(1, test_peer_id));
+    msg.set_to_peer(new_peer(store_id, test_peer_id));
     msg.mut_region_epoch().set_conf_ver(1);
-    msg.set_from_peer(new_peer(2, test_leader_id));
+    msg.set_from_peer(new_peer(store_id + 1, test_leader_id));
     let raft_message = msg.mut_message();
     raft_message.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     raft_message.set_from(6);
@@ -130,14 +131,14 @@ fn test_life_by_message() {
     tombstone_msg.set_is_tombstone(true);
     router.send_raft_message(tombstone_msg).unwrap();
     assert_peer_not_exist(test_region_id, test_peer_id, &router);
-    assert_tombstone(raft_engine, test_region_id, &new_peer(1, test_peer_id));
+    assert_tombstone(raft_engine, test_region_id, &new_peer(store_id, test_peer_id));
 
     // Restart should not recreate tombstoned peer.
     cluster.restart(0);
     let router = cluster.router(0);
     assert_peer_not_exist(test_region_id, test_peer_id, &router);
     let raft_engine = &cluster.node(0).running_state().unwrap().raft_engine;
-    assert_tombstone(raft_engine, test_region_id, &new_peer(1, test_peer_id));
+    assert_tombstone(raft_engine, test_region_id, &new_peer(store_id, test_peer_id));
 }
 
 #[test]
@@ -147,11 +148,12 @@ fn test_destroy_by_larger_id() {
     let test_region_id = 4;
     let test_peer_id = 6;
     let init_term = 5;
+    let store_id = cluster.node(0).id();
     let mut msg = Box::new(RaftMessage::default());
     msg.set_region_id(test_region_id);
-    msg.set_to_peer(new_peer(1, test_peer_id));
+    msg.set_to_peer(new_peer(store_id, test_peer_id));
     msg.mut_region_epoch().set_conf_ver(1);
-    msg.set_from_peer(new_peer(2, 8));
+    msg.set_from_peer(new_peer(store_id+1, 8));
     let raft_message = msg.mut_message();
     raft_message.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     raft_message.set_from(6);
@@ -167,7 +169,7 @@ fn test_destroy_by_larger_id() {
 
     // Smaller ID should be ignored.
     let mut smaller_id_msg = msg;
-    smaller_id_msg.set_to_peer(new_peer(1, test_peer_id - 1));
+    smaller_id_msg.set_to_peer(new_peer(store_id, test_peer_id - 1));
     smaller_id_msg.mut_message().set_term(init_term + 1);
     router.send_raft_message(smaller_id_msg.clone()).unwrap();
     let meta = router
@@ -178,7 +180,7 @@ fn test_destroy_by_larger_id() {
 
     // Larger ID should trigger destroy.
     let mut larger_id_msg = smaller_id_msg;
-    larger_id_msg.set_to_peer(new_peer(1, test_peer_id + 1));
+    larger_id_msg.set_to_peer(new_peer(store_id, test_peer_id + 1));
     router.send_raft_message(larger_id_msg).unwrap();
     assert_peer_not_exist(test_region_id, test_peer_id, &router);
     let meta = router

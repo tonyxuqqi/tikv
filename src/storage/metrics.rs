@@ -345,8 +345,8 @@ where
         _ => return f(),
     };
     tls_cell.with(|c| {
-        let mut c = c.borrow_mut();
-        let perf_context = c.get_or_insert_with(|| {
+        // let mut c = c.borrow_mut();
+        /*let perf_context = c.get_or_insert_with(|| {
             with_tls_engine(|engine: &mut E| {
                 Box::new(engine.kv_engine().unwrap().get_perf_context(
                     PerfLevel::Uninitialized,
@@ -354,9 +354,9 @@ where
                 ))
             })
         });
-        perf_context.start_observe();
+        perf_context.start_observe();*/
         let res = f();
-        perf_context.report_metrics(&[get_tls_tracker_token()]);
+        // perf_context.report_metrics(&[get_tls_tracker_token()]);
         res
     })
 }

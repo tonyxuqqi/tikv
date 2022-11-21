@@ -15,7 +15,7 @@ use super::{
     },
     ApplyRes,
 };
-use crate::operation::SplitInit;
+use crate::operation::{SplitInit, SplitRegion};
 
 #[derive(Debug, Clone, Copy, PartialEq, Hash)]
 #[repr(u8)]
@@ -138,8 +138,10 @@ pub enum PeerMsg {
     Persisted {
         peer_id: u64,
         ready_number: u64,
+        need_scheduled: bool,
     },
     QueryDebugInfo(DebugInfoChannel),
+    SplitRegion(SplitRegion),
     /// A message that used to check if a flush is happened.
     #[cfg(feature = "testexport")]
     WaitFlush(super::FlushChannel),
@@ -177,14 +179,16 @@ impl fmt::Debug for PeerMsg {
             PeerMsg::Persisted {
                 peer_id,
                 ready_number,
+                need_scheduled,
             } => write!(
                 fmt,
-                "Persisted peer_id {}, ready_number {}",
-                peer_id, ready_number
+                "Persisted peer_id {}, ready_number {},need_scheduled:{}",
+                peer_id, ready_number, need_scheduled
             ),
             PeerMsg::LogsFetched(fetched) => write!(fmt, "LogsFetched {:?}", fetched),
             PeerMsg::SnapshotGenerated(_) => write!(fmt, "SnapshotGenerated"),
             PeerMsg::QueryDebugInfo(_) => write!(fmt, "QueryDebugInfo"),
+            PeerMsg::SplitRegion(_) => write!(fmt, "SplitRegion"),
             #[cfg(feature = "testexport")]
             PeerMsg::WaitFlush(_) => write!(fmt, "FlushMessages"),
         }
@@ -195,7 +199,7 @@ pub enum StoreMsg {
     RaftMessage(Box<RaftMessage>),
     SplitInit(Box<SplitInit>),
     Tick(StoreTick),
-    Start,
+    Start(u64),
 }
 
 impl fmt::Debug for StoreMsg {
@@ -204,7 +208,7 @@ impl fmt::Debug for StoreMsg {
             StoreMsg::RaftMessage(_) => write!(fmt, "Raft Message"),
             StoreMsg::SplitInit(_) => write!(fmt, "Split initialization"),
             StoreMsg::Tick(tick) => write!(fmt, "StoreTick {:?}", tick),
-            StoreMsg::Start => write!(fmt, "Start store"),
+            StoreMsg::Start(store_id) => write!(fmt, "Start store {}", store_id),
         }
     }
 }

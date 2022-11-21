@@ -30,12 +30,21 @@ const DEFAULT_SCHED_PENDING_WRITE_MB: u64 = 100;
 
 const DEFAULT_RESERVED_SPACE_GB: u64 = 5;
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum EngineType {
+    RaftKv,
+    RaftKvV2,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, OnlineConfig)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
     #[online_config(skip)]
     pub data_dir: String,
+    #[online_config(skip)]
+    pub engine: EngineType,
     // Replaced by `GcConfig.ratio_threshold`. Keep it for backward compatibility.
     #[online_config(skip)]
     pub gc_ratio_threshold: f64,
@@ -72,13 +81,14 @@ impl Default for Config {
         let cpu_num = SysQuota::cpu_cores_quota();
         Config {
             data_dir: DEFAULT_DATA_DIR.to_owned(),
+            engine: EngineType::RaftKvV2,
             gc_ratio_threshold: DEFAULT_GC_RATIO_THRESHOLD,
             max_key_size: DEFAULT_MAX_KEY_SIZE,
             scheduler_concurrency: DEFAULT_SCHED_CONCURRENCY,
             scheduler_worker_pool_size: if cpu_num >= 16.0 {
                 8
             } else {
-                std::cmp::max(1, std::cmp::min(4, cpu_num as usize))
+                cpu_num.clamp(1., 4.) as usize
             },
             scheduler_pending_write_threshold: ReadableSize::mb(DEFAULT_SCHED_PENDING_WRITE_MB),
             reserve_space: ReadableSize::gb(DEFAULT_RESERVED_SPACE_GB),
