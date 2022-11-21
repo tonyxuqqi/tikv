@@ -81,7 +81,7 @@ use crate::{
     storage::config::{Config as StorageConfig, DEFAULT_DATA_DIR},
 };
 
-pub const DEFAULT_ROCKSDB_SUB_DIR: &str = "db";
+pub const DEFAULT_ROCKSDB_SUB_DIR: &str = "tablets";
 
 /// By default, block cache size will be set to 45% of system memory.
 pub const BLOCK_CACHE_RATE: f64 = 0.45;
@@ -3066,12 +3066,13 @@ impl TikvConfig {
             return Err("raftdb.wal_dir can't be same as rocksdb.wal_dir".into());
         }
 
+        let default_tablet_path = format!("{}/2_5", kv_db_path); 
         RaftDataStateMachine::new(
             &self.storage.data_dir,
             &self.raft_store.raftdb_path,
             &self.raft_engine.config.dir,
         )
-        .validate(RocksEngine::exists(&kv_db_path))?;
+        .validate(RocksEngine::exists(&default_tablet_path))?;
 
         // Check blob file dir is empty when titan is disabled
         if !self.rocksdb.titan.enabled {
