@@ -295,6 +295,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         regions: Vec<Region>,
     ) {
         fail_point!("on_split", self.peer().get_store_id() == 3, |_| {});
+
         let derived = &regions[derived_index];
         let derived_epoch = derived.get_region_epoch().clone();
         let region_id = derived.get_id();

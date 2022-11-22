@@ -586,7 +586,6 @@ impl PdClient for RpcClient {
     ) -> PdFuture<()> {
         PD_HEARTBEAT_COUNTER_VEC.with_label_values(&["send"]).inc();
 
-        info!("Region heartbeat ------ {:?}", region);
         let mut req = pdpb::RegionHeartbeatRequest::default();
         req.set_term(term);
         req.set_header(self.header());
@@ -638,7 +637,6 @@ impl PdClient for RpcClient {
                             fail::fail_point!("region_heartbeat_send_failed", |_| {
                                 Err(Error::Grpc(grpcio::Error::RemoteStopped))
                             });
-                            info!("Region heartbeat ------ {:?}", r.get_region());
                             Ok((r, WriteFlags::default()))
                         }))
                         .await;
