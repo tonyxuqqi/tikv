@@ -206,8 +206,8 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
 
     fn on_tick(&mut self, tick: PeerTick) {
         let key = 1u16 << (tick as u16);
-        if self.fsm.tick_registry & key != key {
-            self.fsm.tick_registry -= key;
+        if self.fsm.tick_registry & key == key {
+            self.fsm.tick_registry ^= key;
         }
         match tick {
             PeerTick::Raft => self.on_raft_tick(),
