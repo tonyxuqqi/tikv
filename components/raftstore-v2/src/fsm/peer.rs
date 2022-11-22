@@ -8,7 +8,7 @@ use batch_system::{BasicMailbox, Fsm};
 use crossbeam::channel::TryRecvError;
 use engine_traits::{KvEngine, RaftEngine, TabletFactory};
 use raftstore::store::{Config, LocksStatus, Transport};
-use slog::{debug, error, info, trace, Logger};
+use slog::{debug, error, info, trace, warn, Logger};
 use tikv_util::{
     is_zero_duration,
     mpsc::{self, LooseBoundedSender, Receiver},
@@ -190,6 +190,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
     fn on_start(&mut self) {
         self.schedule_tick(PeerTick::Raft);
         self.schedule_tick(PeerTick::SplitRegionCheck);
+        self.schedule_tick(PeerTick::PdHeartbeat);
         if self.fsm.peer.storage().is_initialized() {
             self.fsm.peer.schedule_apply_fsm(self.store_ctx);
         }
@@ -204,6 +205,10 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
     }
 
     fn on_tick(&mut self, tick: PeerTick) {
+        let key = 1u16 << (tick as u16);
+        if self.fsm.tick_registry & key != key {
+            self.fsm.tick_registry -= key;
+        }
         match tick {
             PeerTick::Raft => self.on_raft_tick(),
             PeerTick::PdHeartbeat => self.on_pd_heartbeat(),

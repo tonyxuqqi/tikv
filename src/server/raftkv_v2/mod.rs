@@ -1,16 +1,15 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 mod node;
-
-use std::{pin::Pin, sync::Arc};
+use std::sync::Arc;
 
 use collections::HashMap;
 use crossbeam::channel::TrySendError;
 use engine_traits::{CfName, KvEngine, MvccProperties, RaftEngine};
 use futures::{future::BoxFuture, Future};
-use keys::NoPrefix;
+use keys::Prefix;
 use kvproto::{
-    kvrpcpb::{Context, SplitRegionResponse},
+    kvrpcpb::Context,
     metapb::{Region, RegionEpoch},
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse, Request},
     raft_serverpb::RaftMessage,
@@ -18,12 +17,12 @@ use kvproto::{
 pub use node::NodeV2;
 use raft::SnapshotStatus;
 use raftstore::{
-    store::{cmd_resp, RegionSnapshot, SnapError},
+    store::{cmd_resp, RegionSnapshot},
     DiscardReason,
 };
 use raftstore_v2::{
     router::{CmdResChannel, CmdResSubscriber, PeerMsg, RaftRequest, RaftRouter},
-    SplitRegion, StoreRouter,
+    StoreRouter,
 };
 use tikv_kv::{
     raft_extension::RaftExtension, Engine, Modify, OnReturnCallback, SnapContext, WriteData,
@@ -170,7 +169,7 @@ where
     EK: KvEngine,
     ER: RaftEngine,
 {
-    type Snap = RegionSnapshot<EK::Snapshot, NoPrefix>;
+    type Snap = RegionSnapshot<EK::Snapshot, Prefix>;
     type Local = EK;
 
     fn kv_engine(&self) -> Option<EK> {

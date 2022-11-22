@@ -343,7 +343,7 @@ where
         CommandKind::resolve_lock_lite => &RESOLVE_LOCK_LITE,
         _ => return f(),
     };
-    tls_cell.with(|c| {
+    tls_cell.with(|_c| {
         // let mut c = c.borrow_mut();
         // let perf_context = c.get_or_insert_with(|| {
         // with_tls_engine(|engine: &mut E| {

@@ -337,6 +337,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         self.post_split();
 
         if self.is_leader() {
+            self.heartbeat_pd(store_ctx);
+            
             // Notify pd immediately to let it update the region meta.
             info!(
                 self.logger,

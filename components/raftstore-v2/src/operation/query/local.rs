@@ -10,7 +10,7 @@ use batch_system::Router;
 use crossbeam::channel::TrySendError;
 use engine_traits::{KvEngine, RaftEngine};
 use futures::{Future, FutureExt};
-use keys::NoPrefix;
+use keys::Prefix;
 use kvproto::{
     errorpb,
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse},
@@ -108,7 +108,7 @@ where
     fn try_get_snapshot(
         &mut self,
         req: RaftCmdRequest,
-    ) -> std::result::Result<Option<RegionSnapshot<E::Snapshot, NoPrefix>>, RaftCmdResponse> {
+    ) -> std::result::Result<Option<RegionSnapshot<E::Snapshot, Prefix>>, RaftCmdResponse> {
         match self.pre_propose_raft_command(&req) {
             Ok(Some((mut delegate, policy))) => match policy {
                 RequestPolicy::ReadLocal => {
@@ -231,7 +231,7 @@ where
     pub fn snapshot(
         &mut self,
         mut req: RaftCmdRequest,
-    ) -> impl Future<Output = std::result::Result<RegionSnapshot<E::Snapshot, NoPrefix>, RaftCmdResponse>>
+    ) -> impl Future<Output = std::result::Result<RegionSnapshot<E::Snapshot, Prefix>, RaftCmdResponse>>
     {
         let region_id = req.header.get_ref().region_id;
         let snap = self.try_get_snapshot(req.clone());

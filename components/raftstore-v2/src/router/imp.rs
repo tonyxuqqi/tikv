@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam::channel::TrySendError;
 use engine_traits::{KvEngine, RaftEngine};
 use futures::Future;
-use keys::NoPrefix;
+use keys::Prefix;
 use kvproto::{
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse},
     raft_serverpb::RaftMessage,
@@ -101,7 +101,7 @@ impl<EK: KvEngine, ER: RaftEngine> RaftRouter<EK, ER> {
     pub fn snapshot(
         &mut self,
         req: RaftCmdRequest,
-    ) -> impl Future<Output = std::result::Result<RegionSnapshot<EK::Snapshot, NoPrefix>, RaftCmdResponse>>
+    ) -> impl Future<Output = std::result::Result<RegionSnapshot<EK::Snapshot, Prefix>, RaftCmdResponse>>
     {
         self.local_reader.snapshot(req)
     }
