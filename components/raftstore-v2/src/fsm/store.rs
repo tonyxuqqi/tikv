@@ -148,6 +148,8 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T> StoreFsmDelegate<'a, EK, ER, T> {
                 .map_or(0, |d| d.as_secs()),
         );
         self.fsm.store.logger = self.fsm.store.logger.new(o!("store_id" => store_id));
+
+        self.on_pd_store_heartbeat();
     }
 
     pub fn schedule_tick(&mut self, tick: StoreTick, timeout: Duration) {
