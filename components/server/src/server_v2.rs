@@ -100,6 +100,9 @@ const SYSTEM_HEALTHY_THRESHOLD: f64 = 0.50;
 // pace of cpu quota adjustment
 const CPU_QUOTA_ADJUSTMENT_PACE: f64 = 200.0; // 0.2 vcpu
 
+const DEFAULT_METRICS_FLUSH_INTERVAL: Duration = Duration::from_millis(10_000);
+const DEFAULT_ENGINE_METRICS_RESET_INTERVAL: Duration = Duration::from_millis(60_000);
+
 #[inline]
 fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(config: TikvConfig) {
     let mut tikv = TikvServer::<CER>::init::<F>(config);
@@ -115,8 +118,9 @@ fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(config: TikvConfig) {
     tikv.init_encryption();
     let listener = tikv.init_flow_receiver();
     let (raft_engine, _engines_info) = tikv.init_raw_engines(listener);
-    let (engine, server_config) = tikv.init_servers::<F>(raft_engine);
+    let (engine, server_config) = tikv.init_servers::<F>(raft_engine.clone());
     tikv.register_services();
+    tikv.init_metrics_flusher(raft_engine);
     tikv.run_server(server_config);
     tikv.run_status_server(engine.raft_extension().clone());
     tikv.init_quota_tuning_task(tikv.quota_limiter.clone());
@@ -807,6 +811,19 @@ impl<ER: RaftEngine> TikvServer<ER> {
         }
     }
 
+    fn init_metrics_flusher(&mut self, raft_engine: ER) {
+        let mut engine_metrics = EngineMetricsManager::<RocksEngine, ER>::new(
+            self.tablet_factory.clone().unwrap(),
+            raft_engine,
+        );
+
+        self.background_worker
+            .spawn_interval_task(DEFAULT_METRICS_FLUSH_INTERVAL, move || {
+                let now = Instant::now();
+                engine_metrics.flush(now);
+            });
+    }
+
     // Only background cpu quota tuning is implemented at present. iops and frontend
     // quota tuning is on the way
     fn init_quota_tuning_task(&self, quota_limiter: Arc<QuotaLimiter>) {
@@ -1221,6 +1238,41 @@ impl Stop for Worker {
 impl<T: fmt::Display + Send + 'static> Stop for LazyWorker<T> {
     fn stop(self: Box<Self>) {
         self.stop_worker();
+    }
+}
+
+pub struct EngineMetricsManager<EK: KvEngine, ER: RaftEngine> {
+    tablet_factory: Arc<dyn TabletFactory<EK> + Sync + Send>,
+    raft_engine: ER,
+    last_reset: Instant,
+}
+
+impl<EK: KvEngine, ER: RaftEngine> EngineMetricsManager<EK, ER> {
+    pub fn new(tablet_factory: Arc<dyn TabletFactory<EK> + Sync + Send>, raft_engine: ER) -> Self {
+        EngineMetricsManager {
+            tablet_factory,
+            raft_engine,
+            last_reset: Instant::now(),
+        }
+    }
+
+    pub fn flush(&mut self, now: Instant) {
+        let should_reset =
+            now.saturating_duration_since(self.last_reset) >= DEFAULT_ENGINE_METRICS_RESET_INTERVAL;
+        let mut is_first_instance = true;
+        self.tablet_factory
+            .for_each_opened_tablet(&mut |_, _, db: &EK| {
+                KvEngine::flush_metrics(db, "kv", is_first_instance);
+                is_first_instance = false;
+                if should_reset {
+                    KvEngine::reset_statistics(db);
+                }
+            });
+        self.raft_engine.flush_metrics("raft", true);
+        if should_reset {
+            self.raft_engine.reset_statistics();
+            self.last_reset = now;
+        }
     }
 }
 

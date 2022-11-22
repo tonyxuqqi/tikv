@@ -159,9 +159,9 @@ impl<E: Engine> Tracker<E> {
             if let Some(storage_stats) = some_storage_stats {
                 self.total_storage_stats.add(&storage_stats);
             }
-            /*self.with_perf_context(|perf_context| {
-                perf_context.report_metrics(&[get_tls_tracker_token()])
-            });*/
+            // self.with_perf_context(|perf_context| {
+            // perf_context.report_metrics(&[get_tls_tracker_token()])
+            // });
             self.current_stage = TrackerState::ItemFinished(now);
         } else {
             unreachable!()
