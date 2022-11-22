@@ -376,8 +376,13 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
         let key = TabletSnapKey::new(region_id, self.peer().get_id(), last_term, last_index);
 
         let mut path = snap_mgr.get_recv_tablet_path(&key);
-        let hook =
-            move |region_id: u64| tablet_factory.load_tablet(path.as_path(), region_id, last_index);
+        let hook = move |region_id: u64| {
+            let res = tablet_factory.load_tablet(path.as_path(), region_id, last_index);
+            if let Err(e) = &res {
+                panic!("failed to apply snapshot {} {:?}", region_id, e);
+            }
+            res
+        };
         task.add_after_write_hook(Some(Box::new(hook)));
         Ok(())
     }

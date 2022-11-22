@@ -721,6 +721,7 @@ impl<ER: RaftEngine> TikvServer<ER> {
             raft_kv_v2.raft_extension().clone(),
             self.resolver.clone(),
             None,
+            self.snap_mgr.clone(),
             None,
             check_leader_scheduler,
             self.env.clone(),

@@ -25,10 +25,12 @@ pub struct KvEngineFactoryV2 {
 
 impl KvEngineFactoryV2 {
     pub fn new(inner: KvEngineFactory) -> Self {
-        KvEngineFactoryV2 {
+        let f = KvEngineFactoryV2 {
             inner,
             registry: Arc::new(Mutex::new(HashMap::default())),
-        }
+        };
+        std::fs::create_dir_all(f.tablets_path()).unwrap();
+        f
     }
 }
 

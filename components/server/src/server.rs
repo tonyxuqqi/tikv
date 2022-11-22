@@ -916,6 +916,7 @@ impl<ER: RaftEngine> TikvServer<ER> {
                 .clone(),
             self.resolver.clone(),
             snap_mgr.clone(),
+            None,
             gc_worker.clone(),
             check_leader_scheduler,
             self.env.clone(),

@@ -209,18 +209,23 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
         if self.fsm.tick_registry & key == key {
             self.fsm.tick_registry ^= key;
         }
+        macro_rules! unimp {
+            ($tick:expr) => {
+                error!(self.fsm.logger(), "unsupported tick"; "tick" => ?$tick)
+            };
+        }
         match tick {
             PeerTick::Raft => self.on_raft_tick(),
             PeerTick::PdHeartbeat => self.on_pd_heartbeat(),
-            PeerTick::RaftLogGc => unimplemented!(),
+            PeerTick::RaftLogGc => unimp!(tick),
             PeerTick::SplitRegionCheck => self.on_split_region_check(),
-            PeerTick::CheckMerge => unimplemented!(),
-            PeerTick::CheckPeerStaleState => unimplemented!(),
-            PeerTick::EntryCacheEvict => unimplemented!(),
-            PeerTick::CheckLeaderLease => unimplemented!(),
-            PeerTick::ReactivateMemoryLock => unimplemented!(),
-            PeerTick::ReportBuckets => unimplemented!(),
-            PeerTick::CheckLongUncommitted => unimplemented!(),
+            PeerTick::CheckMerge => unimp!(tick),
+            PeerTick::CheckPeerStaleState => unimp!(tick),
+            PeerTick::EntryCacheEvict => unimp!(tick),
+            PeerTick::CheckLeaderLease => unimp!(tick),
+            PeerTick::ReactivateMemoryLock => unimp!(tick),
+            PeerTick::ReportBuckets => unimp!(tick),
+            PeerTick::CheckLongUncommitted => unimp!(tick),
         }
     }
 
