@@ -4,7 +4,7 @@
 
 use std::cmp;
 
-use engine_traits::{KvEngine, RaftEngine};
+use engine_traits::{KvEngine, RaftEngine, TabletFactory};
 use fail::fail_point;
 use kvproto::{metapb, pdpb};
 use raftstore::store::Transport;

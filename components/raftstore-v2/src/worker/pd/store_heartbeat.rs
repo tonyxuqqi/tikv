@@ -260,7 +260,7 @@ where
 
     /// Returns (capacity, used, available).
     fn collect_engine_size(&self) -> Option<(u64, u64, u64)> {
-        let disk_stats = match fs2::statvfs(self.tablet_factory.tablets_path()) {
+        let disk_stats = match fs2::statvfs(self.tablet_factory.tablets_path().parent().unwrap()) {
             Err(e) => {
                 error!(
                     self.logger,

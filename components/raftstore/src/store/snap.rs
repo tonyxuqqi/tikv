@@ -1949,7 +1949,9 @@ pub struct TabletSnapManager {
 
 impl TabletSnapManager {
     pub fn new<T: Into<String>>(path: T) -> Self {
-        Self { base: path.into() }
+        let m = Self { base: path.into() };
+        m.init().unwrap();
+        m
     }
 
     pub fn init(&self) -> io::Result<()> {
