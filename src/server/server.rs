@@ -546,6 +546,7 @@ mod tests {
                 addr: Arc::clone(&addr),
             },
             SnapManager::new(""),
+            None,
             gc_worker,
             check_leader_scheduler,
             env,
