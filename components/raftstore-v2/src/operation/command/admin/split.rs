@@ -424,9 +424,11 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
 
             self.tablet_mut().set(tablet);
 
+            let prev_hs = self.raft_group().raft.hard_state();
             let storage = Storage::with_split(
                 self.peer().get_store_id(),
                 &split_init.region,
+                prev_hs,
                 store_ctx.engine.clone(),
                 store_ctx.read_scheduler.clone(),
                 &store_ctx.logger,
