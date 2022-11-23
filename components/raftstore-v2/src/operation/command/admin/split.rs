@@ -444,7 +444,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
 
         let mut raft_group = RawNode::new(&raft_cfg, storage, &self.logger).unwrap();
         // hack. We need to correctly merge state.
-        while raft_group.ready().number() <= self.async_writer.known_largest_number() {}
+        while raft_group.ready().number() < self.async_writer.known_largest_number() {}
+        info!(
+            self.logger,
+            "after skipping ready";
+            "cur_ready_num" => self.async_writer.known_largest_number()
+        );
         // If this region has only one peer and I am the one, campaign directly.
         if split_init.region.get_peers().len() == 1 {
             raft_group.campaign().unwrap();
