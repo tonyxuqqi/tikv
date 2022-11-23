@@ -142,6 +142,12 @@ impl FlowInfoDispatcher {
                                     suffix,
                                 ))
                             } else {
+                                error!(
+                                    "failed to open tablet region_id {} suffix {} error {:?}",
+                                    region_id,
+                                    suffix,
+                                    engine.err()
+                                );
                                 None
                             }
                         };
@@ -181,15 +187,22 @@ impl FlowInfoDispatcher {
                             // if checker.suffix < suffix, it means its tablet is old and needs the
                             // refresh
                             if checker.tablet_suffix() < suffix {
-                                let engine = tablet_factory
-                                    .open_tablet(
+                                let engine = tablet_factory.open_tablet(
+                                    region_id,
+                                    Some(suffix),
+                                    OpenOptions::default().set_cache_only(true),
+                                );
+                                if let Ok(engine) = engine {
+                                    checker.set_engine(engine);
+                                    checker.set_tablet_suffix(suffix);
+                                } else {
+                                    error!(
+                                        "failed to open tablet region_id {} suffix {} error {:?}",
                                         region_id,
-                                        Some(suffix),
-                                        OpenOptions::default().set_cache_only(true),
-                                    )
-                                    .unwrap();
-                                checker.set_engine(engine);
-                                checker.set_tablet_suffix(suffix);
+                                        suffix,
+                                        engine.err()
+                                    );
+                                }
                             }
                         }
                         Ok(FlowInfo::Destroyed(region_id, suffix)) => {

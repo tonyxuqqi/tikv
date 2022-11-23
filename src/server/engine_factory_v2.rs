@@ -127,7 +127,9 @@ impl TabletFactory<RocksEngine> for KvEngineFactoryV2 {
 
         let tablet = self.inner.create_tablet(path, id, suffix)?;
         debug!("open tablet"; "key" => ?(id, suffix));
-        self.inner.on_tablet_created(id, suffix);
+        if path == self.tablet_path(id, suffix).as_path() {
+            self.inner.on_tablet_created(id, suffix);
+        }
         Ok(tablet)
     }
 
