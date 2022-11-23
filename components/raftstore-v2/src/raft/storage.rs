@@ -235,7 +235,12 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
         if raft_state.get_hard_state().get_commit() < RAFT_INIT_LOG_INDEX {
             raft_state.mut_hard_state().set_commit(RAFT_INIT_LOG_INDEX);
         }
-        raft_state.set_last_index(RAFT_INIT_LOG_INDEX);
+        if raft_state.get_hard_state().get_term() < RAFT_INIT_LOG_TERM {
+            raft_state.mut_hard_state().set_term(RAFT_INIT_LOG_TERM);
+        }
+        if raft_state.get_last_index() < RAFT_INIT_LOG_INDEX {
+            raft_state.set_last_index(RAFT_INIT_LOG_INDEX);
+        }
 
         Self::create(
             store_id,
@@ -244,7 +249,7 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
             apply_state,
             engine,
             read_scheduler,
-            true,
+            false,
             logger,
         )
         .map(Some)
@@ -603,6 +608,8 @@ mod tests {
             CachedTablet::new(Some(tablet)),
             factory,
             sched,
+            0,
+            0,
             logger,
         );
 

@@ -858,6 +858,8 @@ mod test {
             CachedTablet::new(Some(tablet)),
             factory.clone(),
             read_scheduler,
+            5,
+            5,
             logger.clone(),
         );
 

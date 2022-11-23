@@ -64,7 +64,7 @@ impl<EK: KvEngine, ER: RaftEngine> AsyncWriter<EK, ER> {
     pub fn known_largest_number(&self) -> u64 {
         self.unpersisted_readies
             .back()
-            .map(|r| r.number)
+            .map(|r| r.max_empty_number)
             .unwrap_or(self.persisted_number)
     }
 

@@ -353,10 +353,7 @@ where
         } else {
             ConfState::default()
         };
-        Ok(RaftState::new(
-            hard_state,
-            conf_state,
-        ))
+        Ok(RaftState::new(hard_state, conf_state))
     }
 
     #[inline]

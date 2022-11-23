@@ -683,7 +683,7 @@ impl<EK: KvEngine, ER: RaftEngine> EntryStorage<EK, ER> {
                 "check_range failed";
                 "region_id" => self.region_id,
                 "peer_id" => self.peer_id,
-                "low" => low, 
+                "low" => low,
                 "truncated_index" => self.truncated_index()
             );
             return Err(raft::Error::Store(StorageError::Compacted));
