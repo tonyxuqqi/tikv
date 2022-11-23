@@ -15,5 +15,5 @@ pub use rocksdb::{
     DBRecoveryMode, DBStatisticsTickerType, DBTitanDBBlobRunMode, Env, EventListener,
     IngestExternalFileOptions, LRUCacheOptions, MemoryAllocator, PerfContext,
     PrepopulateBlockCache, Range, SliceTransform, Statistics, TablePropertiesCollector,
-    TablePropertiesCollectorFactory,
+    TablePropertiesCollectorFactory, WriteBufferManager,
 };

@@ -529,6 +529,7 @@ impl ServerCluster {
                 store.get_engine().raft_extension().clone(),
                 resolver.clone(),
                 snap_mgr.clone(),
+                None,
                 gc_worker.clone(),
                 check_leader_scheduler.clone(),
                 self.env.clone(),

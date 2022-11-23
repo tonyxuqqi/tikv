@@ -9,7 +9,6 @@ use std::{
     time::Duration,
 };
 
-use engine_traits::KvEngine;
 use file_system::{IoType, WithIoType};
 use futures::{
     future::{Future, TryFutureExt},

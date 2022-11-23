@@ -2881,6 +2881,13 @@ pub struct TikvConfig {
     #[online_config(skip)]
     pub memory_usage_high_water: f64,
 
+    #[doc(hidden)]
+    #[online_config(skip)]
+    pub write_buffer_limit: Option<ReadableSize>,
+    #[doc(hidden)]
+    #[online_config(skip)]
+    pub write_buffer_flush_oldest: bool,
+
     #[online_config(submodule)]
     pub log: LogConfig,
 
@@ -2974,6 +2981,8 @@ impl Default for TikvConfig {
             abort_on_panic: false,
             memory_usage_limit: None,
             memory_usage_high_water: 0.9,
+            write_buffer_limit: None,
+            write_buffer_flush_oldest: false,
             log: LogConfig::default(),
             quota: QuotaConfig::default(),
             readpool: ReadPoolConfig::default(),
