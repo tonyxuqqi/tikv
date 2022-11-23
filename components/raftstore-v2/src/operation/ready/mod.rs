@@ -308,6 +308,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         debug!(self.logger, "handle raft ready");
 
         let mut ready = self.raft_group_mut().ready();
+        info!(self.logger, "handle raft ready {:?}", ready);
         // Update it after unstable entries pagination is introduced.
         debug_assert!(ready.entries().last().map_or_else(
             || true,
@@ -367,7 +368,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             self.start_destroy(ctx, &mut write_task);
         }
         // Ready number should increase monotonically.
-        assert!(self.async_writer.known_largest_number() < ready.number());
+        assert!(
+            self.async_writer.known_largest_number() < ready.number(),
+            "known largest number {}, current ready number {}",
+            self.async_writer.known_largest_number(),
+            ready.number()
+        );
         if let Some(task) = self.async_writer.write(ctx, write_task) {
             // So the task doesn't need to be process asynchronously, directly advance.
             let mut light_rd = self.raft_group_mut().advance_append(ready);
