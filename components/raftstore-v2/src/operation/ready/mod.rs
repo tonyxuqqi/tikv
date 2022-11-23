@@ -290,8 +290,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     /// are persisted.
     #[inline]
     pub fn handle_raft_ready<T: Transport>(&mut self, ctx: &mut StoreContext<EK, ER, T>) {
-        assert!(self.raft_group().raft.raft_log.last_index() >= RAFT_INIT_LOG_INDEX);
-
         let has_ready = self.reset_has_ready();
         if !has_ready || self.destroy_progress().started() {
             #[cfg(feature = "testexport")]
