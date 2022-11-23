@@ -308,7 +308,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         debug!(self.logger, "handle raft ready");
 
         let mut ready = self.raft_group_mut().ready();
-        info!(self.logger, "handle raft ready {:?}", ready);
         // Update it after unstable entries pagination is introduced.
         debug_assert!(ready.entries().last().map_or_else(
             || true,
