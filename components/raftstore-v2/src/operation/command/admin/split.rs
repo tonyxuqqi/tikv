@@ -394,64 +394,57 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         store_ctx: &mut StoreContext<EK, ER, T>,
         split_init: Box<SplitInit>,
     ) {
-        let region_id = split_init.region.id;
-        let replace = split_init.region.get_region_epoch().get_version()
-            > self
-                .storage()
-                .region_state()
-                .get_region()
-                .get_region_epoch()
-                .get_version();
-
-        if !self.storage().is_initialized() || replace {
-            let split_temp_path = store_ctx.tablet_factory.tablet_path_with_prefix(
-                SPLIT_PREFIX,
-                region_id,
-                RAFT_INIT_LOG_INDEX,
-            );
-
-            let tablet = store_ctx
-                .tablet_factory
-                .load_tablet(&split_temp_path, region_id, RAFT_INIT_LOG_INDEX)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "{:?} fails to load tablet {:?} :{:?}",
-                        self.logger.list(),
-                        split_temp_path,
-                        e
-                    )
-                });
-
-            self.tablet_mut().set(tablet);
-
-            let storage = Storage::with_split(
-                self.peer().get_store_id(),
-                &split_init.region,
-                store_ctx.engine.clone(),
-                store_ctx.read_scheduler.clone(),
-                &store_ctx.logger,
-            )
-            .unwrap_or_else(|e| panic!("fail to create storage: {:?}", e))
-            .unwrap();
-
-            let applied_index = storage.apply_state().get_applied_index();
-            let peer_id = storage.peer().get_id();
-            let raft_cfg = store_ctx.cfg.new_raft_config(peer_id, applied_index);
-
-            let mut raft_group = RawNode::new(&raft_cfg, storage, &self.logger).unwrap();
-            // hack. We need to correctly merge state.
-            while raft_group.ready().number() < self.async_writer.known_largest_number() {}
-            // If this region has only one peer and I am the one, campaign directly.
-            if split_init.region.get_peers().len() == 1 {
-                raft_group.campaign().unwrap();
-                self.set_has_ready();
-            }
-            self.set_raft_group(raft_group);
-        } else {
-            // TODO: when reaching here (peer is initalized before and cannot be replaced),
-            // it is much complexer.
+        if self.raft_group().raft.raft_log.last_index() >= RAFT_INIT_LOG_INDEX {
+            // The peer has already been initialized by snapshot.
             return;
         }
+
+        let region_id = split_init.region.id;
+        let split_temp_path = store_ctx.tablet_factory.tablet_path_with_prefix(
+            SPLIT_PREFIX,
+            region_id,
+            RAFT_INIT_LOG_INDEX,
+        );
+
+        let tablet = store_ctx
+            .tablet_factory
+            .load_tablet(&split_temp_path, region_id, RAFT_INIT_LOG_INDEX)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{:?} fails to load tablet {:?} :{:?}",
+                    self.logger.list(),
+                    split_temp_path,
+                    e
+                )
+            });
+
+        self.tablet_mut().set(tablet);
+
+        let prev_hs = self.raft_group().raft.hard_state();
+        let storage = Storage::with_split(
+            self.peer().get_store_id(),
+            &split_init.region,
+            prev_hs,
+            store_ctx.engine.clone(),
+            store_ctx.read_scheduler.clone(),
+            &store_ctx.logger,
+        )
+        .unwrap_or_else(|e| panic!("fail to create storage: {:?}", e))
+        .unwrap();
+
+        let applied_index = storage.apply_state().get_applied_index();
+        let peer_id = storage.peer().get_id();
+        let raft_cfg = store_ctx.cfg.new_raft_config(peer_id, applied_index);
+
+        let mut raft_group = RawNode::new(&raft_cfg, storage, &self.logger).unwrap();
+        // hack. We need to correctly merge state.
+        while raft_group.ready().number() < self.async_writer.known_largest_number() {}
+        // If this region has only one peer and I am the one, campaign directly.
+        if split_init.region.get_peers().len() == 1 {
+            raft_group.campaign().unwrap();
+            self.set_has_ready();
+        }
+        self.set_raft_group(raft_group);
 
         {
             let mut meta = store_ctx.store_meta.lock().unwrap();
