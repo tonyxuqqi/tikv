@@ -679,6 +679,13 @@ impl<EK: KvEngine, ER: RaftEngine> EntryStorage<EK, ER> {
                 low, high
             )));
         } else if low <= self.truncated_index() {
+            warn!(
+                "check_range failed";
+                "region_id" => self.region_id,
+                "peer_id" => self.peer_id,
+                "low" => low, 
+                "truncated_index" => self.truncated_index()
+            );
             return Err(raft::Error::Store(StorageError::Compacted));
         } else if high > self.last_index() + 1 {
             return Err(storage_error(format!(

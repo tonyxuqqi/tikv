@@ -3074,13 +3074,13 @@ impl TikvConfig {
             return Err("raftdb.wal_dir can't be same as rocksdb.wal_dir".into());
         }
 
-        let default_tablet_path = format!("{}/2_5", kv_db_path);
+        let tablet_exists = Path::new(&kv_db_path).is_dir();
         RaftDataStateMachine::new(
             &self.storage.data_dir,
             &self.raft_store.raftdb_path,
             &self.raft_engine.config.dir,
         )
-        .validate(RocksEngine::exists(&default_tablet_path))?;
+        .validate(tablet_exists)?;
 
         // Check blob file dir is empty when titan is disabled
         if !self.rocksdb.titan.enabled {

@@ -116,32 +116,35 @@ impl FlowInfoDispatcher {
                         Err(_) => {}
                     }
 
-                    let insert_limiter_and_checker = |region_id, suffix| -> FlowChecker<E> {
-                        let engine = tablet_factory
-                            .open_tablet(
+                    let insert_limiter_and_checker =
+                        |region_id, suffix| -> Option<FlowChecker<E>> {
+                            let engine = tablet_factory.open_tablet(
                                 region_id,
                                 Some(suffix),
                                 OpenOptions::default().set_cache_only(true),
-                            )
-                            .unwrap();
-                        let mut v = limiters.as_ref().write().unwrap();
-                        let discard_ratio = Arc::new(AtomicU32::new(0));
-                        let limiter = v.entry(region_id).or_insert((
-                            Arc::new(
-                                <Limiter>::builder(f64::INFINITY)
-                                    .refill(Duration::from_millis(1))
-                                    .build(),
-                            ),
-                            discard_ratio,
-                        ));
-                        FlowChecker::new_with_tablet_suffix(
-                            &config,
-                            engine,
-                            limiter.1.clone(),
-                            limiter.0.clone(),
-                            suffix,
-                        )
-                    };
+                            );
+                            if let Ok(engine) = engine {
+                                let mut v = limiters.as_ref().write().unwrap();
+                                let discard_ratio = Arc::new(AtomicU32::new(0));
+                                let limiter = v.entry(region_id).or_insert((
+                                    Arc::new(
+                                        <Limiter>::builder(f64::INFINITY)
+                                            .refill(Duration::from_millis(1))
+                                            .build(),
+                                    ),
+                                    discard_ratio,
+                                ));
+                                Some(FlowChecker::new_with_tablet_suffix(
+                                    &config,
+                                    engine,
+                                    limiter.1.clone(),
+                                    limiter.0.clone(),
+                                    suffix,
+                                ))
+                            } else {
+                                None
+                            }
+                        };
                     let msg = flow_info_receiver.recv_deadline(deadline);
                     match msg.clone() {
                         Ok(FlowInfo::L0(_cf, _, region_id, suffix))
@@ -165,9 +168,15 @@ impl FlowInfoDispatcher {
                         }
                         Ok(FlowInfo::Created(region_id, suffix)) => {
                             let mut checkers = flow_checkers.as_ref().write().unwrap();
-                            let checker = checkers
-                                .entry(region_id)
-                                .or_insert_with(|| insert_limiter_and_checker(region_id, suffix));
+                            if !checkers.contains_key(&region_id) {
+                                let new_checker = insert_limiter_and_checker(region_id, suffix);
+                                if let Some(new_checker) = new_checker {
+                                    checkers.insert(region_id, new_checker);
+                                } else {
+                                    continue;
+                                }
+                            }
+                            let checker = checkers.get_mut(&region_id).unwrap();
                             // check if the checker's engine is exactly (region_id, suffix)
                             // if checker.suffix < suffix, it means its tablet is old and needs the
                             // refresh
