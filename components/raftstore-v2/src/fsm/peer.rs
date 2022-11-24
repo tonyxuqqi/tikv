@@ -217,15 +217,170 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
         match tick {
             PeerTick::Raft => self.on_raft_tick(),
             PeerTick::PdHeartbeat => self.on_pd_heartbeat(),
-            PeerTick::RaftLogGc => unimp!(tick),
+            PeerTick::RaftLogGc => self.on_raft_log_gc(),
+            PeerTick::EntryCacheEvict => self.on_entry_cache_evict(),
             PeerTick::SplitRegionCheck => self.on_split_region_check(),
             PeerTick::CheckMerge => unimp!(tick),
             PeerTick::CheckPeerStaleState => unimp!(tick),
-            PeerTick::EntryCacheEvict => unimp!(tick),
             PeerTick::CheckLeaderLease => unimp!(tick),
             PeerTick::ReactivateMemoryLock => unimp!(tick),
             PeerTick::ReportBuckets => unimp!(tick),
             PeerTick::CheckLongUncommitted => unimp!(tick),
+        }
+    }
+
+    fn on_raft_log_gc(&mut self) {
+        use kvproto::{
+            metapb,
+            raft_cmdpb::{AdminCmdType, AdminRequest, RaftCmdRequest},
+        };
+        use raftstore::store::{fsm::new_admin_request, needs_evict_entry_cache};
+        use tikv_util::sys::memory_usage_reaches_high_water;
+
+        info!(self.fsm.logger(), "on_raft_log_gc");
+
+        if !self.fsm.peer.is_leader() {
+            // `compact_cache_to` is called when apply, there is no need to call
+            // `compact_to` here, snapshot generating has already been cancelled
+            // when the role becomes follower.
+            return;
+        }
+        self.schedule_tick(PeerTick::RaftLogGc);
+
+        // As leader, we would not keep caches for the peers that didn't response
+        // heartbeat in the last few seconds. That happens probably because
+        // another TiKV is down. In this case if we do not clean up the cache,
+        // it may keep growing.
+        let drop_cache_duration = self.store_ctx.cfg.raft_heartbeat_interval()
+            + self.store_ctx.cfg.raft_entry_cache_life_time.0;
+        let cache_alive_limit = std::time::Instant::now() - drop_cache_duration;
+
+        // Leader will replicate the compact log command to followers,
+        // If we use current replicated_index (like 10) as the compact index,
+        // when we replicate this log, the newest replicated_index will be 11,
+        // but we only compact the log to 10, not 11, at that time,
+        // the first index is 10, and replicated_index is 11, with an extra log,
+        // and we will do compact again with compact index 11, in cycles...
+        // So we introduce a threshold, if replicated index - first index > threshold,
+        // we will try to compact log.
+        // raft log entries[..............................................]
+        //                  ^                                       ^
+        //                  |-----------------threshold------------ |
+        //              first_index                         replicated_index
+        // `alive_cache_idx` is the smallest `replicated_index` of healthy up nodes.
+        // `alive_cache_idx` is only used to gc cache.
+        let applied_idx = self.fsm.peer.entry_storage().applied_index();
+        let truncated_idx = self.fsm.peer.entry_storage().truncated_index();
+        let first_idx = self.fsm.peer.entry_storage().first_index();
+        let last_idx = self.fsm.peer.entry_storage().last_index();
+
+        let (mut replicated_idx, mut alive_cache_idx) = (last_idx, last_idx);
+        for (peer_id, p) in self.fsm.peer.raft_group().raft.prs().iter() {
+            if replicated_idx > p.matched {
+                replicated_idx = p.matched;
+            }
+            if let Some(last_heartbeat) = self.fsm.peer.peer_heartbeats.get(peer_id) {
+                if *last_heartbeat > cache_alive_limit {
+                    if alive_cache_idx > p.matched && p.matched >= truncated_idx {
+                        alive_cache_idx = p.matched;
+                    } else if p.matched == 0 {
+                        // the new peer is still applying snapshot, do not compact cache now
+                        alive_cache_idx = 0;
+                    }
+                }
+            }
+        }
+
+        // When an election happened or a new peer is added, replicated_idx can be 0.
+        if replicated_idx > 0 {
+            assert!(
+                last_idx >= replicated_idx,
+                "expect last index {} >= replicated index {}",
+                last_idx,
+                replicated_idx
+            );
+        }
+
+        // leader may call `get_term()` on the latest replicated index, so compact
+        // entries before `alive_cache_idx` instead of `alive_cache_idx + 1`.
+        self.fsm
+            .peer
+            .entry_storage_mut()
+            .compact_entry_cache(std::cmp::min(alive_cache_idx, applied_idx + 1));
+        if needs_evict_entry_cache(self.store_ctx.cfg.evict_cache_on_memory_ratio) {
+            self.fsm.peer.entry_storage_mut().evict_entry_cache(true);
+            if !self.fsm.peer.entry_storage().is_entry_cache_empty() {
+                self.schedule_tick(PeerTick::EntryCacheEvict);
+            }
+        }
+
+        let mut compact_idx = if (applied_idx > first_idx
+            && applied_idx - first_idx >= self.store_ctx.cfg.raft_log_gc_count_limit())
+            || (self.fsm.peer.raft_log_size_hint >= self.store_ctx.cfg.raft_log_gc_size_limit().0)
+        {
+            std::cmp::max(first_idx + (last_idx - first_idx) / 2, replicated_idx)
+        } else if replicated_idx < first_idx || last_idx - first_idx < 3 {
+            return;
+        } else if replicated_idx - first_idx < self.store_ctx.cfg.raft_log_gc_threshold
+            && self.fsm.peer.skip_gc_raft_log_ticks < self.store_ctx.cfg.raft_log_reserve_max_ticks
+        {
+            self.fsm.peer.skip_gc_raft_log_ticks += 1;
+            return;
+        } else {
+            replicated_idx
+        };
+        assert!(compact_idx >= first_idx);
+        // Have no idea why subtract 1 here, but original code did this by magic.
+        compact_idx -= 1;
+        if compact_idx < first_idx {
+            return;
+        }
+
+        // Create a compact log request and notify directly.
+        let region_id = self.fsm.peer.region().get_id();
+        let peer = self.fsm.peer.peer().clone();
+        // TODO
+        let term = self
+            .fsm
+            .peer
+            .raft_group()
+            .raft
+            .raft_log
+            .term(compact_idx)
+            .unwrap();
+        fn new_compact_log_request(
+            region_id: u64,
+            peer: metapb::Peer,
+            compact_index: u64,
+            compact_term: u64,
+        ) -> RaftCmdRequest {
+            let mut request = new_admin_request(region_id, peer);
+
+            let mut admin = AdminRequest::default();
+            admin.set_cmd_type(AdminCmdType::CompactLog);
+            admin.mut_compact_log().set_compact_index(compact_index);
+            admin.mut_compact_log().set_compact_term(compact_term);
+            request.set_admin_request(admin);
+            request
+        }
+        let request = new_compact_log_request(region_id, peer, compact_idx, term);
+        self.fsm.peer.propose_command(self.store_ctx, request);
+    }
+
+    fn on_entry_cache_evict(&mut self) {
+        use raftstore::store::needs_evict_entry_cache;
+        use tikv_util::sys::memory_usage_reaches_high_water;
+
+        info!(self.fsm.logger(), "on_entry_cache_evict");
+
+        if needs_evict_entry_cache(self.store_ctx.cfg.evict_cache_on_memory_ratio) {
+            self.fsm.peer.entry_storage_mut().evict_entry_cache(true);
+        }
+        let mut _usage = 0;
+        if memory_usage_reaches_high_water(&mut _usage)
+            && !self.fsm.peer.entry_storage().is_entry_cache_empty()
+        {
+            self.schedule_tick(PeerTick::EntryCacheEvict);
         }
     }
 
