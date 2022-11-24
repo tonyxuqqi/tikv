@@ -37,6 +37,7 @@ use raftstore::{
     coprocessor::{ApplySnapshotObserver, RoleChange},
     store::{
         util, ExtraStates, FetchedLogs, ReadProgress, SnapKey, TabletSnapKey, Transport, WriteTask,
+        RAFT_INIT_LOG_INDEX,
     },
 };
 use slog::{debug, error, info, trace, warn};
@@ -308,6 +309,10 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         debug!(self.logger, "handle raft ready");
 
         let mut ready = self.raft_group_mut().ready();
+        info!(self.logger,
+            "handle raft ready";
+            "ready number" => ready.number(),
+        );
         // Update it after unstable entries pagination is introduced.
         debug_assert!(ready.entries().last().map_or_else(
             || true,
@@ -367,7 +372,14 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             self.start_destroy(ctx, &mut write_task);
         }
         // Ready number should increase monotonically.
-        assert!(self.async_writer.known_largest_number() < ready.number());
+        if self.async_writer.known_largest_number() >= ready.number() {
+            info!(self.logger,
+                "handle raft ready";
+                "known_largest_number" => self.async_writer.known_largest_number(),
+                "current_ready_number" => ready.number(),
+            );
+            assert!(self.async_writer.known_largest_number() < ready.number(),);
+        }
         if let Some(task) = self.async_writer.write(ctx, write_task) {
             // So the task doesn't need to be process asynchronously, directly advance.
             let mut light_rd = self.raft_group_mut().advance_append(ready);

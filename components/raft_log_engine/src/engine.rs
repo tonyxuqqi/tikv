@@ -26,7 +26,7 @@ use raft_engine::{
     Command, Engine as RawRaftEngine, Error as RaftEngineError, LogBatch, MessageExt,
 };
 pub use raft_engine::{Config as RaftEngineConfig, ReadableSize, RecoveryMode};
-use tikv_util::Either;
+use tikv_util::{error, Either};
 
 use crate::perf_context::RaftEnginePerfContext;
 
@@ -431,9 +431,17 @@ impl RaftEngineReadOnly for RaftLogEngine {
         max_size: Option<usize>,
         to: &mut Vec<Entry>,
     ) -> Result<usize> {
-        self.0
+        let r = self
+            .0
             .fetch_entries_to::<MessageExtTyped>(raft_group_id, begin, end, max_size, to)
-            .map_err(transfer_error)
+            .map_err(transfer_error);
+        if r.is_err() {
+            error!(
+                "fetch_entries_to raft_group_id:{}, begin:{}, end:{} failed. Error {:?}",
+                raft_group_id, begin, end, r
+            );
+        }
+        return r;
     }
 
     fn get_all_entries_to(&self, raft_group_id: u64, buf: &mut Vec<Entry>) -> Result<()> {

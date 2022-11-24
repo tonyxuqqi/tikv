@@ -120,6 +120,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     /// when the old apply scheduler is dropped.
     #[inline]
     pub fn schedule_apply_fsm<T>(&mut self, store_ctx: &mut StoreContext<EK, ER, T>) {
+        let applied_index = self.entry_storage().applied_index();
+        let applied_term = self.entry_storage().applied_term();
         let region_state = self.storage().region_state().clone();
         let mailbox = store_ctx.router.mailbox(self.region_id()).unwrap();
         let tablet = self.tablet().clone();
@@ -132,6 +134,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             tablet,
             store_ctx.tablet_factory.clone(),
             read_scheduler,
+            applied_index,
+            applied_term,
             logger,
         );
 

@@ -6,7 +6,7 @@ use std::{
 };
 
 use engine_rocks::{
-    raw::{Cache, Env},
+    raw::{Cache, Env, Statistics, WriteBufferManager},
     CompactedEventSender, CompactionListener, FlowListener, RocksCompactionJobInfo, RocksEngine,
     RocksEventListener,
 };
@@ -23,6 +23,8 @@ use crate::config::{DbConfig, TikvConfig, DEFAULT_ROCKSDB_SUB_DIR};
 
 struct FactoryInner {
     env: Arc<Env>,
+    statistics: Statistics,
+    wbm: Option<WriteBufferManager>,
     region_info_accessor: Option<RegionInfoAccessor>,
     block_cache: Option<Cache>,
     rocksdb_config: Arc<DbConfig>,
@@ -40,9 +42,14 @@ pub struct KvEngineFactoryBuilder {
 
 impl KvEngineFactoryBuilder {
     pub fn new(env: Arc<Env>, config: &TikvConfig, store_path: impl Into<PathBuf>) -> Self {
+        let wbm = config
+            .write_buffer_limit
+            .map(|l| WriteBufferManager::new(l.0 as usize, 0.0, config.write_buffer_flush_oldest));
         Self {
             inner: FactoryInner {
                 env,
+                statistics: Statistics::new_titan(),
+                wbm,
                 region_info_accessor: None,
                 block_cache: None,
                 rocksdb_config: Arc::new(config.rocksdb.clone()),
@@ -138,6 +145,7 @@ impl KvEngineFactory {
         // Create kv engine.
         let mut kv_db_opts = self.inner.rocksdb_config.build_opt();
         kv_db_opts.set_env(self.inner.env.clone());
+        kv_db_opts.set_statistics(&self.inner.statistics);
         kv_db_opts.add_event_listener(RocksEventListener::new(
             "kv",
             self.inner.sst_recovery_sender.clone(),
@@ -148,11 +156,16 @@ impl KvEngineFactory {
         if let Some(listener) = &self.inner.flow_listener {
             kv_db_opts.add_event_listener(listener.clone_with(region_id, suffix));
         }
-        let kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
+        let mut kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
             &self.inner.block_cache,
             self.inner.region_info_accessor.as_ref(),
             self.inner.api_version,
         );
+        if let Some(wbm) = self.inner.wbm.as_ref() {
+            for (_, ref mut opts) in kv_cfs_opts.iter_mut() {
+                opts.set_write_buffer_manager(wbm);
+            }
+        }
         let kv_engine = engine_rocks::util::new_engine_opt(
             tablet_path.to_str().unwrap(),
             kv_db_opts,

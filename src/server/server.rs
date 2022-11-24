@@ -13,7 +13,7 @@ use futures::{compat::Stream01CompatExt, stream::StreamExt};
 use grpcio::{ChannelBuilder, Environment, ResourceQuota, Server as GrpcServer, ServerBuilder};
 use grpcio_health::{create_health, HealthService, ServingStatus};
 use kvproto::tikvpb::*;
-use raftstore::store::{CheckLeaderTask, SnapManager};
+use raftstore::store::{CheckLeaderTask, SnapManager, TabletSnapManager};
 use security::SecurityManager;
 use tikv_kv::raft_extension::RaftExtension;
 use tikv_util::{
@@ -40,7 +40,7 @@ use crate::{
     coprocessor::Endpoint,
     coprocessor_v2,
     read_pool::ReadPool,
-    server::{gc_worker::GcWorker, Proxy},
+    server::{gc_worker::GcWorker, tablet_snap, Proxy},
     storage::{lock_manager::LockManager, Engine, Storage},
     tikv_util::sys::thread::ThreadBuildWrapper,
 };
@@ -69,6 +69,7 @@ pub struct Server<T: RaftExtension + 'static, S: StoreAddrResolver + 'static> {
     raft_router: T,
     // For sending/receiving snapshots.
     snap_mgr: Option<SnapManager>,
+    tablet_mgr: Option<TabletSnapManager>,
     snap_worker: LazyWorker<SnapTask>,
 
     // Currently load statistics is done in the thread.
@@ -92,6 +93,7 @@ impl<T: RaftExtension + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
         raft_router: T,
         resolver: S,
         snap_mgr: impl Into<Option<SnapManager>>,
+        tablet_snap_mgr: impl Into<Option<TabletSnapManager>>,
         gc_worker: impl Into<Option<GcWorker<E>>>,
         check_leader_scheduler: Scheduler<CheckLeaderTask>,
         env: Arc<Environment>,
@@ -186,6 +188,7 @@ impl<T: RaftExtension + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
             trans,
             raft_router,
             snap_mgr: snap_mgr.into(),
+            tablet_mgr: tablet_snap_mgr.into(),
             snap_worker: lazy_worker,
             stats_pool,
             grpc_thread_load,
@@ -255,6 +258,15 @@ impl<T: RaftExtension + Unpin, S: StoreAddrResolver + 'static> Server<T, S> {
     ) -> Result<()> {
         if let Some(mgr) = &self.snap_mgr {
             let snap_runner = SnapHandler::new(
+                Arc::clone(&self.env),
+                mgr.clone(),
+                self.raft_router.clone(),
+                security_mgr,
+                Arc::clone(&cfg),
+            );
+            self.snap_worker.start(snap_runner);
+        } else if let Some(mgr) = &self.tablet_mgr {
+            let snap_runner = tablet_snap::TabletRunner::new(
                 Arc::clone(&self.env),
                 mgr.clone(),
                 self.raft_router.clone(),
@@ -534,6 +546,7 @@ mod tests {
                 addr: Arc::clone(&addr),
             },
             SnapManager::new(""),
+            None,
             gc_worker,
             check_leader_scheduler,
             env,

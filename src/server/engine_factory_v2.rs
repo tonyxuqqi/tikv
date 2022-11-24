@@ -25,10 +25,12 @@ pub struct KvEngineFactoryV2 {
 
 impl KvEngineFactoryV2 {
     pub fn new(inner: KvEngineFactory) -> Self {
-        KvEngineFactoryV2 {
+        let f = KvEngineFactoryV2 {
             inner,
             registry: Arc::new(Mutex::new(HashMap::default())),
-        }
+        };
+        std::fs::create_dir_all(f.tablets_path()).unwrap();
+        f
     }
 }
 
@@ -125,7 +127,9 @@ impl TabletFactory<RocksEngine> for KvEngineFactoryV2 {
 
         let tablet = self.inner.create_tablet(path, id, suffix)?;
         debug!("open tablet"; "key" => ?(id, suffix));
-        self.inner.on_tablet_created(id, suffix);
+        if path == self.tablet_path(id, suffix).as_path() {
+            self.inner.on_tablet_created(id, suffix);
+        }
         Ok(tablet)
     }
 

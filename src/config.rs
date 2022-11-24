@@ -1028,6 +1028,7 @@ pub struct DbConfig {
     #[online_config(skip)]
     pub create_if_missing: bool,
     pub max_open_files: i32,
+    // deprecated.
     #[online_config(skip)]
     pub enable_statistics: bool,
     #[online_config(skip)]
@@ -1147,7 +1148,6 @@ impl DbConfig {
         opts.set_max_manifest_file_size(self.max_manifest_file_size.0);
         opts.create_if_missing(self.create_if_missing);
         opts.set_max_open_files(self.max_open_files);
-        opts.enable_statistics(self.enable_statistics);
         opts.set_stats_dump_period_sec(self.stats_dump_period.as_secs() as usize);
         opts.set_compaction_readahead_size(self.compaction_readahead_size.0);
         opts.set_max_log_file_size(self.info_log_max_size.0);
@@ -1456,7 +1456,6 @@ impl RaftDbConfig {
         opts.set_max_manifest_file_size(self.max_manifest_file_size.0);
         opts.create_if_missing(self.create_if_missing);
         opts.set_max_open_files(self.max_open_files);
-        opts.enable_statistics(self.enable_statistics);
         opts.set_stats_dump_period_sec(self.stats_dump_period.as_secs() as usize);
         opts.set_compaction_readahead_size(self.compaction_readahead_size.0);
         opts.set_max_log_file_size(self.info_log_max_size.0);
@@ -2882,6 +2881,13 @@ pub struct TikvConfig {
     #[online_config(skip)]
     pub memory_usage_high_water: f64,
 
+    #[doc(hidden)]
+    #[online_config(skip)]
+    pub write_buffer_limit: Option<ReadableSize>,
+    #[doc(hidden)]
+    #[online_config(skip)]
+    pub write_buffer_flush_oldest: bool,
+
     #[online_config(submodule)]
     pub log: LogConfig,
 
@@ -2975,6 +2981,8 @@ impl Default for TikvConfig {
             abort_on_panic: false,
             memory_usage_limit: None,
             memory_usage_high_water: 0.9,
+            write_buffer_limit: None,
+            write_buffer_flush_oldest: false,
             log: LogConfig::default(),
             quota: QuotaConfig::default(),
             readpool: ReadPoolConfig::default(),
@@ -3066,13 +3074,13 @@ impl TikvConfig {
             return Err("raftdb.wal_dir can't be same as rocksdb.wal_dir".into());
         }
 
-        let default_tablet_path = format!("{}/2_5", kv_db_path);
+        let tablet_exists = Path::new(&kv_db_path).is_dir();
         RaftDataStateMachine::new(
             &self.storage.data_dir,
             &self.raft_store.raftdb_path,
             &self.raft_engine.config.dir,
         )
-        .validate(RocksEngine::exists(&default_tablet_path))?;
+        .validate(tablet_exists)?;
 
         // Check blob file dir is empty when titan is disabled
         if !self.rocksdb.titan.enabled {

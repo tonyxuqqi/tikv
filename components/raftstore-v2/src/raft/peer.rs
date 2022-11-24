@@ -131,6 +131,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 OpenOptions::default().set_create(true),
             )?)
         } else {
+            if storage.raft_state().get_hard_state().commit != 0 {
+                info!(&logger,
+                    "tablet_index is 0";
+                    "raft_state" => ?storage.raft_state(),
+                );
+            }
             None
         };
 

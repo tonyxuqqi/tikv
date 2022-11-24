@@ -51,6 +51,8 @@ impl<EK: KvEngine, R> Apply<EK, R> {
         mut remote_tablet: CachedTablet<EK>,
         tablet_factory: Arc<dyn TabletFactory<EK>>,
         read_scheduler: Scheduler<ReadTask<EK>>,
+        applied_index: u64,
+        applied_term: u64,
         logger: Logger,
     ) -> Self {
         Apply {
@@ -60,8 +62,8 @@ impl<EK: KvEngine, R> Apply<EK, R> {
             write_batch: None,
             callbacks: vec![],
             tombstone: false,
-            applied_index: 0,
-            applied_term: 0,
+            applied_index,
+            applied_term,
             admin_cmd_result: vec![],
             region_state,
             tablet_factory,

@@ -67,6 +67,8 @@ impl<EK: KvEngine, R> ApplyFsm<EK, R> {
         remote_tablet: CachedTablet<EK>,
         tablet_factory: Arc<dyn TabletFactory<EK>>,
         read_scheduler: Scheduler<ReadTask<EK>>,
+        applied_index: u64,
+        applied_term: u64,
         logger: Logger,
     ) -> (ApplyScheduler, Self) {
         let (tx, rx) = future::unbounded(WakePolicy::Immediately);
@@ -77,6 +79,8 @@ impl<EK: KvEngine, R> ApplyFsm<EK, R> {
             remote_tablet,
             tablet_factory,
             read_scheduler,
+            applied_index,
+            applied_term,
             logger,
         );
         (

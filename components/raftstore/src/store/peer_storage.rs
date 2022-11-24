@@ -348,10 +348,12 @@ where
 
             return Ok(RaftState::new(hard_state, ConfState::default()));
         }
-        Ok(RaftState::new(
-            hard_state,
-            util::conf_state_from_region(self.region()),
-        ))
+        let conf_state = if self.is_initialized() {
+            util::conf_state_from_region(self.region())
+        } else {
+            ConfState::default()
+        };
+        Ok(RaftState::new(hard_state, conf_state))
     }
 
     #[inline]
