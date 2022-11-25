@@ -510,37 +510,14 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         // We don't have coprocessor yet, so use store config for now.
         let mut split_size = store_ctx.cfg.region_split_size.0;
         if split_size == 0 {
-            split_size = ReadableSize::gb(4).0;
+            split_size = ReadableSize::gb(6).0;
         }
         let mut max_size = store_ctx.cfg.region_max_size.0;
         if max_size == 0 {
             max_size = split_size * 3 / 2;
         }
-
-        let split_size = ReadableSize::mb(100).0;
-        let max_size = ReadableSize::mb(150).0;
-
-        let region_approximate_size =
-            get_region_approximate_size(tablet, self.region(), split_size * 10);
-
-        let approximate_size = if region_approximate_size.is_ok() {
-            *region_approximate_size.as_ref().unwrap()
-        } else {
-            0
-        };
-
-        let region_count =
-            region_approximate_size.map(|s| if s > max_size { s / split_size } else { 0 });
-
-        info!(
-            self.logger,
-            "Check split";
-            "region_approximate_size" => approximate_size,
-            "region_count" => ?region_count,
-            "split_size" => split_size,
-            "max_size" => max_size,
-        );
-
+        let region_count = get_region_approximate_size(tablet, self.region(), split_size * 10)
+            .map(|s| if s > max_size { s / split_size } else { 0 });
         match region_count {
             Ok(0) => true,
             Err(e) => {
@@ -550,7 +527,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             Ok(n) => match get_approximate_split_keys(tablet, self.region(), n) {
                 Ok(keys) => {
                     let region_epoch = self.region().get_region_epoch().clone();
-                    info!(self.logger, "Call prepare split region");
                     self.on_prepare_split_region(
                         store_ctx,
                         region_epoch,
