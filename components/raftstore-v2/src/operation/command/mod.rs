@@ -59,7 +59,7 @@ mod admin;
 mod control;
 mod write;
 
-pub use admin::{AdminCmdResult, SplitInit, SplitRegion, SplitResult};
+pub use admin::{AdminCmdResult, SplitInit, SplitRegion};
 pub use control::ProposalControl;
 pub use write::{SimpleWriteDecoder, SimpleWriteEncoder};
 
@@ -180,7 +180,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     }
 
     #[inline]
-    fn propose_command<T>(
+    pub(crate) fn propose_command<T>(
         &mut self,
         ctx: &mut StoreContext<EK, ER, T>,
         req: RaftCmdRequest,
@@ -306,12 +306,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 AdminCmdResult::ConfChange(conf_change) => {
                     self.on_apply_res_conf_change(ctx, conf_change)
                 }
-                AdminCmdResult::SplitRegion(SplitResult {
-                    regions,
-                    derived_index,
-                    tablet_index,
-                }) => self.on_ready_split_region(ctx, derived_index, tablet_index, regions),
+                AdminCmdResult::SplitRegion(res) => self.on_ready_split_region(ctx, res),
                 AdminCmdResult::TransferLeader(term) => self.on_transfer_leader(ctx, term),
+                AdminCmdResult::CompactLog(res) => self.on_ready_compact_log(ctx, res),
             }
         }
 
@@ -453,7 +450,7 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
         if req.has_admin_request() {
             let admin_req = req.get_admin_request();
             let (admin_resp, admin_result) = match req.get_admin_request().get_cmd_type() {
-                AdminCmdType::CompactLog => unimplemented!(),
+                AdminCmdType::CompactLog => self.apply_compact_log(admin_req, entry.index)?,
                 AdminCmdType::Split => self.apply_split(admin_req, entry.index)?,
                 AdminCmdType::BatchSplit => self.apply_batch_split(admin_req, entry.index)?,
                 AdminCmdType::PrepareMerge => unimplemented!(),

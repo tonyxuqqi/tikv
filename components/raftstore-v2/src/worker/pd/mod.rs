@@ -224,9 +224,9 @@ pub fn send_admin_request<EK, ER>(
     req.set_admin_request(request);
 
     let (mut msg, _) = PeerMsg::raft_command(req);
-    if ch.is_some() {
+    if let Some(ch) = ch {
         match msg {
-            PeerMsg::RaftCommand(ref mut req) => req.ch = ch.unwrap(),
+            PeerMsg::RaftCommand(ref mut req) => req.ch = ch,
             _ => unreachable!(),
         }
     }

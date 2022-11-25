@@ -2,7 +2,7 @@
 
 use std::{cell::RefCell, marker::PhantomData};
 
-use ::tracker::{get_tls_tracker_token, with_tls_tracker};
+use ::tracker::with_tls_tracker;
 use engine_traits::{PerfContext, PerfContextExt, PerfContextKind};
 use kvproto::{kvrpcpb, kvrpcpb::ScanDetailV2};
 use pd_client::BucketMeta;

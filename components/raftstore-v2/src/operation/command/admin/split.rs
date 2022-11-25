@@ -290,19 +290,17 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     pub fn on_ready_split_region<T>(
         &mut self,
         store_ctx: &mut StoreContext<EK, ER, T>,
-        derived_index: usize,
-        tablet_index: u64,
-        regions: Vec<Region>,
+        res: SplitResult,
     ) {
         fail_point!("on_split", self.peer().get_store_id() == 3, |_| {});
 
         info!(
             self.logger,
             "on_ready_split_region";
-            "regions" => ?regions,
+            "regions" => ?res.regions,
         );
 
-        let derived = &regions[derived_index];
+        let derived = &res.regions[res.derived_index];
         let derived_epoch = derived.get_region_epoch().clone();
         let region_id = derived.get_id();
 
@@ -316,12 +314,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             // Update the version so the concurrent reader will fail due to EpochNotMatch
             // instead of PessimisticLockNotFound.
             pessimistic_locks.version = derived_epoch.get_version();
-            pessimistic_locks.group_by_regions(&regions, derived)
+            pessimistic_locks.group_by_regions(&res.regions, derived)
         };
         fail_point!("on_split_invalidate_locks");
 
         // Roughly estimate the size and keys for new regions.
-        let new_region_count = regions.len() as u64;
+        let new_region_count = res.regions.len() as u64;
         {
             let mut meta = store_ctx.store_meta.lock().unwrap();
             let reader = meta.readers.get_mut(&derived.get_id()).unwrap();
@@ -330,7 +328,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 reader,
                 derived.clone(),
                 RegionChangeReason::Split,
-                tablet_index,
+                res.tablet_index,
             );
         }
 
@@ -343,12 +341,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             info!(
                 self.logger,
                 "notify pd with split";
-                "split_count" => regions.len(),
+                "split_count" => res.regions.len(),
             );
             // Now pd only uses ReportBatchSplit for history operation show,
             // so we send it independently here.
             let task = PdTask::ReportBatchSplit {
-                regions: regions.to_vec(),
+                regions: res.regions.to_vec(),
             };
             if let Err(e) = store_ctx.pd_scheduler.schedule(task) {
                 error!(
@@ -359,8 +357,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             }
         }
 
-        let last_region_id = regions.last().unwrap().get_id();
-        for (new_region, locks) in regions.into_iter().zip(region_locks) {
+        let last_region_id = res.regions.last().unwrap().get_id();
+        for (new_region, locks) in res.regions.into_iter().zip(region_locks) {
             let new_region_id = new_region.get_id();
             if new_region_id == region_id {
                 continue;

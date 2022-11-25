@@ -4305,6 +4305,7 @@ dependencies = [
  "test_pd",
  "test_pd_client",
  "test_util",
+ "thiserror",
  "tikv_util",
  "time",
  "tracker",

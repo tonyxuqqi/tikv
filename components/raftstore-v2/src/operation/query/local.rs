@@ -18,9 +18,9 @@ use kvproto::{
 use raftstore::{
     errors::RAFTSTORE_IS_BUSY,
     store::{
-        cmd_resp, util::LeaseState, LocalReadContext, LocalReaderCore, ReadDelegate, ReadExecutor,
-        ReadExecutorProvider, RegionSnapshot, RequestInspector, RequestPolicy,
-        TLS_LOCAL_READ_METRICS,
+        cmd_resp, util::LeaseState, worker::metrics::TLS_LOCAL_READ_METRICS, LocalReadContext,
+        LocalReaderCore, ReadDelegate, ReadExecutor, ReadExecutorProvider, RegionSnapshot,
+        RequestInspector, RequestPolicy,
     },
     Error, Result,
 };
@@ -254,7 +254,7 @@ where
         };
 
         async move {
-            defer!(raftstore::store::maybe_tls_local_read_metrics_flush());
+            defer!(raftstore::store::worker::metrics::maybe_tls_local_read_metrics_flush());
             if let Some(snap) = snap? {
                 return Ok(snap);
             }
@@ -477,8 +477,8 @@ mod tests {
     use futures::executor::block_on;
     use kvproto::{kvrpcpb::ExtraOp as TxnExtraOp, metapb, raft_cmdpb::*};
     use raftstore::store::{
-        util::Lease, ReadCallback, ReadProgress, RegionReadProgress, TrackVer, TxnExt,
-        TLS_LOCAL_READ_METRICS,
+        util::Lease, worker::metrics::TLS_LOCAL_READ_METRICS, ReadCallback, ReadProgress,
+        RegionReadProgress, TrackVer, TxnExt,
     };
     use slog::o;
     use tempfile::Builder;

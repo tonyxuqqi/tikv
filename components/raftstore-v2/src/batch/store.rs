@@ -51,7 +51,7 @@ use crate::{
     fsm::{PeerFsm, PeerFsmDelegate, SenderFsmPair, StoreFsm, StoreFsmDelegate, StoreMeta},
     raft::Storage,
     router::{PeerMsg, PeerTick, StoreMsg},
-    worker::{PdRunner, PdTask},
+    worker::{PdRunner, PdTask, RaftLogGcRunner, RaftLogGcTask},
     Error, Result,
 };
 
@@ -82,6 +82,7 @@ pub struct StoreContext<EK: KvEngine, ER: RaftEngine, T> {
     pub apply_pool: FuturePool,
     pub read_scheduler: Scheduler<ReadTask<EK>>,
     pub pd_scheduler: Scheduler<PdTask>,
+    pub raft_log_gc_scheduler: Scheduler<RaftLogGcTask>,
     pub snap_mgr: TabletSnapManager,
 
     /// Disk usage for the store itself.
@@ -262,6 +263,7 @@ struct StorePollerBuilder<EK: KvEngine, ER: RaftEngine, T> {
     router: StoreRouter<EK, ER>,
     read_scheduler: Scheduler<ReadTask<EK>>,
     pd_scheduler: Scheduler<PdTask>,
+    raft_log_gc_scheduler: Scheduler<RaftLogGcTask>,
     write_senders: WriteSenders<EK, ER>,
     apply_pool: FuturePool,
     logger: Logger,
@@ -280,6 +282,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
         router: StoreRouter<EK, ER>,
         read_scheduler: Scheduler<ReadTask<EK>>,
         pd_scheduler: Scheduler<PdTask>,
+        raft_log_gc_scheduler: Scheduler<RaftLogGcTask>,
         store_writers: &mut StoreWriters<EK, ER>,
         logger: Logger,
         store_meta: Arc<Mutex<StoreMeta<EK>>>,
@@ -305,6 +308,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> StorePollerBuilder<EK, ER, T> {
             router,
             read_scheduler,
             pd_scheduler,
+            raft_log_gc_scheduler,
             apply_pool,
             logger,
             write_senders: store_writers.senders(),
@@ -390,6 +394,7 @@ where
             apply_pool: self.apply_pool.clone(),
             read_scheduler: self.read_scheduler.clone(),
             pd_scheduler: self.pd_scheduler.clone(),
+            raft_log_gc_scheduler: self.raft_log_gc_scheduler.clone(),
             snap_mgr: self.snap_mgr.clone(),
             self_disk_usage: DiskUsage::Normal,
             lock_manager_observer: self.lock_manager_observer.clone(),
@@ -406,6 +411,7 @@ struct Workers<EK: KvEngine, ER: RaftEngine> {
     /// Worker for fetching raft logs asynchronously
     async_read_worker: Worker,
     pd_worker: Worker,
+    raft_log_gc_worker: Worker,
     store_writers: StoreWriters<EK, ER>,
 }
 
@@ -414,6 +420,7 @@ impl<EK: KvEngine, ER: RaftEngine> Default for Workers<EK, ER> {
         Self {
             async_read_worker: Worker::new("async-read-worker"),
             pd_worker: Worker::new("pd-worker"),
+            raft_log_gc_worker: Worker::new("raft-log-gc-worker"),
             store_writers: StoreWriters::default(),
         }
     }
@@ -478,6 +485,10 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
             ),
         );
 
+        let raft_log_gc_scheduler = workers
+            .raft_log_gc_worker
+            .start("raft-log-gc", RaftLogGcRunner::<EK, ER>::dummy());
+
         let mut builder = StorePollerBuilder::new(
             cfg.clone(),
             store_id,
@@ -487,6 +498,7 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
             router.clone(),
             read_scheduler,
             pd_scheduler,
+            raft_log_gc_scheduler,
             &mut workers.store_writers,
             self.logger.clone(),
             store_meta.clone(),

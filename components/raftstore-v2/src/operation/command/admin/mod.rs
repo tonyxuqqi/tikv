@@ -1,9 +1,12 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+mod compact_log;
 mod conf_change;
 mod leader_transfer;
 mod split;
 
+use compact_log::CompactLogResult;
+use conf_change::ConfChangeResult;
 use engine_traits::{KvEngine, RaftEngine};
 use kvproto::raft_cmdpb::{AdminCmdType, AdminRequest, RaftCmdRequest};
 use protobuf::Message;
@@ -18,11 +21,11 @@ use raftstore::{
     Result,
 };
 use slog::info;
-pub use split::{SplitInit, SplitRegion, SplitResult};
+use split::SplitResult;
+pub use split::{SplitInit, SplitRegion};
 use tikv_util::box_err;
 use txn_types::WriteBatchFlags;
 
-use self::conf_change::ConfChangeResult;
 use crate::{
     batch::StoreContext,
     raft::{Apply, Peer},
@@ -36,6 +39,7 @@ pub enum AdminCmdResult {
     SplitRegion(SplitResult),
     ConfChange(ConfChangeResult),
     TransferLeader(u64),
+    CompactLog(CompactLogResult),
 }
 
 impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
