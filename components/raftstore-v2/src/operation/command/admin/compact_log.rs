@@ -119,7 +119,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             self.last_compacted_index = compact_index;
 
             let total_cnt = self.storage().apply_state().get_applied_index()
-                - self.storage().entry_storage().first_index();
+                - self.storage().entry_storage().first_index()
+                + 1;
             // the size of current CompactLog command can be ignored.
             let remain_cnt = self.storage().apply_state().get_applied_index() - compact_index - 1;
             self.raft_log_size_hint = self.raft_log_size_hint * remain_cnt / total_cnt;
