@@ -58,11 +58,7 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     /// messages with unknown peers after recovery.
     peer_cache: Vec<metapb::Peer>,
     /// Statistics for other peers, only maintained when self is the leader.
-    pub(crate) peer_heartbeats: HashMap<u64, Instant>,
-
-    /// For gc.
-    pub skip_gc_raft_log_ticks: usize,
-    pub raft_log_size_hint: u64,
+    peer_heartbeats: HashMap<u64, Instant>,
 
     /// Encoder for batching proposals and encoding them in a more efficient way
     /// than protobuf.
@@ -154,8 +150,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             self_stat: PeerStat::default(),
             peer_cache: vec![],
             peer_heartbeats: HashMap::default(),
-            skip_gc_raft_log_ticks: 0,
-            raft_log_size_hint: 0,
             raw_write_encoder: None,
             proposals: ProposalQueue::new(region_id, raft_group.raft.id),
             async_writer: AsyncWriter::new(region_id, peer_id),

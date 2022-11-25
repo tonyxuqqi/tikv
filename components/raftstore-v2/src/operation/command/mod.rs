@@ -180,7 +180,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     }
 
     #[inline]
-    pub(crate) fn propose_command<T>(
+    fn propose_command<T>(
         &mut self,
         ctx: &mut StoreContext<EK, ER, T>,
         req: RaftCmdRequest,
