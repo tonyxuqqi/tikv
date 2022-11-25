@@ -9,7 +9,7 @@ use kvproto::{
     raft_cmdpb::{AdminCmdType, AdminRequest, RaftCmdRequest},
 };
 use raftstore::store::{needs_evict_entry_cache, Transport};
-use slog::{debug, error};
+use slog::{debug, error, info};
 use tikv_util::sys::memory_usage_reaches_high_water;
 
 use crate::{batch::StoreContext, fsm::PeerFsmDelegate, raft::Peer, router::PeerTick};
@@ -26,15 +26,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
 
         self.fsm.peer_mut().raft_log_gc_imp(self.store_ctx);
 
-        if needs_evict_entry_cache(self.store_ctx.cfg.evict_cache_on_memory_ratio) {
-            self.fsm
-                .peer_mut()
-                .entry_storage_mut()
-                .evict_entry_cache(true);
-            if !self.fsm.peer_mut().entry_storage().is_entry_cache_empty() {
-                self.schedule_tick(PeerTick::EntryCacheEvict);
-            }
-        }
+        self.on_entry_cache_evict();
     }
 
     pub fn on_entry_cache_evict(&mut self) {
@@ -43,12 +35,9 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
                 .peer_mut()
                 .entry_storage_mut()
                 .evict_entry_cache(true);
-        }
-        let mut _usage = 0;
-        if memory_usage_reaches_high_water(&mut _usage)
-            && !self.fsm.peer().entry_storage().is_entry_cache_empty()
-        {
-            self.schedule_tick(PeerTick::EntryCacheEvict);
+            if !self.fsm.peer().entry_storage().is_entry_cache_empty() {
+                self.schedule_tick(PeerTick::EntryCacheEvict);
+            }
         }
     }
 }
@@ -98,6 +87,17 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 }
             }
         }
+        info!(
+            self.logger,
+            "raft_log_gc_imp";
+            "region_id" => self.region_id(),
+            "first_idx" => first_idx,
+            "last_idx" => last_idx,
+            "applied_idx" => applied_idx,
+            "truncated_idx" => truncated_idx,
+            "alive_cache_idx" => alive_cache_idx,
+            "replicated_idx" => replicated_idx,
+        );
 
         // When an election happened or a new peer is added, replicated_idx can be 0.
         if replicated_idx > 0 {

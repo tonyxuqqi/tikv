@@ -36,8 +36,8 @@ use raft::{
 use raftstore::{
     coprocessor::{ApplySnapshotObserver, RoleChange},
     store::{
-        util, ExtraStates, FetchedLogs, ReadProgress, SnapKey, TabletSnapKey, Transport, WriteTask,
-        RAFT_INIT_LOG_INDEX,
+        needs_evict_entry_cache, util, ExtraStates, FetchedLogs, ReadProgress, SnapKey,
+        TabletSnapKey, Transport, WriteTask, RAFT_INIT_LOG_INDEX,
     },
 };
 use slog::{debug, error, info, trace, warn};
@@ -279,6 +279,10 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     break;
                 }
             }
+        }
+        if needs_evict_entry_cache(ctx.cfg.evict_cache_on_memory_ratio) {
+            // Compact all cached entries instead of half evict.
+            self.entry_storage_mut().evict_entry_cache(false);
         }
         self.schedule_apply_committed_entries(ctx, committed_entries);
     }
