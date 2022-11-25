@@ -514,6 +514,10 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         if max_size == 0 {
             max_size = split_size * 3 / 2;
         }
+
+        let split_size = ReadableSize::mb(600).0;
+        let max_size = ReadableSize::gb(1).0;
+
         let region_count = get_region_approximate_size(tablet, self.region(), split_size * 10)
             .map(|s| if s > max_size { s / split_size } else { 0 });
         match region_count {
