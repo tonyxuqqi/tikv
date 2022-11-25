@@ -76,6 +76,15 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         {
             return;
         }
+
+        // TODO: check entry_cache_warmup_state
+        self.schedule_raft_log_gc(store_ctx, res.compact_index);
+        self.entry_storage_mut()
+            .compact_entry_cache(res.compact_index);
+        self.storage_mut()
+            .cancel_generating_snap(Some(res.compact_index));
+
+        let mut entry_storage = self.entry_storage_mut();
         // we don't actually delete the logs now, we add an async task to do it.
         entry_storage
             .apply_state_mut()
@@ -85,13 +94,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             .apply_state_mut()
             .mut_truncated_state()
             .set_term(res.compact_term);
-
-        // TODO: check entry_cache_warmup_state
-        self.schedule_raft_log_gc(store_ctx, res.compact_index);
-        self.entry_storage_mut()
-            .compact_entry_cache(res.compact_index);
-        self.storage_mut()
-            .cancel_generating_snap(Some(res.compact_index));
     }
 
     pub fn schedule_raft_log_gc<T>(
@@ -119,8 +121,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             self.last_compacted_index = compact_index;
 
             let total_cnt = self.storage().apply_state().get_applied_index()
-                - self.storage().entry_storage().first_index()
-                + 1;
+                - self.storage().entry_storage().first_index();
+
             // the size of current CompactLog command can be ignored.
             let remain_cnt = self.storage().apply_state().get_applied_index() - compact_index - 1;
             self.raft_log_size_hint = self.raft_log_size_hint * remain_cnt / total_cnt;
