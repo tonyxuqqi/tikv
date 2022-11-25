@@ -115,6 +115,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     "cmd_type" => ?cmd_type,
                     "error" => ?e,
                 );
+                match cmd_type {
+                    AdminCmdType::BatchSplit => {
+                        self.set_may_skip_split_check(false);
+                    }
+                    _ => {}
+                }
             }
         }
         self.post_propose_command(ctx, res, vec![ch], true);
