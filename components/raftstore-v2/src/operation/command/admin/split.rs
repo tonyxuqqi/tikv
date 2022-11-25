@@ -515,6 +515,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             max_size = split_size * 3 / 2;
         }
 
+        let split_size = ReadableSize::mb(100).0;
+        let max_size = ReadableSize::mb(150).0;
+
         let region_approximate_size =
             get_region_approximate_size(tablet, self.region(), split_size * 10);
 
@@ -549,7 +552,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     self.on_prepare_split_region(
                         store_ctx,
                         region_epoch,
-                        keys,
+                        keys.into_iter()
+                            .map(|k| keys::origin_key(&k).to_vec())
+                            .collect(),
                         None,
                         "split_check",
                     );
