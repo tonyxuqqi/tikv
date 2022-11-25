@@ -105,6 +105,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                         return;
                     }
                 }
+                AdminCmdType::CompactLog => self.propose_compact_log(ctx, req),
                 _ => unimplemented!(),
             }
         };
