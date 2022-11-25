@@ -525,6 +525,10 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             Ok(n) => match get_approximate_split_keys(tablet, self.region(), n) {
                 Ok(keys) => {
                     let region_epoch = self.region().get_region_epoch().clone();
+                    info!(
+                        self.logger,
+                        "Call prepare split region";
+                    );
                     self.on_prepare_split_region(
                         store_ctx,
                         region_epoch,
