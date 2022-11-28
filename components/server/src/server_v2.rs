@@ -100,6 +100,7 @@ const SYSTEM_HEALTHY_THRESHOLD: f64 = 0.50;
 // pace of cpu quota adjustment
 const CPU_QUOTA_ADJUSTMENT_PACE: f64 = 200.0; // 0.2 vcpu
 
+// Note: `interval / 1s` is the factor to interpret <histogram>_sum.
 const DEFAULT_METRICS_FLUSH_INTERVAL: Duration = Duration::from_millis(10_000);
 const DEFAULT_ENGINE_METRICS_RESET_INTERVAL: Duration = Duration::from_millis(60_000);
 
@@ -1264,10 +1265,10 @@ impl<EK: KvEngine, ER: RaftEngine> EngineMetricsManager<EK, ER> {
         self.tablet_factory
             .for_each_opened_tablet(&mut |_, _, db: &EK| {
                 KvEngine::flush_metrics(db, "kv", is_first_instance);
-                is_first_instance = false;
-                if should_reset {
+                if is_first_instance && should_reset {
                     KvEngine::reset_statistics(db);
                 }
+                is_first_instance = false;
             });
         self.raft_engine.flush_metrics("raft", true);
         if should_reset {
