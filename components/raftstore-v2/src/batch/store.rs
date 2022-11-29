@@ -32,7 +32,7 @@ use raftstore::{
     },
     DiscardReason,
 };
-use slog::Logger;
+use slog::{warn, Logger};
 use tikv_util::{
     box_err,
     config::{Tracker, VersionTrack},
@@ -413,6 +413,7 @@ struct Workers<EK: KvEngine, ER: RaftEngine> {
     pd_worker: Worker,
     raft_log_gc_worker: Worker,
     store_writers: StoreWriters<EK, ER>,
+    purge_worker: Option<Worker>,
 }
 
 impl<EK: KvEngine, ER: RaftEngine> Default for Workers<EK, ER> {
@@ -422,6 +423,7 @@ impl<EK: KvEngine, ER: RaftEngine> Default for Workers<EK, ER> {
             pd_worker: Worker::new("pd-worker"),
             raft_log_gc_worker: Worker::new("raft-log-gc-worker"),
             store_writers: StoreWriters::default(),
+            purge_worker: None,
         }
     }
 }
@@ -465,11 +467,13 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
         workers
             .store_writers
             .spawn(store_id, raft_engine.clone(), None, router, &trans, &cfg)?;
+
         let mut read_runner = ReadRunner::new(router.clone(), raft_engine.clone());
         read_runner.set_snap_mgr(snap_mgr.clone());
         let read_scheduler = workers
             .async_read_worker
             .start("async-read-worker", read_runner);
+
         let pd_scheduler = workers.pd_worker.start(
             "pd-worker",
             PdRunner::new(
@@ -489,6 +493,23 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
             "raft-log-gc",
             RaftLogGcRunner::new(raft_engine.clone(), self.logger.clone()),
         );
+
+        if raft_engine.need_manual_purge() {
+            let worker = Worker::new("purge-worker");
+            let raft_clone = raft_engine.clone();
+            let logger = self.logger.clone();
+            worker.spawn_interval_task(cfg.value().raft_engine_purge_interval.0, move || {
+                match raft_clone.manual_purge() {
+                    Ok(regions) => {
+                        // TODO: force compact
+                    }
+                    Err(e) => {
+                        warn!(logger, "purge expired files"; "err" => %e);
+                    }
+                };
+            });
+            workers.purge_worker = Some(worker);
+        }
 
         let mut builder = StorePollerBuilder::new(
             cfg.clone(),
@@ -552,6 +573,9 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
 
         workers.store_writers.shutdown();
         workers.async_read_worker.stop();
+        if let Some(w) = workers.purge_worker {
+            w.stop();
+        }
     }
 }
 
