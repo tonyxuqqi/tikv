@@ -323,9 +323,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             .apply_state_mut()
             .set_applied_index(apply_res.applied_index);
         entry_storage.set_applied_term(apply_res.applied_term);
-        if !is_leader {
-            entry_storage.compact_entry_cache(apply_res.applied_index + 1);
-        }
+        // if !is_leader {
+        entry_storage.compact_entry_cache(apply_res.applied_index + 1);
+        // }
         let mut wb = entry_storage.raft_engine().log_batch(10);
         wb.put_apply_state(region_id, entry_storage.apply_state());
         entry_storage.raft_engine().consume(&mut wb, false);
