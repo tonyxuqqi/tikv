@@ -96,7 +96,6 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     /// Transaction extensions related to this peer.
     txn_ext: Arc<TxnExt>,
     txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
-    need_schedule_tick: bool,
     pending_ticks: Vec<PeerTick>,
 
     /// Check whether this proposal can be proposed based on its epoch.
@@ -185,7 +184,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             txn_ext: Arc::default(),
             txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::Noop)),
             proposal_control: ProposalControl::new(0),
-            need_schedule_tick: false,
             pending_ticks: Vec::new(),
             reactivate_memory_lock_ticks: 0,
             lead_transferee: raft::INVALID_ID,
@@ -582,21 +580,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         self.raft_group().snap().is_some()
     }
 
-    #[inline]
-    pub fn set_need_register_reactivate_memory_lock_tick(&mut self) {
-        self.need_schedule_tick = true;
-    }
-
-    #[inline]
-    pub fn need_schedule_tick(&self) -> bool {
-        self.need_schedule_tick
-    }
-
-    #[inline]
-    pub fn reset_need_schedule_tick(&mut self) {
-        self.need_schedule_tick = false;
-    }
-
     pub fn activate_in_memory_pessimistic_locks(&mut self) {
         let mut pessimistic_locks = self.txn_ext.pessimistic_locks.write();
         pessimistic_locks.status = LocksStatus::Normal;
@@ -675,8 +658,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     }
 
     #[inline]
-    pub fn pending_ticks_mut(&mut self) -> &mut Vec<PeerTick> {
-        &mut self.pending_ticks
+    pub fn add_pending_tick(&mut self, tick: PeerTick) {
+        self.pending_ticks.push(tick);
     }
 
     #[inline]

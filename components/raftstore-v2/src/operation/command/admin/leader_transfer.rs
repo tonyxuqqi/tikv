@@ -335,9 +335,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             return true;
         }
         pessimistic_locks.status = LocksStatus::TransferringLeader;
-        self.set_need_register_reactivate_memory_lock_tick();
-        self.pending_ticks_mut()
-            .push(PeerTick::ReactivateMemoryLock);
+        self.add_pending_tick(PeerTick::ReactivateMemoryLock);
 
         // 2. Propose pessimistic locks
         if pessimistic_locks.is_empty() {

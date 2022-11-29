@@ -512,6 +512,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     self.entry_storage_mut().clear_entry_cache_warmup_state();
 
                     self.heartbeat_pd(ctx);
+                    self.add_pending_tick(PeerTick::RaftLogGc);
                 }
                 StateRole::Follower => {
                     self.leader_lease_mut().expire();
