@@ -451,6 +451,10 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         }
         let persisted_number = self.async_writer.persisted_number();
         self.raft_group_mut().on_persist_ready(persisted_number);
+        if need_scheduled {
+            let last_applied_index = self.entry_storage().truncated_index();
+            self.raft_group_mut().advance_apply_to(last_applied_index);
+        }
         let persisted_index = self.raft_group().raft.raft_log.persisted;
         self.storage_mut()
             .entry_storage_mut()
