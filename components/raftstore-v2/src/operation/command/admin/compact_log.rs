@@ -45,6 +45,13 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 "command format is outdated, please upgrade leader"
             ));
         }
+        info!(
+            self.logger,
+            "propose compact log";
+            "region_id" => self.region_id(),
+            "peer_id" => self.peer_id(),
+            "index" => compact_log.get_compact_index(),
+        );
 
         let data = req.write_to_bytes().unwrap();
         self.propose_with_ctx(store_ctx, data, vec![])
@@ -69,10 +76,18 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         }
         // TODO: check is_merging
         // compact failure is safe to be omitted, no need to assert.
-        let mut entry_storage = self.entry_storage_mut();
-        if res.compact_index <= entry_storage.truncated_index()
-            || res.compact_index > entry_storage.applied_index()
+        if res.compact_index <= self.entry_storage_mut().truncated_index()
+            || res.compact_index > self.entry_storage_mut().applied_index()
         {
+            info!(
+                self.logger,
+                "compact log ignored";
+                "cmd" => res.compact_index,
+                "truncated_index" => self.entry_storage().truncated_index(),
+                "applied_index" => self.entry_storage().applied_index(),
+                "region_id" => self.region_id(),
+                "peer_id" => self.peer_id(),
+            );
             return;
         }
 
