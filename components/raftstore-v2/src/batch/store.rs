@@ -481,6 +481,7 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
                 pd_client,
                 raft_engine.clone(),
                 tablet_factory.clone(),
+                snap_mgr.clone(),
                 router.clone(),
                 workers.pd_worker.remote(),
                 concurrency_manager,
