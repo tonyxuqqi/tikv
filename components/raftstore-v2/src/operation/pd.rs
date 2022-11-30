@@ -85,7 +85,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             pending_peers: self.collect_pending_peers(ctx),
             written_bytes: self.self_stat().written_bytes,
             written_keys: self.self_stat().written_keys,
-            approximate_size: None,
+            approximate_size: self.tablet().cache().map(|e| e.get_engine_used_size()).ok(),
             approximate_keys: None,
             wait_data_peers: Vec::new(),
         });
