@@ -5,7 +5,7 @@ use std::cmp;
 use collections::HashMap;
 use engine_traits::{KvEngine, RaftEngine};
 use fail::fail_point;
-use file_system::naive_dir_size;
+use file_system::{naive_dir_size, DirSizeCalculator};
 use kvproto::pdpb;
 use pd_client::{
     metrics::{
@@ -15,7 +15,7 @@ use pd_client::{
     PdClient,
 };
 use prometheus::local::LocalHistogram;
-use slog::{error, warn};
+use slog::{error, info, warn};
 use tikv_util::{metrics::RecordPairVec, store::QueryStats, time::UnixSecs, topn::TopN};
 
 use super::Runner;
@@ -276,12 +276,21 @@ where
         let disk_cap = disk_stats.total_space();
         // TODO: custom capacity.
         let capacity = disk_cap;
-        let used_size = naive_dir_size(self.snap_mgr.root_path()).unwrap() as u64
-            + self.size_calculator.size().unwrap() as u64
-            + self
-                .raft_engine
-                .get_engine_size()
-                .expect("raft engine used size");
+        let mut snapshot_size_collector = DirSizeCalculator::new(self.snap_mgr.root_path());
+        let snapshot_size = snapshot_size_collector.size().unwrap() as u64;
+        let rocksdb_size = self.size_calculator.size().unwrap() as u64;
+        let raft_engine_size = self
+            .raft_engine
+            .get_engine_size()
+            .expect("raft engine used size");
+        let used_size = snapshot_size + rocksdb_size + raft_engine_size;
+        info!(self.logger,
+            "calculate store size";
+            "snapshot_size" => snapshot_size,
+            "rocksdb_size" => rocksdb_size,
+            "raft_engine_size" => raft_engine_size,
+            "total_used_size" => used_size,
+        );
         let mut available = capacity.checked_sub(used_size).unwrap_or_default();
         // We only care about rocksdb SST file size, so we should check disk available
         // here.
