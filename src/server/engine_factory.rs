@@ -146,6 +146,9 @@ impl KvEngineFactory {
         let mut kv_db_opts = self.inner.rocksdb_config.build_opt();
         kv_db_opts.set_env(self.inner.env.clone());
         kv_db_opts.set_statistics(&self.inner.statistics);
+        if let Some(wbm) = self.inner.wbm.as_ref() {
+            kv_db_opts.set_write_buffer_manager(wbm);
+        }
         kv_db_opts.add_event_listener(RocksEventListener::new(
             "kv",
             self.inner.sst_recovery_sender.clone(),
@@ -161,11 +164,6 @@ impl KvEngineFactory {
             self.inner.region_info_accessor.as_ref(),
             self.inner.api_version,
         );
-        if let Some(wbm) = self.inner.wbm.as_ref() {
-            for (_, ref mut opts) in kv_cfs_opts.iter_mut() {
-                opts.set_write_buffer_manager(wbm);
-            }
-        }
         let kv_engine = engine_rocks::util::new_engine_opt(
             tablet_path.to_str().unwrap(),
             kv_db_opts,
