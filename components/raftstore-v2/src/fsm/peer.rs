@@ -234,7 +234,6 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
 
     pub fn on_msgs(&mut self, peer_msgs_buf: &mut Vec<PeerMsg>) {
         for msg in peer_msgs_buf.drain(..) {
-            println!("Receive msg {:?}", msg);
             match msg {
                 PeerMsg::RaftMessage(msg) => {
                     self.fsm.peer.on_raft_message(self.store_ctx, msg);
