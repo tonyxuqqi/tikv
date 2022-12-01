@@ -7,7 +7,7 @@ use std::{
 
 use crossbeam::channel::TrySendError;
 use engine_traits::{KvEngine, RaftEngine};
-use futures::{compat::Future01CompatExt, prelude::*};
+use futures::{compat::Future01CompatExt, executor::block_on, prelude::*};
 use keys::Prefix;
 use kvproto::{
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse},
@@ -78,15 +78,16 @@ impl<EK: KvEngine, ER: RaftEngine> SnapshotRouter<EK> for RaftRouter<EK, ER> {
         req: RaftCmdRequest,
         timeout: Duration,
     ) -> std::result::Result<RegionSnapshot<EK::Snapshot, Prefix>, RaftCmdResponse> {
-        let timeout_f = GLOBAL_TIMER_HANDLE.delay(Instant::now() + timeout);
-        futures::executor::block_on(async move {
-            futures::select! {
-                res = self.snapshot(req).fuse() => res,
-                e = timeout_f.compat().fuse() => {
-                    Err(cmd_resp::new_error(Error::Timeout(format!("request timeout for {:?}: {:?}", timeout,e))))
-                },
-            }
-        })
+        block_on(self.snapshot(req))
+        // let timeout_f = GLOBAL_TIMER_HANDLE.delay(Instant::now() + timeout);
+        // futures::executor::block_on(async move {
+        //     futures::select! {
+        //         res = self.snapshot(req).fuse() => res,
+        //         e = timeout_f.compat().fuse() => {
+        //             Err(cmd_resp::new_error(Error::Timeout(format!("request
+        // timeout for {:?}: {:?}", timeout,e))))         },
+        //     }
+        // })
     }
 }
 

@@ -290,19 +290,23 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     pub fn on_ready_split_region<T>(
         &mut self,
         store_ctx: &mut StoreContext<EK, ER, T>,
-        derived_index: usize,
-        tablet_index: u64,
-        regions: Vec<Region>,
+        res: SplitResult,
     ) {
         fail_point!("on_split", self.peer().get_store_id() == 3, |_| {});
 
         info!(
             self.logger,
             "on_ready_split_region";
-            "regions" => ?regions,
+            "regions" => ?res.regions,
         );
 
-        let derived = &regions[derived_index];
+        println!(
+            "on_ready_split_region, peer {}, regions {:?}",
+            self.peer().store_id,
+            res.regions,
+        );
+
+        let derived = &res.regions[res.derived_index];
         let derived_epoch = derived.get_region_epoch().clone();
         let region_id = derived.get_id();
 
@@ -316,12 +320,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             // Update the version so the concurrent reader will fail due to EpochNotMatch
             // instead of PessimisticLockNotFound.
             pessimistic_locks.version = derived_epoch.get_version();
-            pessimistic_locks.group_by_regions(&regions, derived)
+            pessimistic_locks.group_by_regions(&res.regions, derived)
         };
         fail_point!("on_split_invalidate_locks");
 
         // Roughly estimate the size and keys for new regions.
-        let new_region_count = regions.len() as u64;
+        let new_region_count = res.regions.len() as u64;
         {
             let mut meta = store_ctx.store_meta.lock().unwrap();
             let reader = meta.readers.get_mut(&derived.get_id()).unwrap();
@@ -330,7 +334,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 reader,
                 derived.clone(),
                 RegionChangeReason::Split,
-                tablet_index,
+                res.tablet_index,
             );
         }
 
@@ -343,12 +347,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             info!(
                 self.logger,
                 "notify pd with split";
-                "split_count" => regions.len(),
+                "split_count" => res.regions.len(),
             );
             // Now pd only uses ReportBatchSplit for history operation show,
             // so we send it independently here.
             let task = PdTask::ReportBatchSplit {
-                regions: regions.to_vec(),
+                regions: res.regions.to_vec(),
             };
             if let Err(e) = store_ctx.pd_scheduler.schedule(task) {
                 error!(
@@ -359,8 +363,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             }
         }
 
-        let last_region_id = regions.last().unwrap().get_id();
-        for (new_region, locks) in regions.into_iter().zip(region_locks) {
+        let last_region_id = res.regions.last().unwrap().get_id();
+        for (new_region, locks) in res.regions.into_iter().zip(region_locks) {
             let new_region_id = new_region.get_id();
             if new_region_id == region_id {
                 continue;
@@ -510,7 +514,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         // We don't have coprocessor yet, so use store config for now.
         let mut split_size = store_ctx.cfg.region_split_size.0;
         if split_size == 0 {
-            split_size = ReadableSize::gb(4).0;
+            split_size = ReadableSize::gb(6).0;
         }
         let mut max_size = store_ctx.cfg.region_max_size.0;
         if max_size == 0 {
@@ -532,10 +536,16 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             Ok(n) => match get_approximate_split_keys(tablet, self.region(), n) {
                 Ok(keys) => {
                     let region_epoch = self.region().get_region_epoch().clone();
+                    info!(
+                        self.logger,
+                        "Call prepare split region";
+                    );
                     self.on_prepare_split_region(
                         store_ctx,
                         region_epoch,
-                        keys,
+                        keys.into_iter()
+                            .map(|k| keys::origin_key(&k).to_vec())
+                            .collect(),
                         None,
                         "split_check",
                     );
@@ -559,7 +569,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     ) {
         info!(
             self.logger,
-            "on split";
+            "on prepare split region";
             "split_keys" => %KeysInfoFormatter(split_keys.iter()),
             "source" => source,
         );

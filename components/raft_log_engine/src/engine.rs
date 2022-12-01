@@ -441,7 +441,7 @@ impl RaftEngineReadOnly for RaftLogEngine {
                 raft_group_id, begin, end, r
             );
         }
-        return r;
+        r
     }
 
     fn get_all_entries_to(&self, raft_group_id: u64, buf: &mut Vec<Entry>) -> Result<()> {

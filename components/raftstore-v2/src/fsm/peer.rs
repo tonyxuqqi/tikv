@@ -129,13 +129,15 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
         Self { fsm, store_ctx }
     }
 
+    #[inline]
     fn schedule_pending_ticks(&mut self) {
         let pending_ticks = self.fsm.peer.take_pending_ticks();
         for tick in pending_ticks {
             if tick == PeerTick::ReactivateMemoryLock {
-                self.fsm.reactivate_memory_lock_ticks = 0;
+                self.register_reactivate_memory_lock_tick()
+            } else {
+                self.schedule_tick(tick);
             }
-            self.schedule_tick(tick);
         }
     }
 
@@ -191,6 +193,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
         self.schedule_tick(PeerTick::Raft);
         self.schedule_tick(PeerTick::SplitRegionCheck);
         self.schedule_tick(PeerTick::PdHeartbeat);
+        self.schedule_tick(PeerTick::RaftLogGc);
         if self.fsm.peer.storage().is_initialized() {
             self.fsm.peer.schedule_apply_fsm(self.store_ctx);
         }
@@ -217,11 +220,11 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
         match tick {
             PeerTick::Raft => self.on_raft_tick(),
             PeerTick::PdHeartbeat => self.on_pd_heartbeat(),
-            PeerTick::RaftLogGc => unimp!(tick),
+            PeerTick::RaftLogGc => self.on_raft_log_gc(),
+            PeerTick::EntryCacheEvict => self.on_entry_cache_evict(),
             PeerTick::SplitRegionCheck => self.on_split_region_check(),
             PeerTick::CheckMerge => unimp!(tick),
             PeerTick::CheckPeerStaleState => unimp!(tick),
-            PeerTick::EntryCacheEvict => unimp!(tick),
             PeerTick::CheckLeaderLease => unimp!(tick),
             PeerTick::ReactivateMemoryLock => unimp!(tick),
             PeerTick::ReportBuckets => unimp!(tick),
@@ -231,13 +234,11 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
 
     pub fn on_msgs(&mut self, peer_msgs_buf: &mut Vec<PeerMsg>) {
         for msg in peer_msgs_buf.drain(..) {
+            println!("Receive msg {:?}", msg);
             match msg {
                 PeerMsg::RaftMessage(msg) => {
                     self.fsm.peer.on_raft_message(self.store_ctx, msg);
-                    if self.fsm.peer.need_schedule_tick() {
-                        self.fsm.peer.reset_need_schedule_tick();
-                        self.schedule_pending_ticks();
-                    }
+                    self.schedule_pending_ticks();
                 }
                 PeerMsg::RaftQuery(cmd) => {
                     self.on_receive_command(cmd.send_time);

@@ -624,26 +624,20 @@ fn test_auto_split_region(cluster: &mut Cluster) {
     let region_ids = cluster.region_ids(store_id);
     for id in region_ids {
         cluster
-            .scan(
-                store_id,
-                id,
-                CF_DEFAULT,
-                &data_key(b""),
-                &data_key(middle_key),
-                false,
-                |k, v| {
-                    size += k.len() as u64;
-                    size += v.len() as u64;
-                    Ok(true)
-                },
-            )
+            .scan(store_id, id, CF_DEFAULT, b"", middle_key, false, |k, v| {
+                size += k.len() as u64;
+                size += v.len() as u64;
+                Ok(true)
+            })
             .expect("");
     }
 
     assert!(size <= REGION_SPLIT_SIZE);
     // although size may be smaller than REGION_SPLIT_SIZE, but the diff should
     // be small.
-    assert!(size > REGION_SPLIT_SIZE - 1000);
+
+    // todo: now, split only uses approxiamte split keys
+    // assert!(size > REGION_SPLIT_SIZE - 1000);
 
     let epoch = left.get_region_epoch().clone();
     let get = new_request(left.get_id(), epoch, vec![new_get_cmd(&max_key)], false);

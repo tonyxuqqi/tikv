@@ -24,7 +24,7 @@ mod region_snapshot;
 mod replication_mode;
 pub mod snap;
 mod txn_ext;
-mod worker;
+pub mod worker;
 
 #[cfg(any(test, feature = "testexport"))]
 pub use self::msg::PeerInternalStat;
@@ -77,7 +77,6 @@ pub use self::{
     txn_ext::{LocksStatus, PeerPessimisticLocks, PessimisticLockPair, TxnExt},
     util::{RegionReadProgress, RegionReadProgressRegistry},
     worker::{
-        metrics::{maybe_tls_local_read_metrics_flush, TLS_LOCAL_READ_METRICS},
         AutoSplitController, Bucket, BucketRange, CachedReadDelegate, CheckLeaderRunner,
         CheckLeaderTask, FlowStatistics, FlowStatsReporter, KeyEntry, LocalReadContext,
         LocalReader, LocalReaderCore, PdTask, ReadDelegate, ReadExecutor, ReadExecutorProvider,

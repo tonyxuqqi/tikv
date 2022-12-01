@@ -36,8 +36,8 @@ use raft::{
 use raftstore::{
     coprocessor::{ApplySnapshotObserver, RoleChange},
     store::{
-        util, ExtraStates, FetchedLogs, ReadProgress, SnapKey, TabletSnapKey, Transport, WriteTask,
-        RAFT_INIT_LOG_INDEX,
+        needs_evict_entry_cache, util, ExtraStates, FetchedLogs, ReadProgress, SnapKey,
+        TabletSnapKey, Transport, WriteTask, RAFT_INIT_LOG_INDEX,
     },
 };
 use slog::{debug, error, info, trace, warn};
@@ -261,6 +261,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         // asynchronously.
         if self.is_leader() {
             for entry in committed_entries.iter().rev() {
+                self.raft_log_size_hint += entry.get_data().len() as u64;
                 // TODO: handle raft_log_size_hint
                 let propose_time = self
                     .proposals()
@@ -278,6 +279,10 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     break;
                 }
             }
+        }
+        if needs_evict_entry_cache(ctx.cfg.evict_cache_on_memory_ratio) {
+            // Compact all cached entries instead of half evict.
+            self.entry_storage_mut().evict_entry_cache(false);
         }
         self.schedule_apply_committed_entries(ctx, committed_entries);
     }
@@ -309,10 +314,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         debug!(self.logger, "handle raft ready");
 
         let mut ready = self.raft_group_mut().ready();
-        info!(self.logger,
-            "handle raft ready";
-            "ready number" => ready.number(),
-        );
         // Update it after unstable entries pagination is introduced.
         debug_assert!(ready.entries().last().map_or_else(
             || true,
@@ -450,6 +451,10 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         }
         let persisted_number = self.async_writer.persisted_number();
         self.raft_group_mut().on_persist_ready(persisted_number);
+        if need_scheduled {
+            let last_applied_index = self.entry_storage().truncated_index();
+            self.raft_group_mut().advance_apply_to(last_applied_index);
+        }
         let persisted_index = self.raft_group().raft.raft_log.persisted;
         self.storage_mut()
             .entry_storage_mut()
@@ -511,6 +516,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     self.entry_storage_mut().clear_entry_cache_warmup_state();
 
                     self.heartbeat_pd(ctx);
+                    self.add_pending_tick(PeerTick::RaftLogGc);
                 }
                 StateRole::Follower => {
                     self.leader_lease_mut().expire();

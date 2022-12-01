@@ -9,12 +9,13 @@ use causal_ts::CausalTsProviderImpl;
 use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::{KvEngine, RaftEngine, TabletFactory};
+use file_system::DirSizeCalculator;
 use kvproto::{
     metapb, pdpb,
     raft_cmdpb::{AdminRequest, RaftCmdRequest},
 };
 use pd_client::PdClient;
-use raftstore::store::{util::KeysInfoFormatter, TxnExt};
+use raftstore::store::{util::KeysInfoFormatter, TabletSnapManager, TxnExt};
 use slog::{error, info, Logger};
 use tikv_util::{time::UnixSecs, worker::Runnable};
 use yatp::{task::future::TaskCell, Remote};
@@ -102,6 +103,7 @@ where
     pd_client: Arc<T>,
     raft_engine: ER,
     tablet_factory: Arc<dyn TabletFactory<EK>>,
+    snap_mgr: TabletSnapManager,
     router: StoreRouter<EK, ER>,
 
     remote: Remote<TaskCell>,
@@ -110,6 +112,7 @@ where
 
     start_ts: UnixSecs,
     store_stat: store_heartbeat::StoreStat,
+    size_calculator: DirSizeCalculator,
 
     region_cpu_records: HashMap<u64, u32>,
     is_hb_receiver_scheduled: bool,
@@ -132,22 +135,26 @@ where
         pd_client: Arc<T>,
         raft_engine: ER,
         tablet_factory: Arc<dyn TabletFactory<EK>>,
+        snap_mgr: TabletSnapManager,
         router: StoreRouter<EK, ER>,
         remote: Remote<TaskCell>,
         concurrency_manager: ConcurrencyManager,
         causal_ts_provider: Option<Arc<CausalTsProviderImpl>>, // used for rawkv apiv2
         logger: Logger,
     ) -> Self {
+        let size_calculator = DirSizeCalculator::new(tablet_factory.tablets_path());
         Self {
             store_id,
             pd_client,
             raft_engine,
             tablet_factory,
+            snap_mgr,
             router,
             remote,
             region_peers: HashMap::default(),
             start_ts: UnixSecs::zero(),
             store_stat: store_heartbeat::StoreStat::default(),
+            size_calculator,
             region_cpu_records: HashMap::default(),
             is_hb_receiver_scheduled: false,
             concurrency_manager,
@@ -224,9 +231,9 @@ pub fn send_admin_request<EK, ER>(
     req.set_admin_request(request);
 
     let (mut msg, _) = PeerMsg::raft_command(req);
-    if ch.is_some() {
+    if let Some(ch) = ch {
         match msg {
-            PeerMsg::RaftCommand(ref mut req) => req.ch = ch.unwrap(),
+            PeerMsg::RaftCommand(ref mut req) => req.ch = ch,
             _ => unreachable!(),
         }
     }

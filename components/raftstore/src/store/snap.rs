@@ -1945,27 +1945,28 @@ impl Display for TabletSnapKey {
 #[derive(Clone)]
 pub struct TabletSnapManager {
     // directory to store snapfile.
-    base: String,
+    path: PathBuf,
 }
 
 impl TabletSnapManager {
     pub fn new<T: Into<String>>(path: T) -> Self {
-        let m = Self { base: path.into() };
+        let m = Self {
+            path: PathBuf::from(path.into()),
+        };
         m.init().unwrap();
         m
     }
 
     pub fn init(&self) -> io::Result<()> {
         // Initialize the directory if it doesn't exist.
-        let path = Path::new(&self.base);
-        if !path.exists() {
-            file_system::create_dir_all(path)?;
+        if !self.path.exists() {
+            file_system::create_dir_all(&self.path)?;
             return Ok(());
         }
-        if !path.is_dir() {
+        if !self.path.is_dir() {
             return Err(io::Error::new(
                 ErrorKind::Other,
-                format!("{} should be a directory", path.display()),
+                format!("{} should be a directory", self.path.display()),
             ));
         }
         Ok(())
@@ -1973,22 +1974,27 @@ impl TabletSnapManager {
 
     pub fn get_tablet_checkpointer_path(&self, key: &TabletSnapKey) -> PathBuf {
         let suffix = key.get_gen_suffix();
-        PathBuf::from(&self.base).join(suffix)
+        self.path.join(suffix)
     }
 
     pub fn get_recv_tablet_path(&self, key: &TabletSnapKey) -> PathBuf {
         let prefix = format!("{}_{}", SNAP_REV_PREFIX, key);
-        PathBuf::from(&self.base).join(prefix)
+        self.path.join(prefix)
     }
 
     pub fn get_final_name_for_recv(&self, key: &TabletSnapKey) -> PathBuf {
         let prefix = format!("{}_{}", SNAP_REV_PREFIX, key);
-        PathBuf::from(&self.base).join(prefix)
+        self.path.join(prefix)
     }
 
     pub fn get_tmp_name_for_recv(&self, key: &TabletSnapKey) -> PathBuf {
         let prefix = format!("{}_{}{}", SNAP_REV_PREFIX, key, TMP_FILE_SUFFIX);
-        PathBuf::from(&self.base).join(prefix)
+        self.path.join(prefix)
+    }
+
+    #[inline]
+    pub fn root_path(&self) -> &Path {
+        &self.path
     }
 }
 

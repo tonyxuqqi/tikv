@@ -9,7 +9,10 @@ use std::{
 use collections::HashMap;
 use crossbeam::atomic::AtomicCell;
 use engine_traits::{KvEngine, OpenOptions, RaftEngine, TabletFactory};
-use kvproto::{kvrpcpb::ExtraOp as TxnExtraOp, metapb, pdpb, raft_serverpb::RegionLocalState};
+use kvproto::{
+    kvrpcpb::ExtraOp as TxnExtraOp, metapb, pdpb, raft_cmdpb::RaftCmdRequest,
+    raft_serverpb::RegionLocalState,
+};
 use pd_client::BucketStat;
 use raft::{RawNode, StateRole};
 use raftstore::{
@@ -58,7 +61,12 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     /// messages with unknown peers after recovery.
     peer_cache: Vec<metapb::Peer>,
     /// Statistics for other peers, only maintained when self is the leader.
-    peer_heartbeats: HashMap<u64, Instant>,
+    pub(crate) peer_heartbeats: HashMap<u64, Instant>,
+
+    /// For gc.
+    pub last_compacted_index: u64,
+    pub skip_gc_raft_log_ticks: usize,
+    pub raft_log_size_hint: u64,
 
     /// Encoder for batching proposals and encoding them in a more efficient way
     /// than protobuf.
@@ -88,7 +96,6 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     /// Transaction extensions related to this peer.
     txn_ext: Arc<TxnExt>,
     txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
-    need_schedule_tick: bool,
     pending_ticks: Vec<PeerTick>,
 
     /// Check whether this proposal can be proposed based on its epoch.
@@ -150,6 +157,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             self_stat: PeerStat::default(),
             peer_cache: vec![],
             peer_heartbeats: HashMap::default(),
+            last_compacted_index: 0,
+            skip_gc_raft_log_ticks: 0,
+            raft_log_size_hint: 0,
             raw_write_encoder: None,
             proposals: ProposalQueue::new(region_id, raft_group.raft.id),
             async_writer: AsyncWriter::new(region_id, peer_id),
@@ -174,7 +184,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             txn_ext: Arc::default(),
             txn_extra_op: Arc::new(AtomicCell::new(TxnExtraOp::Noop)),
             proposal_control: ProposalControl::new(0),
-            need_schedule_tick: false,
             pending_ticks: Vec::new(),
             reactivate_memory_lock_ticks: 0,
             lead_transferee: raft::INVALID_ID,
@@ -571,21 +580,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         self.raft_group().snap().is_some()
     }
 
-    #[inline]
-    pub fn set_need_register_reactivate_memory_lock_tick(&mut self) {
-        self.need_schedule_tick = true;
-    }
-
-    #[inline]
-    pub fn need_schedule_tick(&self) -> bool {
-        self.need_schedule_tick
-    }
-
-    #[inline]
-    pub fn reset_need_schedule_tick(&mut self) {
-        self.need_schedule_tick = false;
-    }
-
     pub fn activate_in_memory_pessimistic_locks(&mut self) {
         let mut pessimistic_locks = self.txn_ext.pessimistic_locks.write();
         pessimistic_locks.status = LocksStatus::Normal;
@@ -664,8 +658,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     }
 
     #[inline]
-    pub fn pending_ticks_mut(&mut self) -> &mut Vec<PeerTick> {
-        &mut self.pending_ticks
+    pub fn add_pending_tick(&mut self, tick: PeerTick) {
+        self.pending_ticks.push(tick);
     }
 
     #[inline]
@@ -734,5 +728,13 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     #[inline]
     pub fn set_may_skip_split_check(&mut self, skip: bool) {
         self.may_skip_split_check = skip;
+    }
+
+    #[inline]
+    pub fn new_admin_request(&self) -> RaftCmdRequest {
+        let mut request = RaftCmdRequest::default();
+        request.mut_header().set_region_id(self.region_id());
+        request.mut_header().set_peer(self.peer().clone());
+        request
     }
 }
