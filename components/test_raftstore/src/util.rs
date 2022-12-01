@@ -129,7 +129,7 @@ pub fn must_region_cleared(engine: &Engines<RocksEngine, RaftTestEngine>, region
 }
 
 lazy_static! {
-    static ref TEST_CONFIG: TikvConfig = {
+    pub static ref TEST_CONFIG: TikvConfig = {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let common_test_cfg = manifest_dir.join("src/common-test.toml");
         TikvConfig::from_file(&common_test_cfg, None).unwrap_or_else(|e| {

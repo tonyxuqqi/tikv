@@ -1,7 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::{self, Read, Write},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -422,4 +422,41 @@ where
             }
         }
     }
+}
+
+// A helper function to copy snapshot.
+// Only used in tests.
+pub fn copy_tablet_snapshot(
+    key: TabletSnapKey,
+    msg: RaftMessage,
+    sender_snap_mgr: &TabletSnapManager,
+    recver_snap_mgr: &TabletSnapManager,
+) -> Result<()> {
+    let sender_path = sender_snap_mgr.get_tablet_checkpointer_path(&key);
+    let files = fs::read_dir(&sender_path)?
+        .map(|f| Ok(f?.path()))
+        .filter(|f| f.is_ok() && f.as_ref().unwrap().is_file())
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut head = SnapshotChunk::default();
+    head.set_message(msg);
+    head.set_data(usize::to_ne_bytes(SNAP_CHUNK_LEN).to_vec());
+
+    let recv_context = RecvTabletSnapContext::new(Some(head))?;
+    let recv_path = recver_snap_mgr.get_tmp_name_for_recv(&recv_context.key);
+    fs::create_dir_all(&recv_path)?;
+
+    for path in files {
+        let sender_name = path.file_name().unwrap().to_str().unwrap();
+        let mut sender_f = File::open(&path)?;
+
+        let recv_p = recv_path.join(sender_name);
+        let mut recv_f = File::create(&recv_p)?;
+
+        while io::copy(&mut sender_f, &mut recv_f)? != 0 {}
+    }
+
+    let final_path = recver_snap_mgr.get_final_name_for_recv(&recv_context.key);
+    fs::rename(&recv_path, final_path)?;
+    Ok(())
 }

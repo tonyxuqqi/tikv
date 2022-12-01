@@ -4,6 +4,7 @@ use std::{
     cmp::{self, Ordering as CmpOrdering, Reverse},
     error::Error as StdError,
     fmt::{self, Display, Formatter},
+    fs,
     io::{self, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     result, str,
@@ -27,7 +28,7 @@ use keys::{enc_end_key, enc_start_key};
 use kvproto::{
     encryptionpb::EncryptionMethod,
     metapb::Region,
-    raft_serverpb::{RaftSnapshotData, SnapshotCfFile, SnapshotMeta},
+    raft_serverpb::{RaftMessage, RaftSnapshotData, SnapshotCfFile, SnapshotChunk, SnapshotMeta},
 };
 use openssl::symm::{Cipher, Crypter, Mode};
 use protobuf::Message;

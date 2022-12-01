@@ -16,6 +16,6 @@ pub use self::{
     message::{PeerMsg, PeerTick, RaftRequest, StoreMsg, StoreTick},
     response_channel::{
         CmdResChannel, CmdResSubscriber, DebugInfoChannel, DebugInfoSubscriber, QueryResChannel,
-        QueryResult, ReadResponse,
+        QueryResSubscriber, QueryResult, ReadResponse,
     },
 };

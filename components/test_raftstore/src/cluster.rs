@@ -41,6 +41,7 @@ use raftstore::{
             store::{StoreMeta, PENDING_MSG_CAP},
             RaftBatchSystem, RaftRouter,
         },
+        region_meta::RegionMeta,
         transport::CasualRouter,
         *,
     },
