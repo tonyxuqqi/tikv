@@ -1971,7 +1971,7 @@ impl TabletSnapManager {
         Ok(())
     }
 
-    pub fn get_tablet_checkpointer_path(&self, key: &TabletSnapKey) -> PathBuf {
+    pub fn tablet_gen_path(&self, key: &TabletSnapKey) -> PathBuf {
         let suffix = key.get_gen_suffix();
         self.path.join(suffix)
     }
@@ -1981,14 +1981,28 @@ impl TabletSnapManager {
         self.path.join(prefix)
     }
 
-    pub fn get_final_name_for_recv(&self, key: &TabletSnapKey) -> PathBuf {
+    pub fn final_recv_path(&self, key: &TabletSnapKey) -> PathBuf {
         let prefix = format!("{}_{}", SNAP_REV_PREFIX, key);
         self.path.join(prefix)
     }
 
-    pub fn get_tmp_name_for_recv(&self, key: &TabletSnapKey) -> PathBuf {
+    pub fn tmp_recv_path(&self, key: &TabletSnapKey) -> PathBuf {
         let prefix = format!("{}_{}{}", SNAP_REV_PREFIX, key, TMP_FILE_SUFFIX);
         self.path.join(prefix)
+    }
+
+    pub fn delete_snapshot(&self, key: &TabletSnapKey) -> bool {
+        let path = self.tablet_gen_path(key);
+        if path.exists() && let Err(e) = std::fs::remove_dir_all(path.as_path()) {
+            error!(
+                "delete snapshot failed";
+                "path" => %path.display(),
+                "err" => ?e,
+            );
+            false
+        } else {
+            true
+        }
     }
 
     #[inline]

@@ -100,7 +100,7 @@ async fn send_snap_files(
     msg: RaftMessage,
     key: TabletSnapKey,
 ) -> Result<u64> {
-    let path = mgr.get_tablet_checkpointer_path(&key);
+    let path = mgr.tablet_gen_path(&key);
     let files = fs::read_dir(&path)?
         .map(|d| Ok(d?.path()))
         .collect::<Result<Vec<_>>>()?;
@@ -192,6 +192,7 @@ pub fn send_snap(
                 // TODO: improve it after rustc resolves the bug.
                 // Call `info` in the closure directly will cause rustc
                 // panic with `Cannot create local mono-item for DefId`.
+                mgr.delete_snapshot(&key);
                 Ok(SendStat {
                     key,
                     total_size,
@@ -214,7 +215,7 @@ fn recv_snap<R: RaftExtension + 'static>(
         let mut stream = stream.map_err(Error::from);
         let head = stream.next().await.transpose()?;
         let context = RecvTabletSnapContext::new(head)?;
-        let path = snap_mgr.get_tmp_name_for_recv(&context.key);
+        let path = snap_mgr.tmp_recv_path(&context.key);
         fs::create_dir_all(&path)?;
         loop {
             fail_point!("receiving_snapshot_net_error", |_| {
@@ -250,7 +251,7 @@ fn recv_snap<R: RaftExtension + 'static>(
             f.sync_data()?;
         }
 
-        let final_path = snap_mgr.get_final_name_for_recv(&context.key);
+        let final_path = snap_mgr.final_recv_path(&context.key);
         fs::rename(&path, final_path)?;
         context.finish(raft_router)
     };
@@ -372,6 +373,10 @@ where
             }
             Task::Send { addr, msg, cb } => {
                 let region_id = msg.get_region_id();
+                info!(
+                    "begin to sent snapshot";
+                    "region_id" => region_id,
+                );
                 if self.sending_count.load(Ordering::SeqCst) >= self.cfg.concurrent_send_snap_limit
                 {
                     warn!(
