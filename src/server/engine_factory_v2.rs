@@ -8,8 +8,8 @@ use std::{
 use collections::HashMap;
 use engine_rocks::RocksEngine;
 use engine_traits::{
-    CfOptions, CfOptionsExt, MiscExt, OpenOptions, Result, TabletAccessor, TabletFactory,
-    CF_DEFAULT,
+    CfOptions, CfOptionsExt, DeleteStrategy, MiscExt, OpenOptions, Range, Result, TabletAccessor,
+    TabletFactory, CF_DEFAULT,
 };
 
 use crate::server::engine_factory::KvEngineFactory;
@@ -82,7 +82,7 @@ impl TabletFactory<RocksEngine> for KvEngineFactoryV2 {
                 let tablet_path = self.tablet_path(id, suffix);
                 let tablet = self.open_tablet_raw(&tablet_path, id, suffix, options.clone())?;
                 if !options.skip_cache() {
-                    debug!("Insert a tablet"; "key" => ?(id, suffix));
+                    info!("Insert a tablet"; "key" => ?(id, suffix), "tablet_count" => reg.len() + 1);
                     reg.insert(id, (tablet.clone(), suffix));
                 }
                 return Ok(tablet);
@@ -179,15 +179,26 @@ impl TabletFactory<RocksEngine> for KvEngineFactoryV2 {
 
     #[inline]
     fn destroy_tablet(&self, region_id: u64, suffix: u64) -> engine_traits::Result<()> {
-        let path = self.tablet_path(region_id, suffix);
+        let mut path = self.tablet_path(region_id, suffix);
+        let tablet_count: usize;
         {
             let mut reg = self.registry.lock().unwrap();
             if let Some((cached_tablet, cached_suffix)) = reg.remove(&region_id) && cached_suffix != suffix {
-                reg.insert(region_id, (cached_tablet, cached_suffix));
+                if suffix != 0 {
+                    reg.insert(region_id, (cached_tablet, cached_suffix));
+                } else {
+                    // to effectively save space
+                    cached_tablet.
+                       delete_ranges_cfs(DeleteStrategy::DeleteFiles, &[Range::new(keys::DATA_MIN_KEY, keys::DATA_MAX_KEY)])
+                    .unwrap();
+                }
+                path = self.tablet_path(region_id, cached_suffix);
             }
+            tablet_count = reg.len();
         }
-        self.inner.destroy_tablet(&path)?;
         self.inner.on_tablet_destroy(region_id, suffix);
+        self.inner.destroy_tablet(&path)?;
+        info!("destroy_tablet"; "region_id" => region_id, "suffix" => suffix, "total_tablet_count " => tablet_count);
         Ok(())
     }
 

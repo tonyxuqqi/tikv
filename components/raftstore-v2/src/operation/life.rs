@@ -341,6 +341,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             // new peer. Ignore error as it's just a best effort.
             let _ = ctx.router.send_raft_message(msg);
         }
+
+        // for demo purpose only. It should be done in tablet GC
+        ctx.tablet_factory.destroy_tablet(self.region_id(), 0);
         // TODO: close apply mailbox.
     }
 }

@@ -159,7 +159,7 @@ impl KvEngineFactory {
         if let Some(listener) = &self.inner.flow_listener {
             kv_db_opts.add_event_listener(listener.clone_with(region_id, suffix));
         }
-        let mut kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
+        let kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
             &self.inner.block_cache,
             self.inner.region_info_accessor.as_ref(),
             self.inner.api_version,
@@ -191,23 +191,20 @@ impl KvEngineFactory {
     pub fn destroy_tablet(&self, tablet_path: &Path) -> engine_traits::Result<()> {
         info!("destroy tablet"; "path" => %tablet_path.display());
         // Create kv engine.
-        let mut kv_db_opts = self.inner.rocksdb_config.build_opt();
+        /*let mut kv_db_opts = self.inner.rocksdb_config.build_opt();
         kv_db_opts.set_env(self.inner.env.clone());
         if let Some(filter) = self.create_raftstore_compaction_listener() {
             kv_db_opts.add_event_listener(filter);
         }
-        let _kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
-            &self.inner.block_cache,
-            self.inner.region_info_accessor.as_ref(),
-            self.inner.api_version,
-        );
+        // let _kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
+        // &self.inner.block_cache,
+        // self.inner.region_info_accessor.as_ref(),
+        // self.inner.api_version,
+        // );
         // TODOTODO: call rust-rocks or tirocks to destroy_engine;
-        // engine_rocks::util::destroy_engine(
-        //   tablet_path.to_str().unwrap(),
-        //   kv_db_opts,
-        //   kv_cfs_opts,
-        // )?;
-        let _ = std::fs::remove_dir_all(tablet_path);
+        //engine_rocks::util::destroy_engine(kv_db_opts, tablet_path.to_str().unwrap())?;
+        //let _ = std::fs::remove_dir_all(tablet_path);
+        */
         Ok(())
     }
 

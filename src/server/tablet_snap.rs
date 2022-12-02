@@ -143,6 +143,7 @@ async fn send_snap_files(
         info!("sent snap file finish"; "file" => %path.display(), "size" => file_size, "sent" => size);
     }
     sender.close().await?;
+    let _ = std::fs::remove_dir_all(path.as_path());
     Ok(total_sent)
 }
 
