@@ -565,11 +565,6 @@ impl Cluster {
                     let gen_path = from_snap_mgr.tablet_gen_path(&key);
                     let recv_path = to_snap_mgr.final_recv_path(&key);
                     assert!(gen_path.exists());
-                    println!(
-                        "snapshot send, send_path:{},recv_path:{}",
-                        gen_path.display(),
-                        recv_path.display()
-                    );
                     std::fs::rename(gen_path, recv_path.clone()).unwrap();
                     assert!(recv_path.exists());
                 }

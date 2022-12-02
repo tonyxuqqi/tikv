@@ -84,10 +84,6 @@ fn test_add_learner() {
     // read the new written kv.
     assert_eq!(match_index, meta.raft_apply.truncated_state.index);
     assert!(meta.raft_apply.applied_index >= match_index);
-    println!(
-        "applied_index:{}, matched:{}",
-        meta.raft_apply.applied_index, match_index
-    );
     let tablet_factory = cluster.node(1).tablet_factory();
     let tablet = tablet_factory
         .open_tablet(region_id, None, OpenOptions::default().set_cache_only(true))
@@ -117,7 +113,6 @@ fn test_add_learner() {
     assert_eq!(meta.region_state.epoch.version, epoch.get_version());
     assert_eq!(meta.region_state.epoch.conf_ver, new_conf_ver);
     assert_eq!(meta.region_state.peers, vec![leader_peer]);
-    println!("finish");
 }
 
 #[test]

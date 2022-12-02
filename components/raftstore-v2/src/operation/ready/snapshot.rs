@@ -140,10 +140,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
     pub fn on_applied_snapshot<T: Transport>(&mut self, ctx: &mut StoreContext<EK, ER, T>) {
         let persisted_index = self.raft_group().raft.raft_log.persisted;
         let first_index = self.storage().entry_storage().first_index();
-        println!(
-            "on_applied_snapshot, first_index:{},persisted_index:{}",
-            first_index, persisted_index
-        );
         if first_index == persisted_index + 1 {
             let region_id = self.region_id();
             let tablet = ctx
