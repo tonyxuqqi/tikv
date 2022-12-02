@@ -355,6 +355,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         // Always sending snapshot task after apply task, so it gets latest
         // snapshot.
         if let Some(gen_task) = self.storage_mut().take_gen_snap_task() {
+            info!(self.logger, "sending ApplyTask::Snapshot");
             self.apply_scheduler().send(ApplyTask::Snapshot(gen_task));
         }
 

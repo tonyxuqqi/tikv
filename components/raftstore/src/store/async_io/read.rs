@@ -228,6 +228,7 @@ where
                     println!("failed to create checkpointer, err:{:?}", e);
                     SNAP_COUNTER.generate.fail.inc();
                 } else {
+                    info!("generate_snap succeeded"; "region_id" => region_id);
                     SNAP_COUNTER.generate.success.inc();
                     SNAP_HISTOGRAM
                         .generate
