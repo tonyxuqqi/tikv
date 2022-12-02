@@ -5863,7 +5863,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "test_raftstore_v2"
+name = "test_raftstore-v2"
 version = "0.0.1"
 dependencies = [
  "api_version",
@@ -6019,6 +6019,7 @@ dependencies = [
  "test_pd",
  "test_pd_client",
  "test_raftstore",
+ "test_raftstore-v2",
  "test_sst_importer",
  "test_storage",
  "test_util",

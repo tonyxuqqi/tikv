@@ -1,5 +1,5 @@
 [package]
-name = "test_raftstore_v2"
+name = "test_raftstore-v2"
 version = "0.0.1"
 edition = "2018"
 publish = false
