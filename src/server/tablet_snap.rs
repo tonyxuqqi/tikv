@@ -373,9 +373,11 @@ where
             }
             Task::Send { addr, msg, cb } => {
                 let region_id = msg.get_region_id();
+                let to_peer_id = msg.get_to_peer().get_id();
                 info!(
                     "begin to sent snapshot";
                     "region_id" => region_id,
+                    "to_peer" => to_peer_id,
                 );
                 if self.sending_count.load(Ordering::SeqCst) >= self.cfg.concurrent_send_snap_limit
                 {
@@ -411,7 +413,11 @@ where
                             cb(Ok(()));
                         }
                         Err(e) => {
-                            error!("failed to send snap"; "to_addr" => addr, "region_id" => region_id, "err" => ?e);
+                            error!("failed to send snap"; 
+                            "to_addr" => addr,
+                            "region_id" => region_id, 
+                            "to_peer_id" => to_peer_id,
+                            "err" => ?e);
                             cb(Err(e));
                         }
                     };
