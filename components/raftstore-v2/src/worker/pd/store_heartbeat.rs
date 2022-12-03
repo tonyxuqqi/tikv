@@ -284,17 +284,19 @@ where
             .get_engine_size()
             .expect("raft engine used size");
         let used_size = snapshot_size + rocksdb_size + raft_engine_size;
+        let disk_available_size = disk_stats.available_space();
         info!(self.logger,
             "calculate store size";
             "snapshot_size" => snapshot_size,
             "rocksdb_size" => rocksdb_size,
             "raft_engine_size" => raft_engine_size,
             "total_used_size" => used_size,
+            "dik_available" => disk_available_size,
         );
         let mut available = capacity.checked_sub(used_size).unwrap_or_default();
         // We only care about rocksdb SST file size, so we should check disk available
         // here.
-        available = cmp::min(available, disk_stats.available_space());
+        available = cmp::min(available, disk_available_size);
         Some((capacity, used_size, available))
     }
 }
