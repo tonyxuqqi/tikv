@@ -12,7 +12,7 @@ use std::{
 use collections::{HashMap, HashSet};
 use crossbeam::channel::TrySendError;
 use encryption_export::DataKeyManager;
-use engine_rocks::{RocksEngine, RocksSnapshot};
+use engine_rocks::{RocksDbVector, RocksEngine, RocksSnapshot};
 use engine_test::raft::RaftTestEngine;
 use engine_traits::{
     CompactExt, Engines, Iterable, MiscExt, Mutable, Peekable, RaftEngineReadOnly, WriteBatch,
@@ -41,7 +41,6 @@ use raftstore::{
             store::{StoreMeta, PENDING_MSG_CAP},
             RaftBatchSystem, RaftRouter,
         },
-        region_meta::RegionMeta,
         transport::CasualRouter,
         *,
     },
@@ -1882,3 +1881,7 @@ impl<T: Simulator> Drop for Cluster<T> {
         self.shutdown();
     }
 }
+
+pub trait RawEngine: Peekable<DbVector = RocksDbVector> {}
+
+impl RawEngine for RocksEngine {}

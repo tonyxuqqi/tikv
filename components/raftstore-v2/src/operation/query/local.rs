@@ -4,8 +4,6 @@
 use std::{
     ops::Deref,
     sync::{atomic, Arc, Mutex},
-    thread,
-    time::Duration,
 };
 
 use batch_system::Router;
@@ -197,8 +195,6 @@ where
                 err.mut_region_not_found().set_region_id(region_id);
             }
         }
-
-        thread::sleep(Duration::from_millis(50));
 
         async move {
             if err.get_message().is_empty() {

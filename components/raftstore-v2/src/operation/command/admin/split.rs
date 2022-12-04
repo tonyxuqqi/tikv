@@ -522,8 +522,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         }
 
         // todo: hack split size
-        let max_size = 10000;
-        let split_size = 6000;
+        let max_size = 50000;
+        let split_size = 30000;
 
         let region_count = get_region_approximate_size(tablet, self.region(), split_size * 10)
             .map(|s| if s > max_size { s / split_size } else { 0 });

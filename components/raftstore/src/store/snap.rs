@@ -28,7 +28,7 @@ use keys::{enc_end_key, enc_start_key};
 use kvproto::{
     encryptionpb::EncryptionMethod,
     metapb::Region,
-    raft_serverpb::{RaftMessage, RaftSnapshotData, SnapshotCfFile, SnapshotChunk, SnapshotMeta},
+    raft_serverpb::{RaftSnapshotData, SnapshotCfFile, SnapshotMeta},
 };
 use openssl::symm::{Cipher, Crypter, Mode};
 use protobuf::Message;

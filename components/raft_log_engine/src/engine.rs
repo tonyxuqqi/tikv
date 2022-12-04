@@ -325,6 +325,11 @@ impl RaftLogEngine {
     pub fn last_index(&self, raft_id: u64) -> Option<u64> {
         self.0.last_index(raft_id)
     }
+
+    // for test only
+    pub fn inner(&self) -> &Arc<RawRaftEngine<ManagedFileSystem>> {
+        &self.0
+    }
 }
 
 impl PerfContextExt for RaftLogEngine {

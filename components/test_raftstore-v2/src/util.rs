@@ -10,10 +10,7 @@ use engine_rocks::RocksEngine;
 use engine_test::raft::RaftTestEngine;
 use engine_traits::{TabletFactory, CF_DEFAULT};
 use file_system::IoRateLimiter;
-use raftstore_v2::{
-    router::{RaftRouter, StoreRouterCompactedEventSender},
-    StoreRouter,
-};
+use raftstore_v2::{router::StoreRouterCompactedEventSender, StoreRouter};
 use rand::RngCore;
 use server::server_v2::ConfiguredRaftEngine;
 use tempfile::TempDir;

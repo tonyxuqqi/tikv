@@ -10,23 +10,27 @@ use std::{
 
 use collections::HashMap;
 use encryption_export::DataKeyManager;
-use engine_rocks::RocksEngine;
+use engine_rocks::{RocksDbVector, RocksEngine};
 use engine_test::raft::RaftTestEngine;
 use engine_traits::{
-    Iterable, MiscExt, OpenOptions, RaftEngine, RaftLogBatch, TabletFactory, CF_DEFAULT,
+    Iterable, MiscExt, OpenOptions, Peekable, RaftEngine, RaftEngineReadOnly, RaftLogBatch,
+    ReadOptions, TabletFactory, CF_DEFAULT,
 };
 use file_system::IoRateLimiter;
 use futures::executor::block_on;
-use keys::data_key;
+use keys::{data_key, REGION_STATE_SUFFIX};
 use kvproto::{
     errorpb::Error as PbError,
-    metapb::{self, PeerRole},
-    raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse, Request},
-    raft_serverpb::StoreIdent,
+    metapb::{self, PeerRole, RegionEpoch},
+    raft_cmdpb::{
+        AdminCmdType, CmdType, RaftCmdRequest, RaftCmdResponse, RegionDetailResponse, Request,
+        StatusCmdType,
+    },
+    raft_serverpb::{RaftApplyState, RegionLocalState, StoreIdent},
 };
 use pd_client::PdClient;
 use raftstore::{
-    store::{region_meta::RegionMeta, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER},
+    store::{initial_region, region_meta::RegionMeta, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER},
     Error, Result,
 };
 use raftstore_v2::{
@@ -38,11 +42,15 @@ use slog::o;
 use tempfile::TempDir;
 use test_pd_client::TestPdClient;
 use test_raftstore::{
-    is_error_response, new_get_cf_cmd, new_peer, new_put_cf_cmd, new_region_leader_cmd,
-    new_request, new_snap_cmd, new_status_request, new_store, sleep_ms, Config, TEST_CONFIG,
+    is_error_response, new_admin_request, new_delete_cmd, new_delete_range_cmd, new_get_cf_cmd,
+    new_peer, new_put_cf_cmd, new_region_detail_cmd, new_region_leader_cmd, new_request,
+    new_snap_cmd, new_status_request, new_store, new_transfer_leader_cmd, sleep_ms, Config,
+    FilterFactory, PartitionFilterFactory, RawEngine, TEST_CONFIG,
 };
 use tikv::{config::TikvConfig, server::Result as ServerResult};
-use tikv_util::{box_err, box_try, debug, error, time::Instant, warn};
+use tikv_util::{
+    box_err, box_try, debug, error, thread_group::GroupProperties, time::Instant, warn,
+};
 
 use crate::{node::NodeCluster, transport_simulate::RaftStoreRouter, util::create_test_engine};
 
@@ -68,6 +76,7 @@ pub struct Cluster {
     key_managers: Vec<Option<Arc<DataKeyManager>>>,
     pub io_rate_limiter: Option<Arc<IoRateLimiter>>,
     key_managers_map: HashMap<u64, Option<Arc<DataKeyManager>>>,
+    group_props: HashMap<u64, GroupProperties>,
 
     pub pd_client: Arc<TestPdClient>,
 
@@ -90,6 +99,7 @@ impl Cluster {
             count,
             tablet_factories: HashMap::default(),
             key_managers_map: HashMap::default(),
+            group_props: HashMap::default(),
             raft_engines: HashMap::default(),
             store_metas: HashMap::default(),
             leaders: HashMap::default(),
@@ -112,6 +122,15 @@ impl Cluster {
         self.create_engines();
         self.bootstrap_region().unwrap();
         self.start().unwrap();
+    }
+
+    // Bootstrap the store with fixed ID (like 1, 2, .. 5) and
+    // initialize first region in store 1, then start the cluster.
+    pub fn run_conf_change(&mut self) -> u64 {
+        self.create_engines();
+        let region_id = self.bootstrap_conf_change();
+        self.start().unwrap();
+        region_id
     }
 
     pub fn create_engines(&mut self) {
@@ -155,6 +174,9 @@ impl Cluster {
             let key_mgr = self.key_managers.last().unwrap().clone();
             let store_meta = Arc::new(Mutex::new(StoreMeta::<RocksEngine>::default()));
 
+            let props = GroupProperties::default();
+            tikv_util::thread_group::set_properties(Some(props.clone()));
+
             // todo: GroupProperties
             let node_id = self.node_cluster.run_node(
                 0,
@@ -165,6 +187,7 @@ impl Cluster {
                 raft_engine.clone(),
                 factory.clone(),
             )?;
+            self.group_props.insert(node_id, props);
             self.raft_engines.insert(node_id, raft_engine);
             self.tablet_factories.insert(node_id, factory);
             self.store_metas.insert(node_id, store_meta);
@@ -194,9 +217,9 @@ impl Cluster {
             MapEntry::Vacant(v) => v.insert(Arc::new(Mutex::new(StoreMeta::new()))).clone(),
         };
 
-        // let props = GroupProperties::default();
-        // self.group_props.insert(node_id, props.clone());
-        // tikv_util::thread_group::set_properties(Some(props));
+        let props = GroupProperties::default();
+        self.group_props.insert(node_id, props.clone());
+        tikv_util::thread_group::set_properties(Some(props));
 
         debug!("calling run node"; "node_id" => node_id);
         self.node_cluster.run_node(
@@ -212,6 +235,19 @@ impl Cluster {
         Ok(())
     }
 
+    pub fn stop_node(&mut self, node_id: u64) {
+        debug!("stopping node {}", node_id);
+        self.group_props[&node_id].mark_shutdown();
+
+        self.node_cluster.stop_node(node_id);
+        // match self.sim.write() {
+        //     Ok(mut sim) => sim.stop_node(node_id),
+        //     Err(_) => safe_panic!("failed to acquire write lock."),
+        // }
+        self.pd_client.shutdown_store(node_id);
+        debug!("node {} stopped", node_id);
+    }
+
     /// Multiple nodes with fixed node id, like node 1, 2, .. 5,
     /// First region 1 is in all stores with peer 1, 2, .. 5.
     /// Peer 1 is in node 1, store 1, etc.
@@ -223,6 +259,7 @@ impl Cluster {
             self.tablet_factories.insert(id, factory.clone());
             self.raft_engines.insert(id, raft_engine.clone());
             let store_meta = Arc::new(Mutex::new(StoreMeta::<RocksEngine>::default()));
+            self.store_metas.insert(id, store_meta);
             self.key_managers_map
                 .insert(id, self.key_managers[i].clone());
             // todo: sst workers
@@ -253,6 +290,38 @@ impl Cluster {
         Ok(())
     }
 
+    pub fn bootstrap_conf_change(&mut self) -> u64 {
+        for (i, (factory, raft_engine)) in self.dbs.iter().enumerate() {
+            let id = i as u64 + 1;
+            self.tablet_factories.insert(id, factory.clone());
+            self.raft_engines.insert(id, raft_engine.clone());
+            let store_meta = Arc::new(Mutex::new(StoreMeta::<RocksEngine>::default()));
+            self.store_metas.insert(id, store_meta);
+            self.key_managers_map
+                .insert(id, self.key_managers[i].clone());
+            // todo: sst workers
+        }
+
+        for (&id, raft_engine) in &self.raft_engines {
+            bootstrap_store(raft_engine, self.id(), id).unwrap();
+        }
+
+        let node_id = 1;
+        let region_id = 1;
+        let peer_id = 1;
+
+        let region = initial_region(node_id, region_id, peer_id);
+        let raft_engine = self.raft_engines[&node_id].clone();
+        let mut wb = raft_engine.log_batch(10);
+        wb.put_prepare_bootstrap_region(&region).unwrap();
+        write_initial_states(&mut wb, region.clone()).unwrap();
+        raft_engine.consume(&mut wb, true).unwrap();
+
+        self.bootstrap_cluster(region);
+
+        region_id
+    }
+
     // This is only for fixed id test
     fn bootstrap_cluster(&mut self, region: metapb::Region) {
         self.pd_client
@@ -265,26 +334,12 @@ impl Cluster {
         }
     }
 
-    pub fn get_engine_of_key(&self, node_id: u64, key: &[u8]) -> Option<RocksEngine> {
-        let region_id = self.get_region(key).get_id();
-        let timer = std::time::Instant::now();
-        let timeout = Duration::from_millis(500);
-        while timer.elapsed() < timeout {
-            if let Some(debug_info) = self.query_debug_info(node_id, region_id) {
-                if debug_info.region_state.tablet_index > 0 {
-                    if let Ok(tablet) = self.tablet_factories[&node_id].open_tablet(
-                        region_id,
-                        Some(debug_info.region_state.tablet_index),
-                        OpenOptions::default().set_cache_only(true),
-                    ) {
-                        return Some(tablet);
-                    }
-                    return None;
-                }
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        None
+    pub fn get_engine(&self, node_id: u64) -> WrapFactory {
+        WrapFactory::new(
+            self.pd_client.clone(),
+            self.raft_engines[&node_id].clone(),
+            self.tablet_factories[&node_id].clone(),
+        )
     }
 
     pub fn query_debug_info(&self, node_id: u64, region_id: u64) -> Option<RegionMeta> {
@@ -374,6 +429,24 @@ impl Cluster {
                 continue;
             }
             return Ok(resp);
+        }
+    }
+
+    pub fn call_command_on_node(
+        &self,
+        node_id: u64,
+        request: RaftCmdRequest,
+        timeout: Duration,
+    ) -> Result<RaftCmdResponse> {
+        match self
+            .node_cluster
+            .call_command_on_node(node_id, request.clone(), timeout)
+        {
+            Err(e) => {
+                warn!("failed to call command {:?}: {:?}", request, e);
+                Err(e)
+            }
+            a => a,
         }
     }
 
@@ -595,8 +668,34 @@ impl Cluster {
         self.get_region_with(key, |_| true)
     }
 
+    pub fn get_region_epoch(&self, region_id: u64) -> RegionEpoch {
+        block_on(self.pd_client.get_region_by_id(region_id))
+            .unwrap()
+            .unwrap()
+            .take_region_epoch()
+    }
+
+    pub fn region_detail(&mut self, region_id: u64, store_id: u64) -> RegionDetailResponse {
+        let status_cmd = new_region_detail_cmd();
+        let peer = new_peer(store_id, 0);
+        let req = new_status_request(region_id, peer, status_cmd);
+        let resp = self.call_command(req, Duration::from_secs(5));
+        assert!(resp.is_ok(), "{:?}", resp);
+
+        let mut resp = resp.unwrap();
+        assert!(resp.has_status_response());
+        let mut status_resp = resp.take_status_response();
+        assert_eq!(status_resp.get_cmd_type(), StatusCmdType::RegionDetail);
+        assert!(status_resp.has_region_detail());
+        status_resp.take_region_detail()
+    }
+
     pub fn get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         self.get_impl(CF_DEFAULT, key, false)
+    }
+
+    pub fn get_cf(&mut self, cf: &str, key: &[u8]) -> Option<Vec<u8>> {
+        self.get_impl(cf, key, false)
     }
 
     fn get_impl(&mut self, cf: &str, key: &[u8], read_quorum: bool) -> Option<Vec<u8>> {
@@ -665,12 +764,111 @@ impl Cluster {
         }
     }
 
+    pub fn must_delete(&mut self, key: &[u8]) {
+        self.must_delete_cf(CF_DEFAULT, key)
+    }
+
+    pub fn must_delete_cf(&mut self, cf: &str, key: &[u8]) {
+        let resp = self.request(
+            key,
+            vec![new_delete_cmd(cf, key)],
+            false,
+            Duration::from_secs(5),
+        );
+        if resp.get_header().has_error() {
+            panic!("response {:?} has error", resp);
+        }
+    }
+
+    pub fn must_delete_range_cf(&mut self, cf: &str, start: &[u8], end: &[u8]) {
+        let resp = self.request(
+            start,
+            vec![new_delete_range_cmd(cf, start, end)],
+            false,
+            Duration::from_secs(5),
+        );
+        if resp.get_header().has_error() {
+            panic!("response {:?} has error", resp);
+        }
+    }
+
+    pub fn must_notify_delete_range_cf(&mut self, cf: &str, start: &[u8], end: &[u8]) {
+        let mut req = new_delete_range_cmd(cf, start, end);
+        req.mut_delete_range().set_notify_only(true);
+        let resp = self.request(start, vec![req], false, Duration::from_secs(5));
+        if resp.get_header().has_error() {
+            panic!("response {:?} has error", resp);
+        }
+    }
+
     // Flush the cf of all opened tablets
     pub fn must_flush_cf(&mut self, cf: &str, sync: bool) {
         for factory in self.tablet_factories.values() {
             factory.for_each_opened_tablet(&mut |_id, _suffix, db| {
                 db.flush_cf(cf, true).unwrap();
             });
+        }
+    }
+
+    pub fn apply_state(&self, region_id: u64, store_id: u64) -> RaftApplyState {
+        self.get_raft_engine(store_id)
+            .get_apply_state(region_id)
+            .unwrap()
+            .unwrap()
+    }
+
+    pub fn add_send_filter<F: FilterFactory>(&mut self, factory: F) {
+        for node_id in self.node_cluster.get_node_ids() {
+            for filter in factory.generate(node_id) {
+                self.node_cluster.add_send_filter(node_id, filter);
+            }
+        }
+    }
+
+    pub fn clear_send_filters(&mut self) {
+        for node_id in self.node_cluster.get_node_ids() {
+            self.node_cluster.clear_send_filters(node_id);
+        }
+    }
+
+    pub fn transfer_leader(&mut self, region_id: u64, leader: metapb::Peer) {
+        let epoch = self.get_region_epoch(region_id);
+        let transfer_leader = new_admin_request(region_id, &epoch, new_transfer_leader_cmd(leader));
+        let resp = self
+            .call_command_on_leader(transfer_leader, Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            resp.get_admin_response().get_cmd_type(),
+            AdminCmdType::TransferLeader,
+            "{:?}",
+            resp
+        );
+    }
+
+    // it's so common that we provide an API for it
+    pub fn partition(&mut self, s1: Vec<u64>, s2: Vec<u64>) {
+        self.add_send_filter(PartitionFilterFactory::new(s1, s2));
+    }
+
+    pub fn must_transfer_leader(&mut self, region_id: u64, leader: metapb::Peer) {
+        let timer = Instant::now();
+        loop {
+            self.reset_leader_of_region(region_id);
+            let cur_leader = self.leader_of_region(region_id);
+            if let Some(ref cur_leader) = cur_leader {
+                if cur_leader.get_id() == leader.get_id()
+                    && cur_leader.get_store_id() == leader.get_store_id()
+                {
+                    return;
+                }
+            }
+            if timer.saturating_elapsed() > Duration::from_secs(5) {
+                panic!(
+                    "failed to transfer leader to [{}] {:?}, current leader: {:?}",
+                    region_id, leader, cur_leader
+                );
+            }
+            self.transfer_leader(region_id, leader.clone());
         }
     }
 
@@ -682,6 +880,10 @@ impl Cluster {
             ids.push(id);
         });
         ids
+    }
+
+    pub fn get_raft_engine(&self, node_id: u64) -> RaftTestEngine {
+        self.raft_engines[&node_id].clone()
     }
 
     pub fn scan<F>(
@@ -789,3 +991,75 @@ pub fn bootstrap_store<ER: RaftEngine>(
 
     Ok(())
 }
+
+pub struct WrapFactory {
+    pd_client: Arc<TestPdClient>,
+    raft_engine: RaftTestEngine,
+    factory: Arc<dyn TabletFactory<RocksEngine> + Send + Sync>,
+}
+
+impl WrapFactory {
+    pub fn new(
+        pd_client: Arc<TestPdClient>,
+        raft_engine: RaftTestEngine,
+        factory: Arc<dyn TabletFactory<RocksEngine> + Send + Sync>,
+    ) -> Self {
+        Self {
+            raft_engine,
+            factory,
+            pd_client,
+        }
+    }
+
+    fn get_tablet(&self, key: &[u8]) -> Option<RocksEngine> {
+        // todo: unwrap
+        let region_id = self.pd_client.get_region(key).unwrap().get_id();
+        self.factory
+            .open_tablet(region_id, None, OpenOptions::default().set_cache_only(true))
+            .ok()
+    }
+
+    pub fn get_region_state(
+        &self,
+        region_id: u64,
+    ) -> engine_traits::Result<Option<RegionLocalState>> {
+        self.raft_engine.get_region_state(region_id)
+    }
+}
+
+impl Peekable for WrapFactory {
+    type DbVector = RocksDbVector;
+
+    fn get_value_opt(
+        &self,
+        opts: &ReadOptions,
+        key: &[u8],
+    ) -> engine_traits::Result<Option<Self::DbVector>> {
+        match self.get_tablet(key) {
+            Some(tablet) => tablet.get_value_opt(opts, key),
+            _ => Ok(None),
+        }
+    }
+
+    fn get_value_cf_opt(
+        &self,
+        opts: &ReadOptions,
+        cf: &str,
+        key: &[u8],
+    ) -> engine_traits::Result<Option<Self::DbVector>> {
+        match self.get_tablet(key) {
+            Some(tablet) => tablet.get_value_cf_opt(opts, cf, key),
+            _ => Ok(None),
+        }
+    }
+
+    fn get_msg_cf<M: protobuf::Message + Default>(
+        &self,
+        cf: &str,
+        key: &[u8],
+    ) -> engine_traits::Result<Option<M>> {
+        unimplemented!()
+    }
+}
+
+impl RawEngine for WrapFactory {}

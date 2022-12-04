@@ -14,8 +14,8 @@ use engine_test::raft::RaftTestEngine;
 use engine_traits::{
     util::check_key_in_range, Peekable, RaftEngineReadOnly, TabletFactory, CF_DEFAULT, CF_WRITE,
 };
-use futures::{executor::block_on, Future};
-use keys::{data_key, Prefix};
+use futures::executor::block_on;
+use keys::Prefix;
 use kvproto::{
     metapb,
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse, Response},
@@ -34,20 +34,18 @@ use raftstore::{
     Result,
 };
 use raftstore_v2::{
-    router::{PeerMsg, QueryResult, RaftRouter},
+    router::{QueryResult, RaftRouter},
     StoreMeta, StoreRouter, StoreSystem,
 };
 use test_pd_client::TestPdClient;
-use test_raftstore::{
-    must_get_equal, must_get_none, new_get_cmd, new_peer, new_request, new_snap_cmd, Config,
-};
+use test_raftstore::{new_snap_cmd, Config, Filter};
 use tikv::{
     config::ConfigController,
     server::{tablet_snap::copy_tablet_snapshot, NodeV2, Result as ServerResult},
 };
 use tikv_util::{
     box_err,
-    config::{ReadableDuration, ReadableSize, VersionTrack},
+    config::{ReadableSize, VersionTrack},
     time::ThreadReadId,
     worker::Builder as WorkerBuilder,
 };
@@ -55,7 +53,6 @@ use tikv_util::{
 use crate::{
     cluster::Cluster,
     transport_simulate::{RaftStoreRouter, SimulateTransport, SnapshotRouter},
-    util::{self, put_cf_till_size, put_till_size},
 };
 
 #[derive(Clone)]
@@ -82,8 +79,6 @@ impl Transport for ChannelTransport {
     fn send(&mut self, msg: RaftMessage) -> raftstore::Result<()> {
         let from_store = msg.get_from_peer().get_store_id();
         let to_store = msg.get_to_peer().get_store_id();
-        let to_peer_id = msg.get_to_peer().get_id();
-        let region_id = msg.get_region_id();
         let is_snapshot = msg.get_message().get_msg_type() == MessageType::MsgSnapshot;
 
         if is_snapshot {
@@ -217,7 +212,7 @@ impl NodeCluster {
             // todo
             let snap_path = test_util::temp_dir("test_cluster", cfg.prefer_mem)
                 .path()
-                .join(Path::new("snap"))
+                .join(Path::new(format!("snap_{}", node_id).as_str()))
                 .to_str()
                 .unwrap()
                 .to_owned();
@@ -284,6 +279,19 @@ impl NodeCluster {
         self.nodes.insert(node_id, node);
         self.simulate_trans.insert(node_id, simulate_trans);
         Ok(node_id)
+    }
+
+    pub fn stop_node(&mut self, node_id: u64) {
+        if let Some(mut node) = self.nodes.remove(&node_id) {
+            node.stop();
+        }
+        self.trans
+            .core
+            .lock()
+            .unwrap()
+            .routers
+            .remove(&node_id)
+            .unwrap();
     }
 
     pub fn get_node_ids(&self) -> HashSet<u64> {
@@ -368,7 +376,15 @@ impl NodeCluster {
 
     pub fn call_command(&self, req: RaftCmdRequest, timeout: Duration) -> Result<RaftCmdResponse> {
         let node_id = req.get_header().get_peer().get_store_id();
+        self.call_command_on_node(node_id, req, timeout)
+    }
 
+    pub fn call_command_on_node(
+        &self,
+        node_id: u64,
+        req: RaftCmdRequest,
+        timeout: Duration,
+    ) -> Result<RaftCmdResponse> {
         if !self
             .trans
             .core
@@ -446,6 +462,20 @@ impl NodeCluster {
             }
         }
     }
+
+    pub fn add_send_filter(&mut self, node_id: u64, filter: Box<dyn Filter>) {
+        self.simulate_trans
+            .get_mut(&node_id)
+            .unwrap()
+            .add_filter(filter);
+    }
+
+    pub fn clear_send_filters(&mut self, node_id: u64) {
+        self.simulate_trans
+            .get_mut(&node_id)
+            .unwrap()
+            .clear_filters();
+    }
 }
 
 pub fn new_node_cluster(id: u64, count: usize) -> Cluster {
@@ -460,199 +490,4 @@ impl LockManagerNotifier for DummyLockManagerObserver {
     fn on_region_changed(&self, _: &metapb::Region, _: RegionChangeEvent, _: StateRole) {}
 
     fn on_role_change(&self, _: &metapb::Region, _: RoleChange) {}
-}
-
-fn new_conf_change_peer(store: &metapb::Store, pd_client: &Arc<TestPdClient>) -> metapb::Peer {
-    let peer_id = pd_client.alloc_id().unwrap();
-    new_peer(store.get_id(), peer_id)
-}
-
-#[test]
-fn test_node_pd_conf_change() {
-    let count = 5;
-    let mut cluster = new_node_cluster(0, count);
-    test_pd_conf_change(&mut cluster);
-}
-
-fn test_pd_conf_change(cluster: &mut Cluster) {
-    let pd_client = Arc::clone(&cluster.pd_client);
-    // Disable default max peer count check.
-    pd_client.disable_default_operator();
-
-    cluster.start().unwrap();
-
-    let region = &pd_client.get_region(b"").unwrap();
-    let region_id = region.get_id();
-
-    let mut stores = pd_client.get_stores().unwrap();
-
-    // Must have only one peer
-    assert_eq!(region.get_peers().len(), 1);
-
-    let peer = &region.get_peers()[0];
-
-    let i = stores
-        .iter()
-        .position(|store| store.get_id() == peer.get_store_id())
-        .unwrap();
-    stores.swap(0, i);
-
-    // Now the first store has first region. others have none.
-
-    let (key, value) = (b"k1", b"v1");
-    cluster.must_put(key, value);
-    assert_eq!(cluster.get(key), Some(value.to_vec()));
-
-    let peer2 = new_conf_change_peer(&stores[1], &pd_client);
-    let engine_2 = cluster.get_engine_of_key(peer2.get_store_id(), b"k1");
-    // Does not exist
-    assert!(engine_2.is_none());
-    // add new peer to first region.
-    pd_client.must_add_peer(region_id, peer2.clone());
-
-    let (key, value) = (b"k2", b"v2");
-    cluster.must_put(key, value);
-    assert_eq!(cluster.get(key), Some(value.to_vec()));
-
-    let engine_2 = cluster
-        .get_engine_of_key(peer2.get_store_id(), b"k1")
-        .unwrap();
-    // now peer 2 must have v1 and v2;
-    must_get_equal(&engine_2, b"k1", b"v1");
-    must_get_equal(&engine_2, b"k2", b"v2");
-
-    // add new peer to first region.
-    let peer3 = new_conf_change_peer(&stores[2], &pd_client);
-    pd_client.must_add_peer(region_id, peer3.clone());
-    println!("add peer 3");
-    let engine_3 = cluster
-        .get_engine_of_key(peer3.get_store_id(), b"k1")
-        .unwrap();
-    must_get_equal(&engine_3, b"k1", b"v1");
-
-    // Remove peer2 from first region.
-    pd_client.must_remove_peer(region_id, peer2);
-
-    let (key, value) = (b"k3", b"v3");
-    cluster.must_put(key, value);
-    assert_eq!(cluster.get(key), Some(value.to_vec()));
-    // now peer 3 must have v1, v2 and v3
-    must_get_equal(&engine_3, b"k1", b"v1");
-    must_get_equal(&engine_3, b"k2", b"v2");
-    must_get_equal(&engine_3, b"k3", b"v3");
-
-    // peer 2 has nothing
-    must_get_none(&engine_2, b"k1");
-    must_get_none(&engine_2, b"k2");
-    // add peer4 to first region 1.
-    let peer4 = new_conf_change_peer(&stores[1], &pd_client);
-    pd_client.must_add_peer(region_id, peer4.clone());
-    // Remove peer3 from first region.
-    pd_client.must_remove_peer(region_id, peer3);
-
-    let (key, value) = (b"k4", b"v4");
-    cluster.must_put(key, value);
-    assert_eq!(cluster.get(key), Some(value.to_vec()));
-    // now peer4 must have v1, v2, v3, v4, we check v1 and v4 here.
-    let engine_2 = cluster
-        .get_engine_of_key(peer4.get_store_id(), b"k4")
-        .unwrap();
-
-    must_get_equal(&engine_2, b"k1", b"v1");
-    must_get_equal(&engine_2, b"k4", b"v4");
-
-    // peer 3 has nothing, we check v1 and v4 here.
-    must_get_none(&engine_3, b"k1");
-    must_get_none(&engine_3, b"k4");
-
-    // TODO: add more tests.
-}
-
-pub const REGION_MAX_SIZE: u64 = 10000;
-pub const REGION_SPLIT_SIZE: u64 = 6000;
-
-#[test]
-fn test_node_auto_split_region() {
-    let count = 5;
-    let mut cluster = new_node_cluster(0, count);
-    test_auto_split_region(&mut cluster);
-}
-
-fn test_auto_split_region(cluster: &mut Cluster) {
-    cluster.cfg.raft_store.split_region_check_tick_interval = ReadableDuration::millis(100);
-    cluster.cfg.coprocessor.region_max_size = Some(ReadableSize(REGION_MAX_SIZE));
-    cluster.cfg.coprocessor.region_split_size = ReadableSize(REGION_SPLIT_SIZE);
-
-    // tood: remove / 5
-    let check_size_diff = cluster.cfg.raft_store.region_split_check_diff().0 / 5;
-    let mut range = 1..;
-
-    cluster.run();
-
-    let pd_client = Arc::clone(&cluster.pd_client);
-
-    let region = pd_client.get_region(b"").unwrap();
-
-    let last_key = put_till_size(cluster, REGION_SPLIT_SIZE, &mut range);
-
-    // it should be finished in millis if split.
-    thread::sleep(Duration::from_millis(300));
-
-    let target = pd_client.get_region(&last_key).unwrap();
-
-    assert_eq!(region, target);
-
-    let max_key = put_cf_till_size(
-        cluster,
-        CF_WRITE,
-        REGION_MAX_SIZE - REGION_SPLIT_SIZE + check_size_diff,
-        &mut range,
-    );
-
-    let left = pd_client.get_region(b"").unwrap();
-    let right = pd_client.get_region(&max_key).unwrap();
-    if left == right {
-        cluster.wait_region_split(&region);
-    }
-
-    let left = pd_client.get_region(b"").unwrap();
-    let right = pd_client.get_region(&max_key).unwrap();
-
-    assert_ne!(left, right);
-    // assert_eq!(region.get_start_key(), left.get_start_key());
-    // assert_eq!(right.get_start_key(), left.get_end_key());
-    // assert_eq!(region.get_end_key(), right.get_end_key());
-    // assert_eq!(pd_client.get_region(&max_key).unwrap(), right);
-    // assert_eq!(pd_client.get_region(left.get_end_key()).unwrap(), right);
-
-    let middle_key = left.get_end_key();
-    let leader = cluster.leader_of_region(left.get_id()).unwrap();
-    let store_id = leader.get_store_id();
-    let mut size = 0;
-
-    let region_ids = cluster.region_ids(store_id);
-    for id in region_ids {
-        cluster
-            .scan(store_id, id, CF_DEFAULT, b"", middle_key, false, |k, v| {
-                size += k.len() as u64;
-                size += v.len() as u64;
-                Ok(true)
-            })
-            .expect("");
-    }
-
-    assert!(size <= REGION_SPLIT_SIZE);
-    // although size may be smaller than REGION_SPLIT_SIZE, but the diff should
-    // be small.
-
-    // todo: now, split only uses approxiamte split keys
-    // assert!(size > REGION_SPLIT_SIZE - 1000);
-
-    let epoch = left.get_region_epoch().clone();
-    let get = new_request(left.get_id(), epoch, vec![new_get_cmd(&max_key)], false);
-    let resp = cluster
-        .call_command_on_leader(get, Duration::from_secs(5))
-        .unwrap();
-    assert!(resp.get_header().has_error());
-    assert!(resp.get_header().get_error().has_key_not_in_region());
 }

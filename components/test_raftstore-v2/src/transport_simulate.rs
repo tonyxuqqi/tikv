@@ -2,12 +2,11 @@
 
 use std::{
     sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use crossbeam::channel::TrySendError;
 use engine_traits::{KvEngine, RaftEngine};
-use futures::{compat::Future01CompatExt, executor::block_on, prelude::*};
+use futures::{executor::block_on, prelude::*};
 use keys::Prefix;
 use kvproto::{
     raft_cmdpb::{RaftCmdRequest, RaftCmdResponse},
@@ -15,12 +14,12 @@ use kvproto::{
 };
 use raftstore::{
     router::handle_send_error,
-    store::{cmd_resp, RegionSnapshot, Transport},
-    Error, Result, Result as RaftStoreResult,
+    store::{RegionSnapshot, Transport},
+    Result, Result as RaftStoreResult,
 };
 use raftstore_v2::router::{CmdResSubscriber, PeerMsg, QueryResSubscriber, RaftRouter};
 use test_raftstore::{filter_send, Filter};
-use tikv_util::{timer::GLOBAL_TIMER_HANDLE, HandyRwLock};
+use tikv_util::HandyRwLock;
 
 #[derive(Clone)]
 pub struct SimulateTransport<C> {
