@@ -123,7 +123,7 @@ impl StoreAddrResolver for AddressMap {
     }
 }
 
-struct ServerMeta {
+pub struct ServerMeta {
     node: Node<TestPdClient, RocksEngine, RaftTestEngine>,
     server: Server<SimulateRaftExtension, PdStoreAddrResolver>,
     sim_router: SimulateStoreTransport,

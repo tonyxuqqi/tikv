@@ -17,7 +17,7 @@ use test_raftstore::{
     new_peer, new_put_cmd, new_region_leader_cmd, new_request, new_status_request, sleep_ms,
     IsolationFilterFactory,
 };
-use test_raftstore_v2::{new_node_cluster, Cluster};
+use test_raftstore_v2::{new_node_cluster, ClusterV2, SimulatorV2};
 use tikv_util::{config::ReadableDuration, store::is_learner};
 
 fn new_conf_change_peer(store: &metapb::Store, pd_client: &Arc<TestPdClient>) -> metapb::Peer {
@@ -32,7 +32,7 @@ fn test_node_pd_conf_change() {
     test_pd_conf_change(&mut cluster);
 }
 
-fn test_pd_conf_change(cluster: &mut Cluster) {
+fn test_pd_conf_change<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
     let pd_client = Arc::clone(&cluster.pd_client);
     // Disable default max peer count check.
     pd_client.disable_default_operator();
@@ -132,7 +132,7 @@ fn test_node_auto_adjust_replica() {
     test_auto_adjust_replica(&mut cluster);
 }
 
-fn test_auto_adjust_replica(cluster: &mut Cluster) {
+fn test_auto_adjust_replica<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
     cluster.start().unwrap();
 
     let pd_client = Arc::clone(&cluster.pd_client);
@@ -219,7 +219,7 @@ fn test_node_after_remove_itself() {
     test_after_remove_itself(&mut cluster);
 }
 
-fn test_after_remove_itself(cluster: &mut Cluster) {
+fn test_after_remove_itself<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
     let pd_client = Arc::clone(&cluster.pd_client);
     // Disable default max peer count check.
     pd_client.disable_default_operator();
@@ -291,7 +291,7 @@ fn test_node_split_brain() {
     test_split_brain(&mut cluster);
 }
 
-fn test_split_brain(cluster: &mut Cluster) {
+fn test_split_brain<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
     let pd_client = Arc::clone(&cluster.pd_client);
     // Disable default max peer number check.
     pd_client.disable_default_operator();
@@ -359,8 +359,8 @@ fn test_split_brain(cluster: &mut Cluster) {
     assert!(header1.get_error().has_region_not_found());
 }
 
-fn find_leader_response_header(
-    cluster: &mut Cluster,
+fn find_leader_response_header<T: SimulatorV2>(
+    cluster: &mut ClusterV2<T>,
     region_id: u64,
     peer: metapb::Peer,
 ) -> RaftResponseHeader {
@@ -378,7 +378,7 @@ fn test_node_conf_change_safe() {
 }
 
 /// A helper function for testing the conf change is safe.
-fn test_conf_change_safe(cluster: &mut Cluster) {
+fn test_conf_change_safe<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
     let pd_client = Arc::clone(&cluster.pd_client);
     // Disable default max peer count check.
     pd_client.disable_default_operator();
@@ -471,8 +471,8 @@ fn test_conf_change_remove_leader() {
     );
 }
 
-fn call_conf_change(
-    cluster: &mut Cluster,
+fn call_conf_change<T: SimulatorV2>(
+    cluster: &mut ClusterV2<T>,
     region_id: u64,
     conf_change_type: ConfChangeType,
     peer: metapb::Peer,
@@ -490,7 +490,7 @@ fn test_node_learner_conf_change() {
     test_learner_conf_change(&mut cluster);
 }
 
-fn test_learner_conf_change(cluster: &mut Cluster) {
+fn test_learner_conf_change<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
     let r1 = cluster.run_conf_change();
@@ -588,7 +588,7 @@ fn test_node_stale_peer() {
     test_stale_peer(&mut cluster);
 }
 
-fn test_stale_peer(cluster: &mut Cluster) {
+fn test_stale_peer<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
     let pd_client = Arc::clone(&cluster.pd_client);
     pd_client.disable_default_operator();
 

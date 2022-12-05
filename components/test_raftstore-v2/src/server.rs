@@ -1,0 +1,534 @@
+// Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
+
+use std::{
+    fmt::format,
+    path::Path,
+    sync::{Arc, Mutex, RwLock},
+    thread,
+    time::Duration,
+};
+
+use api_version::{dispatch_api_version, KvFormat};
+use causal_ts::CausalTsProviderImpl;
+use collections::{HashMap, HashSet};
+use concurrency_manager::ConcurrencyManager;
+use engine_rocks::{RocksEngine, RocksSnapshot};
+use engine_test::raft::RaftTestEngine;
+use engine_traits::{KvEngine, TabletFactory};
+use futures::executor::block_on;
+use grpcio::{ChannelBuilder, EnvBuilder, Environment, Error as GrpcError, Service};
+use grpcio_health::HealthService;
+use keys::Prefix;
+use kvproto::{
+    deadlock_grpc::create_deadlock, diagnosticspb_grpc::create_diagnostics, kvrpcpb::ApiVersion,
+    raft_cmdpb::RaftCmdResponse,
+};
+use pd_client::PdClient;
+use raftstore::{
+    errors::Error as RaftError,
+    store::{FlowStatsReporter, ReadStats, RegionSnapshot, TabletSnapManager, WriteStats},
+};
+use raftstore_v2::{router::RaftRouter, StoreMeta, StoreRouter, StoreSystem};
+use resource_metering::{CollectorRegHandle, ResourceTagFactory};
+use security::SecurityManager;
+use slog_global::debug;
+use test_pd_client::TestPdClient;
+use test_raftstore::{AddressMap, Config};
+use tikv::{
+    coprocessor, coprocessor_v2,
+    read_pool::ReadPool,
+    server::{
+        load_statistics::ThreadLoadPool, lock_manager::LockManager, resolve,
+        service::DiagnosticsService, ConnectionBuilder, Error, NodeV2, PdStoreAddrResolver,
+        RaftClient, RaftKvV2, Result as ServerResult, Server, ServerTransport,
+    },
+    storage::{
+        self,
+        kv::raft_extension,
+        txn::flow_controller::{EngineFlowController, FlowController},
+        Engine, Storage,
+    },
+};
+use tikv_util::{
+    box_err,
+    config::VersionTrack,
+    quota_limiter::QuotaLimiter,
+    sys::thread::ThreadBuildWrapper,
+    thd_name,
+    worker::{Builder as WorkerBuilder, LazyWorker},
+};
+use tokio::runtime::Builder as TokioBuilder;
+use txn_types::TxnExtraScheduler;
+
+use crate::{ClusterV2, RaftStoreRouter, SimulateTransport, SimulatorV2, SnapshotRouter};
+
+#[derive(Clone)]
+struct DummyReporter;
+
+impl FlowStatsReporter for DummyReporter {
+    fn report_read_stats(&self, _read_stats: ReadStats) {}
+    fn report_write_stats(&self, _write_stats: WriteStats) {}
+}
+
+type SimulateRaftExtension = <SimulateEngine as Engine>::RaftExtension;
+type SimulateStoreTransport = SimulateTransport<RaftRouter<RocksEngine, RaftTestEngine>>;
+type SimulateServerTransport =
+    SimulateTransport<ServerTransport<SimulateRaftExtension, PdStoreAddrResolver>>;
+
+pub type SimulateEngine = RaftKvV2<RocksEngine, RaftTestEngine>;
+
+pub struct ServerMeta {
+    node: NodeV2<TestPdClient, RocksEngine, RaftTestEngine>,
+    server: Server<SimulateRaftExtension, PdStoreAddrResolver>,
+    sim_router: SimulateStoreTransport,
+    sim_trans: SimulateServerTransport,
+    raw_router: RaftRouter<RocksEngine, RaftTestEngine>,
+    rsmeter_cleanup: Box<dyn FnOnce()>,
+}
+
+type PendingServices = Vec<Box<dyn Fn() -> Service>>;
+
+pub struct ServerCluster {
+    metas: HashMap<u64, ServerMeta>,
+    addrs: AddressMap,
+    pub storages: HashMap<u64, SimulateEngine>,
+    snap_mgrs: HashMap<u64, TabletSnapManager>,
+    pd_client: Arc<TestPdClient>,
+    raft_client: RaftClient<AddressMap, raft_extension::NotSupported>,
+    concurrency_managers: HashMap<u64, ConcurrencyManager>,
+    env: Arc<Environment>,
+    pub pending_services: HashMap<u64, PendingServices>,
+    pub health_services: HashMap<u64, HealthService>,
+    pub security_mgr: Arc<SecurityManager>,
+    pub txn_extra_schedulers: HashMap<u64, Arc<dyn TxnExtraScheduler>>,
+    pub causal_ts_providers: HashMap<u64, Arc<CausalTsProviderImpl>>,
+}
+
+impl ServerCluster {
+    pub fn new(pd_client: Arc<TestPdClient>) -> ServerCluster {
+        let env = Arc::new(
+            EnvBuilder::new()
+                .cq_count(2)
+                .name_prefix(thd_name!("server-cluster"))
+                .build(),
+        );
+        let security_mgr = Arc::new(SecurityManager::new(&Default::default()).unwrap());
+        let map = AddressMap::default();
+        // We don't actually need to handle snapshot message, just create a dead worker
+        // to make it compile.
+        let worker = LazyWorker::new("snap-worker");
+        let conn_builder = ConnectionBuilder::new(
+            env.clone(),
+            Arc::default(),
+            security_mgr.clone(),
+            map.clone(),
+            raft_extension::NotSupported,
+            worker.scheduler(),
+            Arc::new(ThreadLoadPool::with_threshold(usize::MAX)),
+        );
+        let raft_client = RaftClient::new(conn_builder);
+        ServerCluster {
+            metas: HashMap::default(),
+            addrs: map,
+            pd_client,
+            security_mgr,
+            storages: HashMap::default(),
+            snap_mgrs: HashMap::default(),
+            pending_services: HashMap::default(),
+            health_services: HashMap::default(),
+            raft_client,
+            concurrency_managers: HashMap::default(),
+            env,
+            txn_extra_schedulers: HashMap::default(),
+            causal_ts_providers: HashMap::default(),
+        }
+    }
+
+    pub fn run_node_impl<F: KvFormat>(
+        &mut self,
+        node_id: u64,
+        mut cfg: Config,
+        store_meta: Arc<Mutex<StoreMeta<RocksEngine>>>,
+        router: StoreRouter<RocksEngine, RaftTestEngine>,
+        system: StoreSystem<RocksEngine, RaftTestEngine>,
+        raft_engine: RaftTestEngine,
+        factory: Arc<dyn TabletFactory<RocksEngine>>,
+    ) -> ServerResult<u64> {
+        let snap_mgr = if node_id == 0 || !self.snap_mgrs.contains_key(&node_id) {
+            let snap_path = test_util::temp_dir("test_cluster", cfg.prefer_mem)
+                .path()
+                .join(Path::new(format!("snap_{}", node_id).as_str()))
+                .to_str()
+                .unwrap()
+                .to_owned();
+            TabletSnapManager::new(snap_path)
+        } else {
+            self.snap_mgrs[&node_id].clone()
+        };
+
+        let bg_worker = WorkerBuilder::new("background").thread_count(2).create();
+
+        if cfg.server.addr == "127.0.0.1:0" {
+            // Now we cache the store address, so here we should re-use last
+            // listening address for the same store.
+            if let Some(addr) = self.addrs.get(node_id) {
+                cfg.server.addr = addr;
+            } else {
+                cfg.server.addr = format!("127.0.0.1:{}", test_util::alloc_port());
+            }
+        }
+
+        // todo: coprocessor host
+        // todo: region info accessor
+
+        let raft_router = RaftRouter::new_with_store_meta(node_id, router, store_meta);
+        // todo: simulate transport
+        let sim_router = SimulateTransport::new(raft_router.clone());
+        let mut raft_kv_v2 = RaftKvV2::new(raft_router.clone());
+
+        let storage_read_pool = ReadPool::from(storage::build_read_pool(
+            &tikv::config::StorageReadPoolConfig::default_for_test(),
+            DummyReporter,
+            raft_kv_v2.clone(),
+        ));
+
+        if let Some(scheduler) = self.txn_extra_schedulers.remove(&node_id) {
+            raft_kv_v2.set_txn_extra_scheduler(scheduler);
+        }
+
+        let latest_ts =
+            block_on(self.pd_client.get_tso()).expect("failed to get timestamp from PD");
+        let concurrency_manager = ConcurrencyManager::new(latest_ts);
+
+        // todo: GcWorker
+
+        // todo: resolved ts
+
+        if ApiVersion::V2 == F::TAG {
+            let casual_ts_provider: Arc<CausalTsProviderImpl> = Arc::new(
+                block_on(causal_ts::BatchTsoProvider::new_opt(
+                    self.pd_client.clone(),
+                    cfg.causal_ts.renew_interval.0,
+                    cfg.causal_ts.alloc_ahead_buffer.0,
+                    cfg.causal_ts.renew_batch_min_size,
+                    cfg.causal_ts.renew_batch_max_size,
+                ))
+                .unwrap()
+                .into(),
+            );
+            self.causal_ts_providers.insert(node_id, casual_ts_provider);
+        }
+
+        // Start resource metering.
+        let (res_tag_factory, collector_reg_handle, rsmeter_cleanup) =
+            self.init_resource_metering(&cfg.resource_metering);
+
+        // todo: check leader runner
+        let (check_leader_scheduler, _) = tikv_util::worker::dummy_scheduler();
+
+        let mut lock_mgr = LockManager::new(&cfg.pessimistic_txn);
+        let role_change_notifier = lock_mgr.generate_notifier();
+        let quota_limiter = Arc::new(QuotaLimiter::new(
+            cfg.quota.foreground_cpu_time,
+            cfg.quota.foreground_write_bandwidth,
+            cfg.quota.foreground_read_bandwidth,
+            cfg.quota.background_cpu_time,
+            cfg.quota.background_write_bandwidth,
+            cfg.quota.background_read_bandwidth,
+            cfg.quota.max_delay_duration,
+            cfg.quota.enable_auto_tune,
+        ));
+        let store = Storage::<_, _, F>::from_engine(
+            raft_kv_v2.clone(),
+            &cfg.storage,
+            storage_read_pool.handle(),
+            lock_mgr.clone(),
+            concurrency_manager.clone(),
+            lock_mgr.get_storage_dynamic_configs(),
+            Arc::new(FlowController::Singleton(EngineFlowController::empty())),
+            DummyReporter,
+            res_tag_factory.clone(),
+            quota_limiter.clone(),
+            self.pd_client.feature_gate().clone(),
+            self.get_causal_ts_provider(node_id),
+        )?;
+        self.storages.insert(node_id, raft_kv_v2);
+
+        // todo: ReplicaReadLockChecker
+
+        // todo: Import Sst Service
+
+        // Create deadlock service.
+        let deadlock_service = lock_mgr.deadlock_service();
+
+        // Create pd client, snapshot manager, server.
+        let (resolver, state) = resolve::new_resolver(
+            Arc::clone(&self.pd_client),
+            &bg_worker,
+            store.get_engine().raft_extension().clone(),
+        );
+        let server_cfg = Arc::new(VersionTrack::new(cfg.server.clone()));
+        let security_mgr = Arc::new(SecurityManager::new(&cfg.security).unwrap());
+        let cop_read_pool = ReadPool::from(coprocessor::readpool_impl::build_read_pool_for_test(
+            &tikv::config::CoprReadPoolConfig::default_for_test(),
+            store.get_engine(),
+        ));
+        let copr = coprocessor::Endpoint::new(
+            &server_cfg.value().clone(),
+            cop_read_pool.handle(),
+            concurrency_manager.clone(),
+            res_tag_factory,
+            quota_limiter,
+        );
+        let copr_v2 = coprocessor_v2::Endpoint::new(&cfg.coprocessor_v2);
+        let mut server = None;
+
+        // Create Debug service.
+        let debug_thread_pool = Arc::new(
+            TokioBuilder::new_multi_thread()
+                .thread_name(thd_name!("debugger"))
+                .worker_threads(1)
+                .after_start_wrapper(|| {})
+                .before_stop_wrapper(|| {})
+                .build()
+                .unwrap(),
+        );
+        let debug_thread_handle = debug_thread_pool.handle().clone();
+        let diag_service = DiagnosticsService::new(
+            debug_thread_handle,
+            cfg.log.file.filename.clone(),
+            cfg.slow_log_file.clone(),
+        );
+
+        // Create node.
+        let mut raft_store = cfg.raft_store.clone();
+        raft_store
+            .validate(
+                cfg.coprocessor.region_split_size,
+                cfg.coprocessor.enable_region_bucket,
+                cfg.coprocessor.region_bucket_size,
+            )
+            .unwrap();
+        let health_service = HealthService::default();
+        let mut node = NodeV2::new(
+            system,
+            &server_cfg.value().clone(),
+            Arc::new(VersionTrack::new(raft_store)),
+            Arc::clone(&self.pd_client),
+            state,
+            bg_worker.clone(),
+            None,
+            factory,
+        );
+        node.try_bootstrap_store(&raft_engine)?;
+        let node_id = node.id();
+
+        for _ in 0..100 {
+            let mut svr = Server::new(
+                node_id,
+                &server_cfg,
+                &security_mgr,
+                store.clone(),
+                copr.clone(),
+                copr_v2.clone(),
+                store.get_engine().raft_extension().clone(),
+                resolver.clone(),
+                None,
+                snap_mgr.clone(),
+                None,
+                check_leader_scheduler.clone(),
+                self.env.clone(),
+                None,
+                debug_thread_pool.clone(),
+                health_service.clone(),
+            )
+            .unwrap();
+            svr.register_service(create_diagnostics(diag_service.clone()));
+            svr.register_service(create_deadlock(deadlock_service.clone()));
+            if let Some(svcs) = self.pending_services.get(&node_id) {
+                for fact in svcs {
+                    svr.register_service(fact());
+                }
+            }
+            match svr.build_and_bind() {
+                Ok(_) => {
+                    server = Some(svr);
+                    break;
+                }
+                Err(Error::Grpc(GrpcError::BindFail(ref addr, ref port))) => {
+                    // Servers may meet the error, when we restart them.
+                    debug!("fail to create a server: bind fail {:?}", (addr, port));
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                Err(ref e) => panic!("fail to create a server: {:?}", e),
+            }
+        }
+        let mut server = server.unwrap();
+        let addr = server.listening_addr();
+        cfg.server.addr = format!("{}", addr);
+        let trans = server.transport();
+        let simulate_trans = SimulateTransport::new(trans);
+        let server_cfg = Arc::new(VersionTrack::new(cfg.server.clone()));
+
+        // Register the role change observer of the lock manager.
+        // lock_mgr.register_detector_role_change_observer(&mut coprocessor_host);
+
+        let pessimistic_txn_cfg = cfg.tikv.pessimistic_txn;
+        node.start(
+            raft_engine,
+            simulate_trans.clone(),
+            &raft_router,
+            snap_mgr.clone(),
+            Arc::new(role_change_notifier),
+        )?;
+        assert!(node_id == 0 || node_id == node.id());
+        let node_id = node.id();
+        self.snap_mgrs.insert(node_id, snap_mgr);
+        // todo: region info accessor
+        // todo: importer
+        self.health_services.insert(node_id, health_service);
+
+        lock_mgr
+            .start(
+                node.id(),
+                Arc::clone(&self.pd_client),
+                resolver,
+                Arc::clone(&security_mgr),
+                &pessimistic_txn_cfg,
+            )
+            .unwrap();
+
+        server.start(server_cfg, security_mgr).unwrap();
+
+        self.metas.insert(
+            node_id,
+            ServerMeta {
+                raw_router: raft_router,
+                node,
+                server,
+                sim_router,
+                sim_trans: simulate_trans,
+                rsmeter_cleanup,
+            },
+        );
+        self.addrs.insert(node_id, format!("{}", addr));
+        self.concurrency_managers
+            .insert(node_id, concurrency_manager);
+
+        Ok(node_id)
+    }
+
+    pub fn get_causal_ts_provider(&self, node_id: u64) -> Option<Arc<CausalTsProviderImpl>> {
+        self.causal_ts_providers.get(&node_id).cloned()
+    }
+
+    fn init_resource_metering(
+        &self,
+        cfg: &resource_metering::Config,
+    ) -> (ResourceTagFactory, CollectorRegHandle, Box<dyn FnOnce()>) {
+        let (_, collector_reg_handle, resource_tag_factory, recorder_worker) =
+            resource_metering::init_recorder(cfg.precision.as_millis());
+        let (_, data_sink_reg_handle, reporter_worker) =
+            resource_metering::init_reporter(cfg.clone(), collector_reg_handle.clone());
+        let (_, single_target_worker) = resource_metering::init_single_target(
+            cfg.receiver_address.clone(),
+            Arc::new(Environment::new(2)),
+            data_sink_reg_handle,
+        );
+
+        (
+            resource_tag_factory,
+            collector_reg_handle,
+            Box::new(move || {
+                single_target_worker.stop_worker();
+                reporter_worker.stop_worker();
+                recorder_worker.stop_worker();
+            }),
+        )
+    }
+}
+
+impl SimulatorV2 for ServerCluster {
+    fn get_node_ids(&self) -> HashSet<u64> {
+        self.metas.keys().cloned().collect()
+    }
+
+    fn add_send_filter(&mut self, node_id: u64, filter: Box<dyn test_raftstore::Filter>) {
+        unimplemented!()
+    }
+
+    fn clear_send_filters(&mut self, node_id: u64) {
+        unimplemented!()
+    }
+
+    fn run_node(
+        &mut self,
+        node_id: u64,
+        cfg: Config,
+        store_meta: Arc<Mutex<StoreMeta<RocksEngine>>>,
+        router: StoreRouter<RocksEngine, RaftTestEngine>,
+        system: StoreSystem<RocksEngine, RaftTestEngine>,
+        raft_engine: RaftTestEngine,
+        factory: Arc<dyn TabletFactory<RocksEngine>>,
+    ) -> ServerResult<u64> {
+        dispatch_api_version!(
+            cfg.storage.api_version(),
+            self.run_node_impl::<API>(
+                node_id,
+                cfg,
+                store_meta,
+                router,
+                system,
+                raft_engine,
+                factory,
+            )
+        )
+    }
+
+    fn stop_node(&mut self, node_id: u64) {
+        unimplemented!()
+    }
+
+    fn snapshot(
+        &mut self,
+        request: kvproto::raft_cmdpb::RaftCmdRequest,
+        timeout: Duration,
+    ) -> std::result::Result<
+        RegionSnapshot<<RocksEngine as KvEngine>::Snapshot, Prefix>,
+        RaftCmdResponse,
+    > {
+        let node_id = request.get_header().get_peer().get_store_id();
+        let mut router = match self.metas.get(&node_id) {
+            None => {
+                let mut resp = RaftCmdResponse::default();
+                let e: RaftError = box_err!("missing sender for store {}", node_id);
+                resp.mut_header().set_error(e.into());
+                return Err(resp);
+            }
+            Some(meta) => meta.sim_router.clone(),
+        };
+
+        router.snapshot(request, timeout)
+    }
+
+    fn async_peer_msg_on_node(
+        &self,
+        node_id: u64,
+        region_id: u64,
+        msg: raftstore_v2::router::PeerMsg,
+    ) -> raftstore::Result<()> {
+        let router = match self.metas.get(&node_id) {
+            None => return Err(box_err!("missing sender for store {}", node_id)),
+            Some(meta) => meta.sim_router.clone(),
+        };
+
+        router.send_peer_msg(region_id, msg)
+    }
+}
+
+pub fn new_server_cluster(id: u64, count: usize) -> ClusterV2<ServerCluster> {
+    let pd_client = Arc::new(TestPdClient::new(id, false));
+    let sim = Arc::new(RwLock::new(ServerCluster::new(Arc::clone(&pd_client))));
+    ClusterV2::new(id, count, sim, pd_client, ApiVersion::V1)
+}

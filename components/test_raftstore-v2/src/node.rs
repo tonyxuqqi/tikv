@@ -2,7 +2,7 @@
 
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     thread,
     time::Duration,
 };
@@ -11,30 +11,28 @@ use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::{RocksEngine, RocksSnapshot};
 use engine_test::raft::RaftTestEngine;
-use engine_traits::{
-    util::check_key_in_range, Peekable, RaftEngineReadOnly, TabletFactory, CF_DEFAULT, CF_WRITE,
-};
+use engine_traits::{Peekable, RaftEngineReadOnly, TabletFactory, CF_DEFAULT, CF_WRITE};
 use futures::executor::block_on;
 use keys::Prefix;
 use kvproto::{
+    kvrpcpb::ApiVersion,
     metapb,
     raft_cmdpb::{CmdType, RaftCmdRequest, RaftCmdResponse, Response},
     raft_serverpb::RaftMessage,
 };
-use pd_client::PdClient;
 use raft::{prelude::MessageType, StateRole};
 use raftstore::{
     coprocessor::{RegionChangeEvent, RoleChange},
     errors::Error as RaftError,
     store::{
-        cmd_resp, copy_snapshot,
+        cmd_resp,
         util::{check_key_in_region, LockManagerNotifier},
         RegionSnapshot, SnapKey, TabletSnapKey, TabletSnapManager, Transport,
     },
     Result,
 };
 use raftstore_v2::{
-    router::{QueryResult, RaftRouter},
+    router::{PeerMsg, QueryResult, RaftRouter},
     StoreMeta, StoreRouter, StoreSystem,
 };
 use test_pd_client::TestPdClient;
@@ -51,8 +49,9 @@ use tikv_util::{
 };
 
 use crate::{
-    cluster::Cluster,
+    cluster::ClusterV2,
     transport_simulate::{RaftStoreRouter, SimulateTransport, SnapshotRouter},
+    SimulatorV2,
 };
 
 #[derive(Clone)]
@@ -161,12 +160,28 @@ impl NodeCluster {
             snap_mgrs: HashMap::default(),
         }
     }
+}
 
-    pub fn channel_transport(&self) -> &ChannelTransport {
-        &self.trans
+impl SimulatorV2 for NodeCluster {
+    fn get_node_ids(&self) -> HashSet<u64> {
+        self.nodes.keys().cloned().collect()
     }
 
-    pub fn run_node(
+    fn add_send_filter(&mut self, node_id: u64, filter: Box<dyn Filter>) {
+        self.simulate_trans
+            .get_mut(&node_id)
+            .unwrap()
+            .add_filter(filter);
+    }
+
+    fn clear_send_filters(&mut self, node_id: u64) {
+        self.simulate_trans
+            .get_mut(&node_id)
+            .unwrap()
+            .clear_filters();
+    }
+
+    fn run_node(
         &mut self,
         node_id: u64,
         cfg: Config,
@@ -281,7 +296,7 @@ impl NodeCluster {
         Ok(node_id)
     }
 
-    pub fn stop_node(&mut self, node_id: u64) {
+    fn stop_node(&mut self, node_id: u64) {
         if let Some(mut node) = self.nodes.remove(&node_id) {
             node.stop();
         }
@@ -294,12 +309,15 @@ impl NodeCluster {
             .unwrap();
     }
 
-    pub fn get_node_ids(&self) -> HashSet<u64> {
-        self.nodes.keys().cloned().collect()
-    }
-
-    pub fn read(&mut self, req: RaftCmdRequest, timeout: Duration) -> Result<RaftCmdResponse> {
-        let node_id = req.get_header().get_peer().get_store_id();
+    fn snapshot(
+        &mut self,
+        request: RaftCmdRequest,
+        timeout: Duration,
+    ) -> std::result::Result<
+        RegionSnapshot<<RocksEngine as engine_traits::KvEngine>::Snapshot, Prefix>,
+        RaftCmdResponse,
+    > {
+        let node_id = request.get_header().get_peer().get_store_id();
         if !self
             .trans
             .core
@@ -311,80 +329,15 @@ impl NodeCluster {
             let mut resp = RaftCmdResponse::default();
             let e: RaftError = box_err!("missing sender for store {}", node_id);
             resp.mut_header().set_error(e.into());
-            return Ok(resp);
+            return Err(resp);
         }
 
         let mut guard = self.trans.core.lock().unwrap();
         let router = guard.routers.get_mut(&node_id).unwrap();
-        let mut req_clone = req.clone();
-        req_clone.clear_requests();
-        req_clone.mut_requests().push(new_snap_cmd());
-        match router.snapshot(req_clone, timeout) {
-            Ok(snap) => {
-                let requests = req.get_requests();
-                let mut response = RaftCmdResponse::default();
-                let mut responses = Vec::with_capacity(requests.len());
-                for req in requests {
-                    let cmd_type = req.get_cmd_type();
-                    match cmd_type {
-                        CmdType::Get => {
-                            let mut resp = Response::default();
-                            let key = req.get_get().get_key();
-                            let cf = req.get_get().get_cf();
-                            let region = snap.get_region();
-
-                            if let Err(e) = check_key_in_region(key, region) {
-                                return Ok(cmd_resp::new_error(e));
-                            }
-
-                            let res = if cf.is_empty() {
-                                snap.get_value(key).unwrap_or_else(|e| {
-                                    panic!(
-                                        "[region {}] failed to get {} with cf {}: {:?}",
-                                        snap.get_region().get_id(),
-                                        log_wrappers::Value::key(key),
-                                        cf,
-                                        e
-                                    )
-                                })
-                            } else {
-                                snap.get_value_cf(cf, key).unwrap_or_else(|e| {
-                                    panic!(
-                                        "[region {}] failed to get {}: {:?}",
-                                        snap.get_region().get_id(),
-                                        log_wrappers::Value::key(key),
-                                        e
-                                    )
-                                })
-                            };
-                            if let Some(res) = res {
-                                resp.mut_get().set_value(res.to_vec());
-                            }
-                            resp.set_cmd_type(cmd_type);
-                            responses.push(resp);
-                        }
-                        _ => unimplemented!(),
-                    }
-                }
-                response.set_responses(responses.into());
-
-                Ok(response)
-            }
-            Err(e) => Ok(e),
-        }
+        router.snapshot(request, timeout)
     }
 
-    pub fn call_command(&self, req: RaftCmdRequest, timeout: Duration) -> Result<RaftCmdResponse> {
-        let node_id = req.get_header().get_peer().get_store_id();
-        self.call_command_on_node(node_id, req, timeout)
-    }
-
-    pub fn call_command_on_node(
-        &self,
-        node_id: u64,
-        req: RaftCmdRequest,
-        timeout: Duration,
-    ) -> Result<RaftCmdResponse> {
+    fn async_peer_msg_on_node(&self, node_id: u64, region_id: u64, msg: PeerMsg) -> Result<()> {
         if !self
             .trans
             .core
@@ -406,82 +359,14 @@ impl NodeCluster {
             .cloned()
             .unwrap();
 
-        match router.send_command(req) {
-            Ok(sub) => {
-                // todo: unwrap and timeout
-                let a = block_on(sub.result());
-                if a.is_none() {
-                    println!("here");
-                }
-                Ok(a.unwrap())
-            }
-            Err(e) => {
-                let mut resp = RaftCmdResponse::default();
-                resp.mut_header().set_error(e.into());
-                Ok(resp)
-            }
-        }
-    }
-
-    pub fn call_query(&self, req: RaftCmdRequest, timeout: Duration) -> Result<RaftCmdResponse> {
-        let node_id = req.get_header().get_peer().get_store_id();
-
-        if !self
-            .trans
-            .core
-            .lock()
-            .unwrap()
-            .routers
-            .contains_key(&node_id)
-        {
-            return Err(box_err!("missing sender for store {}", node_id));
-        }
-
-        let router = self
-            .trans
-            .core
-            .lock()
-            .unwrap()
-            .routers
-            .get(&node_id)
-            .cloned()
-            .unwrap();
-
-        match router.send_query(req) {
-            Ok(sub) => {
-                // todo: unwrap and timeout
-                match block_on(sub.result()).unwrap() {
-                    QueryResult::Read(a) => unreachable!(),
-                    QueryResult::Response(resp) => return Ok(resp),
-                }
-            }
-            Err(e) => {
-                let mut resp = RaftCmdResponse::default();
-                resp.mut_header().set_error(e.into());
-                Ok(resp)
-            }
-        }
-    }
-
-    pub fn add_send_filter(&mut self, node_id: u64, filter: Box<dyn Filter>) {
-        self.simulate_trans
-            .get_mut(&node_id)
-            .unwrap()
-            .add_filter(filter);
-    }
-
-    pub fn clear_send_filters(&mut self, node_id: u64) {
-        self.simulate_trans
-            .get_mut(&node_id)
-            .unwrap()
-            .clear_filters();
+        router.send_peer_msg(region_id, msg)
     }
 }
 
-pub fn new_node_cluster(id: u64, count: usize) -> Cluster {
+pub fn new_node_cluster(id: u64, count: usize) -> ClusterV2<NodeCluster> {
     let pd_client = Arc::new(TestPdClient::new(id, false));
-    let node_cluster = NodeCluster::new(Arc::clone(&pd_client));
-    Cluster::new(id, count, node_cluster, pd_client)
+    let sim = Arc::new(RwLock::new(NodeCluster::new(Arc::clone(&pd_client))));
+    ClusterV2::new(id, count, sim, pd_client, ApiVersion::V1)
 }
 
 struct DummyLockManagerObserver {}

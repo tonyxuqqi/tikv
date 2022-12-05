@@ -101,31 +101,12 @@ impl<E: KvEngine, C: SnapshotRouter<E>> SnapshotRouter<E> for SimulateTransport<
 }
 
 pub trait RaftStoreRouter {
-    /// Sends RaftCmdRequest to local store.
-    fn send_command(&self, req: RaftCmdRequest) -> RaftStoreResult<CmdResSubscriber>;
-
-    fn send_query(&self, req: RaftCmdRequest) -> RaftStoreResult<QueryResSubscriber>;
-
     fn send_peer_msg(&self, region_id: u64, msg: PeerMsg) -> Result<()>;
 
     fn send_raft_msg(&self, msg: RaftMessage) -> RaftStoreResult<()>;
 }
 
 impl<EK: KvEngine, ER: RaftEngine> RaftStoreRouter for RaftRouter<EK, ER> {
-    fn send_command(&self, req: RaftCmdRequest) -> RaftStoreResult<CmdResSubscriber> {
-        let region_id = req.get_header().get_region_id();
-        let (msg, sub) = PeerMsg::raft_command(req);
-        self.send_peer_msg(region_id, msg)?;
-        Ok(sub)
-    }
-
-    fn send_query(&self, req: RaftCmdRequest) -> RaftStoreResult<QueryResSubscriber> {
-        let region_id = req.get_header().get_region_id();
-        let (msg, sub) = PeerMsg::raft_query(req);
-        self.send_peer_msg(region_id, msg)?;
-        Ok(sub)
-    }
-
     fn send_peer_msg(&self, region_id: u64, msg: PeerMsg) -> RaftStoreResult<()> {
         self.send(region_id, msg)
             .map_err(|e| handle_send_error(region_id, &e))
@@ -139,14 +120,6 @@ impl<EK: KvEngine, ER: RaftEngine> RaftStoreRouter for RaftRouter<EK, ER> {
 }
 
 impl<C: RaftStoreRouter> RaftStoreRouter for SimulateTransport<C> {
-    fn send_command(&self, req: RaftCmdRequest) -> RaftStoreResult<CmdResSubscriber> {
-        self.ch.send_command(req)
-    }
-
-    fn send_query(&self, req: RaftCmdRequest) -> RaftStoreResult<QueryResSubscriber> {
-        self.ch.send_query(req)
-    }
-
     fn send_peer_msg(&self, region_id: u64, msg: PeerMsg) -> RaftStoreResult<()> {
         self.ch.send_peer_msg(region_id, msg)
     }

@@ -5,7 +5,7 @@ use std::{sync::Arc, thread, time::Duration};
 use engine_traits::{CF_DEFAULT, CF_WRITE};
 use pd_client::PdClient;
 use test_raftstore::{new_get_cmd, new_request};
-use test_raftstore_v2::{new_node_cluster, put_cf_till_size, put_till_size, Cluster};
+use test_raftstore_v2::{new_node_cluster, put_cf_till_size, put_till_size, ClusterV2, SimulatorV2};
 use tikv_util::config::{ReadableDuration, ReadableSize};
 
 pub const REGION_MAX_SIZE: u64 = 50000;
@@ -18,7 +18,7 @@ fn test_node_auto_split_region() {
     test_auto_split_region(&mut cluster);
 }
 
-fn test_auto_split_region(cluster: &mut Cluster) {
+fn test_auto_split_region<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
     cluster.cfg.raft_store.split_region_check_tick_interval = ReadableDuration::millis(100);
     cluster.cfg.coprocessor.region_max_size = Some(ReadableSize(REGION_MAX_SIZE));
     cluster.cfg.coprocessor.region_split_size = ReadableSize(REGION_SPLIT_SIZE);

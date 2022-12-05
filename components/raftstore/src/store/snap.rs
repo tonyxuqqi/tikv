@@ -4,7 +4,6 @@ use std::{
     cmp::{self, Ordering as CmpOrdering, Reverse},
     error::Error as StdError,
     fmt::{self, Display, Formatter},
-    fs,
     io::{self, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     result, str,
