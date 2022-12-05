@@ -29,11 +29,11 @@ use std::{borrow::Cow, collections::VecDeque};
 
 use crossbeam::channel::{SendError, TrySendError};
 use engine_traits::{
-    Checkpointer, DeleteStrategy, KvEngine, OpenOptions, RaftEngine, RaftLogBatch, Range,
+    Checkpointer, DeleteStrategy, KvEngine, MiscExt, OpenOptions, RaftEngine, RaftLogBatch, Range,
     TabletFactory, CF_DEFAULT, SPLIT_PREFIX,
 };
 use fail::fail_point;
-use keys::enc_end_key;
+use keys::{enc_end_key, enc_start_key};
 use kvproto::{
     metapb::{self, Region, RegionEpoch},
     raft_cmdpb::{AdminCmdType, AdminRequest, AdminResponse, RaftCmdRequest, SplitRequest},
@@ -265,6 +265,20 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
             .unwrap();
         // Remove the old write batch.
         self.write_batch_mut().take();
+
+        let (start_key, end_key) = (
+            enc_start_key(&regions[derived_index]),
+            enc_end_key(&regions[derived_index]),
+        );
+        let range1 = Range::new(&[], &start_key);
+        let range2 = Range::new(&end_key, &[0xFF, 0xFF]);
+        tablet
+            .delete_ranges_cfs(DeleteStrategy::DeleteFiles, &[range1, range2])
+            .unwrap();
+        tablet
+            .delete_ranges_cfs(DeleteStrategy::DeleteByRange, &[range1, range2])
+            .unwrap();
+
         self.publish_tablet(tablet);
 
         self.region_state_mut()
@@ -421,6 +435,19 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     e
                 )
             });
+
+        let (start_key, end_key) = (
+            enc_start_key(&split_init.region),
+            enc_end_key(&split_init.region),
+        );
+        let range1 = Range::new(&[], &start_key);
+        let range2 = Range::new(&end_key, &[0xFF, 0xFF]);
+        tablet
+            .delete_ranges_cfs(DeleteStrategy::DeleteFiles, &[range1, range2])
+            .unwrap();
+        tablet
+            .delete_ranges_cfs(DeleteStrategy::DeleteByRange, &[range1, range2])
+            .unwrap();
 
         self.tablet_mut().set(tablet);
 
