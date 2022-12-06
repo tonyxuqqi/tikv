@@ -147,6 +147,7 @@ impl Store {
         ER: RaftEngine,
     {
         let region_id = msg.get_region_id();
+        println!("on_raft_message {:?}", msg);
         // The message can be sent when the peer is being created, so try send it first.
         let msg = if let Err(TrySendError::Disconnected(PeerMsg::RaftMessage(m))) =
             ctx.router.send(region_id, PeerMsg::RaftMessage(msg))

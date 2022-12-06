@@ -6,7 +6,7 @@ use engine_traits::{CfName, CF_DEFAULT, CF_WRITE};
 use raftstore::store::RAFT_INIT_LOG_INDEX;
 use rand::seq::SliceRandom;
 use test_raftstore::{new_put_cf_cmd, new_put_cmd, new_request, sleep_ms};
-use test_raftstore_v2::{new_node_cluster, new_server_cluster, ClusterV2, SimulatorV2};
+use test_raftstore_v2::{new_node_cluster, new_server_cluster, Cluster, Simulator};
 use tikv_util::{config::ReadableSize, time::Instant};
 
 #[test]
@@ -98,7 +98,7 @@ fn test_node_apply_no_op() {
     }
 }
 
-fn test_put<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
+fn test_put<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.run();
 
     let mut data_set: Vec<_> = (1..1000)
@@ -141,7 +141,7 @@ fn test_put<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
     }
 }
 
-fn test_delete<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
+fn test_delete<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.run();
 
     let data_set: Vec<_> = (1..1000)
@@ -168,7 +168,7 @@ fn test_delete<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
     }
 }
 
-fn test_delete_range<T: SimulatorV2>(cluster: &mut ClusterV2<T>, cf: CfName) {
+fn test_delete_range<T: Simulator>(cluster: &mut Cluster<T>, cf: CfName) {
     let data_set: Vec<_> = (1..500)
         .map(|i| {
             (
@@ -201,7 +201,7 @@ fn test_delete_range<T: SimulatorV2>(cluster: &mut ClusterV2<T>, cf: CfName) {
     }
 }
 
-fn test_wrong_store_id<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
+fn test_wrong_store_id<T: Simulator>(cluster: &mut Cluster<T>) {
     cluster.run();
 
     let (k, v) = (b"k", b"v");
@@ -225,7 +225,7 @@ fn test_wrong_store_id<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
     );
 }
 
-fn test_put_large_entry<T: SimulatorV2>(cluster: &mut ClusterV2<T>) {
+fn test_put_large_entry<T: Simulator>(cluster: &mut Cluster<T>) {
     let max_size: usize = 1024;
     cluster.cfg.raft_store.raft_entry_max_size = ReadableSize(max_size as u64);
 

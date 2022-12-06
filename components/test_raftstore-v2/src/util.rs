@@ -3,6 +3,7 @@
 use std::{
     fmt::Write,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use encryption_export::{data_key_manager_from_config, DataKeyManager};
@@ -16,8 +17,9 @@ use server::server_v2::ConfiguredRaftEngine;
 use tempfile::TempDir;
 use test_raftstore::{new_put_cf_cmd, Config};
 use tikv::server::KvEngineFactoryBuilder;
+use tikv_util::config::ReadableDuration;
 
-use crate::{cluster::ClusterV2, SimulatorV2};
+use crate::{cluster::Cluster, Simulator};
 
 pub fn create_test_engine(
     // TODO: pass it in for all cases.
@@ -64,16 +66,16 @@ pub fn create_test_engine(
 }
 
 /// Keep putting random kvs until specified size limit is reached.
-pub fn put_till_size<T: SimulatorV2>(
-    cluster: &mut ClusterV2<T>,
+pub fn put_till_size<T: Simulator>(
+    cluster: &mut Cluster<T>,
     limit: u64,
     range: &mut dyn Iterator<Item = u64>,
 ) -> Vec<u8> {
     put_cf_till_size(cluster, CF_DEFAULT, limit, range)
 }
 
-pub fn put_cf_till_size<T: SimulatorV2>(
-    cluster: &mut ClusterV2<T>,
+pub fn put_cf_till_size<T: Simulator>(
+    cluster: &mut Cluster<T>,
     cf: &'static str,
     limit: u64,
     range: &mut dyn Iterator<Item = u64>,
@@ -102,4 +104,40 @@ pub fn put_cf_till_size<T: SimulatorV2>(
         cluster.must_flush_cf(cf, true);
     }
     key.into_bytes()
+}
+
+pub fn configure_for_snapshot<T: Simulator>(cluster: &mut Cluster<T>) {
+    // Truncate the log quickly so that we can force sending snapshot.
+    cluster.cfg.raft_store.raft_log_gc_tick_interval = ReadableDuration::millis(20);
+    cluster.cfg.raft_store.raft_log_gc_count_limit = Some(2);
+    cluster.cfg.raft_store.merge_max_log_gap = 1;
+    cluster.cfg.raft_store.snap_mgr_gc_tick_interval = ReadableDuration::millis(50);
+}
+
+pub fn configure_for_lease_read<T: Simulator>(
+    cluster: &mut Cluster<T>,
+    base_tick_ms: Option<u64>,
+    election_ticks: Option<usize>,
+) -> Duration {
+    if let Some(base_tick_ms) = base_tick_ms {
+        cluster.cfg.raft_store.raft_base_tick_interval = ReadableDuration::millis(base_tick_ms);
+    }
+    let base_tick_interval = cluster.cfg.raft_store.raft_base_tick_interval.0;
+    if let Some(election_ticks) = election_ticks {
+        cluster.cfg.raft_store.raft_election_timeout_ticks = election_ticks;
+    }
+    let election_ticks = cluster.cfg.raft_store.raft_election_timeout_ticks as u32;
+    let election_timeout = base_tick_interval * election_ticks;
+    // Adjust max leader lease.
+    cluster.cfg.raft_store.raft_store_max_leader_lease =
+        ReadableDuration(election_timeout - base_tick_interval);
+    // Use large peer check interval, abnormal and max leader missing duration to
+    // make a valid config, that is election timeout x 2 < peer stale state
+    // check < abnormal < max leader missing duration.
+    cluster.cfg.raft_store.peer_stale_state_check_interval = ReadableDuration(election_timeout * 3);
+    cluster.cfg.raft_store.abnormal_leader_missing_duration =
+        ReadableDuration(election_timeout * 4);
+    cluster.cfg.raft_store.max_leader_missing_duration = ReadableDuration(election_timeout * 5);
+
+    election_timeout
 }

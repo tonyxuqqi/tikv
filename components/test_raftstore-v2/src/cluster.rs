@@ -10,19 +10,19 @@ use std::{
 
 use collections::{HashMap, HashSet};
 use encryption_export::DataKeyManager;
-use engine_rocks::{RocksDbVector, RocksEngine};
+use engine_rocks::{RocksDbVector, RocksEngine, RocksSnapshot};
 use engine_test::raft::RaftTestEngine;
 use engine_traits::{
     Iterable, KvEngine, MiscExt, OpenOptions, Peekable, RaftEngine, RaftEngineReadOnly,
     RaftLogBatch, ReadOptions, TabletFactory, CF_DEFAULT,
 };
 use file_system::IoRateLimiter;
-use futures::executor::block_on;
+use futures::{compat::Future01CompatExt, executor::block_on, select, FutureExt};
 use keys::{data_key, Prefix, REGION_STATE_SUFFIX};
 use kvproto::{
     errorpb::Error as PbError,
     kvrpcpb::ApiVersion,
-    metapb::{self, PeerRole, RegionEpoch},
+    metapb::{self, Buckets, PeerRole, RegionEpoch},
     raft_cmdpb::{
         AdminCmdType, CmdType, RaftCmdRequest, RaftCmdResponse, RegionDetailResponse, Request,
         Response, StatusCmdType,
@@ -32,15 +32,15 @@ use kvproto::{
 use pd_client::PdClient;
 use raftstore::{
     store::{
-        cmd_resp, initial_region, region_meta::RegionMeta, util::check_key_in_region, Callback,
-        RegionSnapshot, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER,
+        cmd_resp, initial_region, region_meta::RegionMeta, util::check_key_in_region, Bucket,
+        BucketRange, Callback, RegionSnapshot, WriteResponse, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER,
     },
     Error, Result,
 };
 use raftstore_v2::{
     create_store_batch_system,
     router::{DebugInfoChannel, PeerMsg, QueryResult, RaftRouter},
-    write_initial_states, StoreMeta, StoreRouter, StoreSystem,
+    write_initial_states, SplitRegion, StoreMeta, StoreRouter, StoreSystem,
 };
 use slog::o;
 use tempfile::TempDir;
@@ -52,10 +52,10 @@ use test_raftstore::{
     new_transfer_leader_cmd, sleep_ms, Config, Filter, FilterFactory, PartitionFilterFactory,
     RawEngine, TEST_CONFIG,
 };
-use tikv::{config::TikvConfig, server::Result as ServerResult};
+use tikv::{config::TikvConfig, server::Result as ServerResult, storage::kv::ErrorInner};
 use tikv_util::{
-    box_err, box_try, debug, error, safe_panic, thread_group::GroupProperties, time::Instant, warn,
-    HandyRwLock,
+    box_err, box_try, debug, error, safe_panic, thread_group::GroupProperties, time::Instant,
+    timer::GLOBAL_TIMER_HANDLE, warn, HandyRwLock,
 };
 
 use crate::{node::NodeCluster, transport_simulate::RaftStoreRouter, util::create_test_engine};
@@ -64,7 +64,7 @@ use crate::{node::NodeCluster, transport_simulate::RaftStoreRouter, util::create
 // Sometimes, we use fixed id to test, which means the id
 // isn't allocated by pd, and node id, store id are same.
 // E,g, for node 1, the node id and store id are both 1.
-pub trait SimulatorV2 {
+pub trait Simulator {
     // Pass 0 to let pd allocate a node id if db is empty.
     // If node id > 0, the node must be created in db already,
     // and the node id must be the same as given argument.
@@ -82,12 +82,11 @@ pub trait SimulatorV2 {
     ) -> ServerResult<u64>;
 
     fn stop_node(&mut self, node_id: u64);
-
     fn get_node_ids(&self) -> HashSet<u64>;
-
     fn add_send_filter(&mut self, node_id: u64, filter: Box<dyn Filter>);
-
     fn clear_send_filters(&mut self, node_id: u64);
+    fn get_router(&self, node_id: u64) -> Option<StoreRouter<RocksEngine, RaftTestEngine>>;
+    fn get_snap_dir(&self, node_id: u64) -> String;
 
     fn read(&mut self, request: RaftCmdRequest, timeout: Duration) -> Result<RaftCmdResponse> {
         let node_id = request.get_header().get_peer().get_store_id();
@@ -213,12 +212,19 @@ pub trait SimulatorV2 {
             }
         }
 
-        // todo(SpadeA): unwrap and timeout
-        Ok(block_on(sub.result()).unwrap())
+        let timeout_f = GLOBAL_TIMER_HANDLE.delay(std::time::Instant::now() + timeout);
+        block_on(async move {
+            select! {
+                // todo: unwrap?
+                res = sub.result().fuse() => Ok(res.unwrap()),
+                _ = timeout_f.compat().fuse() => Err(Error::Timeout(format!("request timeout for {:?}", timeout))),
+
+            }
+        })
     }
 }
 
-pub struct ClusterV2<T: SimulatorV2> {
+pub struct Cluster<T: Simulator> {
     pub cfg: Config,
     leaders: HashMap<u64, metapb::Peer>,
     pub count: usize,
@@ -241,15 +247,15 @@ pub struct ClusterV2<T: SimulatorV2> {
     pub sim: Arc<RwLock<T>>,
 }
 
-impl<T: SimulatorV2> ClusterV2<T> {
+impl<T: Simulator> Cluster<T> {
     pub fn new(
         id: u64,
         count: usize,
         sim: Arc<RwLock<T>>,
         pd_client: Arc<TestPdClient>,
         api_version: ApiVersion,
-    ) -> ClusterV2<T> {
-        ClusterV2 {
+    ) -> Cluster<T> {
+        Cluster {
             cfg: Config {
                 tikv: new_tikv_config_with_api_ver(id, api_version),
                 prefer_mem: true,
@@ -1092,6 +1098,93 @@ impl<T: SimulatorV2> ClusterV2<T> {
         )
     }
 
+    // It's similar to `ask_split`, the difference is the msg, it sends, is
+    // `Msg::SplitRegion`, and `region` will not be embedded to that msg.
+    // Caller must ensure that the `split_key` is in the `region`.
+    pub fn split_region(
+        &mut self,
+        region: &metapb::Region,
+        split_key: &[u8],
+        mut cb: Callback<RocksSnapshot>,
+    ) {
+        let leader = self.leader_of_region(region.get_id()).unwrap();
+        let router = self.sim.rl().get_router(leader.get_store_id()).unwrap();
+        let split_key = split_key.to_vec();
+        let (split_region_req, mut sub) = PeerMsg::split_request(
+            region.get_region_epoch().clone(),
+            vec![split_key],
+            "test".into(),
+        );
+
+        router
+            .send_peer_msg(region.get_id(), split_region_req)
+            .unwrap();
+
+        block_on(async {
+            sub.wait_proposed().await;
+            cb.invoke_proposed();
+            sub.wait_committed().await;
+            cb.invoke_committed();
+            let res = sub.result().await.unwrap();
+            cb.invoke_with_response(res)
+        });
+    }
+
+    pub fn must_split(&mut self, region: &metapb::Region, split_key: &[u8]) {
+        let mut try_cnt = 0;
+        let split_count = self.pd_client.get_split_count();
+        loop {
+            debug!("asking split"; "region" => ?region, "key" => ?split_key);
+            // In case ask split message is ignored, we should retry.
+            if try_cnt % 50 == 0 {
+                self.reset_leader_of_region(region.get_id());
+                let key = split_key.to_vec();
+                let check = Box::new(move |write_resp: WriteResponse| {
+                    let mut resp = write_resp.response;
+                    if resp.get_header().has_error() {
+                        let error = resp.get_header().get_error();
+                        if error.has_epoch_not_match()
+                            || error.has_not_leader()
+                            || error.has_stale_command()
+                            || error
+                                .get_message()
+                                .contains("peer has not applied to current term")
+                        {
+                            warn!("fail to split: {:?}, ignore.", error);
+                            return;
+                        }
+                        panic!("failed to split: {:?}", resp);
+                    }
+                    let admin_resp = resp.mut_admin_response();
+                    let split_resp = admin_resp.mut_splits();
+                    let regions = split_resp.get_regions();
+                    assert_eq!(regions.len(), 2);
+                    assert_eq!(regions[0].get_end_key(), key.as_slice());
+                    assert_eq!(regions[0].get_end_key(), regions[1].get_start_key());
+                });
+                if self.leader_of_region(region.get_id()).is_some() {
+                    self.split_region(region, split_key, Callback::write(check));
+                }
+            }
+
+            if self.pd_client.check_split(region, split_key)
+                && self.pd_client.get_split_count() > split_count
+            {
+                return;
+            }
+
+            if try_cnt > 250 {
+                panic!(
+                    "region {:?} has not been split by {}",
+                    region,
+                    log_wrappers::hex_encode_upper(split_key)
+                );
+            }
+            try_cnt += 1;
+            sleep_ms(20);
+        }
+    }
+
     pub fn wait_region_split(&mut self, region: &metapb::Region) {
         self.wait_region_split_max_cnt(region, 20, 250, true);
     }
@@ -1131,6 +1224,28 @@ impl<T: SimulatorV2> ClusterV2<T> {
             try_cnt += 1;
             sleep_ms(itvl_ms);
         }
+    }
+
+    pub fn get_snap_dir(&self, node_id: u64) -> String {
+        self.sim.rl().get_snap_dir(node_id)
+    }
+
+    pub fn refresh_region_bucket_keys(
+        &mut self,
+        region: &metapb::Region,
+        buckets: Vec<Bucket>,
+        bucket_ranges: Option<Vec<BucketRange>>,
+        expect_buckets: Option<Buckets>,
+    ) -> u64 {
+        unimplemented!()
+    }
+
+    pub fn send_half_split_region_message(
+        &mut self,
+        region: &metapb::Region,
+        expected_bucket_ranges: Option<Vec<BucketRange>>,
+    ) {
+        unimplemented!()
     }
 }
 

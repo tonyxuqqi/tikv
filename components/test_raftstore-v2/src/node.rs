@@ -49,9 +49,9 @@ use tikv_util::{
 };
 
 use crate::{
-    cluster::ClusterV2,
+    cluster::Cluster,
     transport_simulate::{RaftStoreRouter, SimulateTransport, SnapshotRouter},
-    SimulatorV2,
+    Simulator,
 };
 
 #[derive(Clone)]
@@ -162,7 +162,7 @@ impl NodeCluster {
     }
 }
 
-impl SimulatorV2 for NodeCluster {
+impl Simulator for NodeCluster {
     fn get_node_ids(&self) -> HashSet<u64> {
         self.nodes.keys().cloned().collect()
     }
@@ -361,12 +361,30 @@ impl SimulatorV2 for NodeCluster {
 
         router.send_peer_msg(region_id, msg)
     }
+
+    fn get_router(&self, node_id: u64) -> Option<StoreRouter<RocksEngine, RaftTestEngine>> {
+        self.nodes.get(&node_id).map(|node| node.get_router())
+    }
+
+    fn get_snap_dir(&self, node_id: u64) -> String {
+        self.trans.core.lock().unwrap().snap_paths[&node_id]
+            .root_path()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
 }
 
-pub fn new_node_cluster(id: u64, count: usize) -> ClusterV2<NodeCluster> {
+pub fn new_node_cluster(id: u64, count: usize) -> Cluster<NodeCluster> {
     let pd_client = Arc::new(TestPdClient::new(id, false));
     let sim = Arc::new(RwLock::new(NodeCluster::new(Arc::clone(&pd_client))));
-    ClusterV2::new(id, count, sim, pd_client, ApiVersion::V1)
+    Cluster::new(id, count, sim, pd_client, ApiVersion::V1)
+}
+
+pub fn new_incompatible_node_cluster(id: u64, count: usize) -> Cluster<NodeCluster> {
+    let pd_client = Arc::new(TestPdClient::new(id, true));
+    let sim = Arc::new(RwLock::new(NodeCluster::new(Arc::clone(&pd_client))));
+    Cluster::new(id, count, sim, pd_client, ApiVersion::V1)
 }
 
 struct DummyLockManagerObserver {}

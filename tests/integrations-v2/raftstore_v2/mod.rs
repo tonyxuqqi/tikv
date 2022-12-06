@@ -3,3 +3,4 @@
 mod test_conf_change;
 mod test_single;
 mod test_split_tablet;
+mod test_transfer_leader;

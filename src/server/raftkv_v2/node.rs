@@ -11,7 +11,7 @@ use raftstore::store::{
     util::LockManagerNotifier, GlobalReplicationState, TabletSnapManager, Transport,
     RAFT_INIT_LOG_INDEX,
 };
-use raftstore_v2::{router::RaftRouter, Bootstrap, StoreSystem};
+use raftstore_v2::{router::RaftRouter, Bootstrap, StoreSystem, StoreRouter};
 use slog::{o, Logger};
 use tikv_util::{config::VersionTrack, worker::Worker};
 
@@ -206,5 +206,11 @@ where
         info!("stop raft store thread"; "store_id" => store_id);
         self.system.shutdown();
         self.bg_worker.stop();
+    }
+
+    /// Gets a transmission end of a channel which is used to send `Msg` to the
+    /// raftstore.
+    pub fn get_router(&self) -> StoreRouter<EK, ER> {
+        self.system.router()
     }
 }

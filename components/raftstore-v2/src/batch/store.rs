@@ -578,6 +578,13 @@ impl<EK: KvEngine, ER: RaftEngine> StoreSystem<EK, ER> {
             w.stop();
         }
     }
+
+    pub fn router(&self) -> StoreRouter<EK, ER> {
+        StoreRouter {
+            router: self.system.router().clone(),
+            logger: self.logger.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]

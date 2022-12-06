@@ -20,7 +20,9 @@ use grpcio::{ChannelBuilder, EnvBuilder, Environment, Error as GrpcError, Servic
 use grpcio_health::HealthService;
 use keys::Prefix;
 use kvproto::{
-    deadlock_grpc::create_deadlock, diagnosticspb_grpc::create_diagnostics, kvrpcpb::ApiVersion,
+    deadlock_grpc::create_deadlock,
+    diagnosticspb_grpc::create_diagnostics,
+    kvrpcpb::{ApiVersion, Context},
     raft_cmdpb::RaftCmdResponse,
 };
 use pd_client::PdClient;
@@ -44,7 +46,7 @@ use tikv::{
     },
     storage::{
         self,
-        kv::raft_extension,
+        kv::{raft_extension, SnapContext},
         txn::flow_controller::{EngineFlowController, FlowController},
         Engine, Storage,
     },
@@ -56,11 +58,12 @@ use tikv_util::{
     sys::thread::ThreadBuildWrapper,
     thd_name,
     worker::{Builder as WorkerBuilder, LazyWorker},
+    HandyRwLock,
 };
 use tokio::runtime::Builder as TokioBuilder;
 use txn_types::TxnExtraScheduler;
 
-use crate::{ClusterV2, RaftStoreRouter, SimulateTransport, SimulatorV2, SnapshotRouter};
+use crate::{Cluster, RaftStoreRouter, SimulateTransport, Simulator, SnapshotRouter};
 
 #[derive(Clone)]
 struct DummyReporter;
@@ -82,7 +85,7 @@ pub struct ServerMeta {
     server: Server<SimulateRaftExtension, PdStoreAddrResolver>,
     sim_router: SimulateStoreTransport,
     sim_trans: SimulateServerTransport,
-    raw_router: RaftRouter<RocksEngine, RaftTestEngine>,
+    raw_router: StoreRouter<RocksEngine, RaftTestEngine>,
     rsmeter_cleanup: Box<dyn FnOnce()>,
 }
 
@@ -181,7 +184,7 @@ impl ServerCluster {
         // todo: coprocessor host
         // todo: region info accessor
 
-        let raft_router = RaftRouter::new_with_store_meta(node_id, router, store_meta);
+        let raft_router = RaftRouter::new_with_store_meta(node_id, router.clone(), store_meta);
         // todo: simulate transport
         let sim_router = SimulateTransport::new(raft_router.clone());
         let mut raft_kv_v2 = RaftKvV2::new(raft_router.clone());
@@ -404,7 +407,7 @@ impl ServerCluster {
         self.metas.insert(
             node_id,
             ServerMeta {
-                raw_router: raft_router,
+                raw_router: router,
                 node,
                 server,
                 sim_router,
@@ -447,19 +450,31 @@ impl ServerCluster {
             }),
         )
     }
+
+    pub fn get_concurrency_manager(&self, node_id: u64) -> ConcurrencyManager {
+        self.concurrency_managers.get(&node_id).unwrap().clone()
+    }
 }
 
-impl SimulatorV2 for ServerCluster {
+impl Simulator for ServerCluster {
     fn get_node_ids(&self) -> HashSet<u64> {
         self.metas.keys().cloned().collect()
     }
 
     fn add_send_filter(&mut self, node_id: u64, filter: Box<dyn test_raftstore::Filter>) {
-        unimplemented!()
+        self.metas
+            .get_mut(&node_id)
+            .unwrap()
+            .sim_trans
+            .add_filter(filter);
     }
 
     fn clear_send_filters(&mut self, node_id: u64) {
-        unimplemented!()
+        self.metas
+            .get_mut(&node_id)
+            .unwrap()
+            .sim_trans
+            .clear_filters();
     }
 
     fn run_node(
@@ -487,7 +502,15 @@ impl SimulatorV2 for ServerCluster {
     }
 
     fn stop_node(&mut self, node_id: u64) {
-        unimplemented!()
+        if let Some(mut meta) = self.metas.remove(&node_id) {
+            meta.server.stop().unwrap();
+            meta.node.stop();
+            // // resolved ts worker started, let's stop it
+            // if let Some(worker) = meta.rts_worker {
+            //     worker.stop_worker();
+            // }
+            (meta.rsmeter_cleanup)();
+        }
     }
 
     fn snapshot(
@@ -525,10 +548,66 @@ impl SimulatorV2 for ServerCluster {
 
         router.send_peer_msg(region_id, msg)
     }
+
+    fn get_router(&self, node_id: u64) -> Option<StoreRouter<RocksEngine, RaftTestEngine>> {
+        self.metas.get(&node_id).map(|m| m.raw_router.clone())
+    }
+
+    fn get_snap_dir(&self, node_id: u64) -> String {
+        self.snap_mgrs[&node_id]
+            .root_path()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
 }
 
-pub fn new_server_cluster(id: u64, count: usize) -> ClusterV2<ServerCluster> {
+impl Cluster<ServerCluster> {
+    pub fn must_get_snapshot_of_region(&mut self, region_id: u64) -> RegionSnapshot<RocksSnapshot> {
+        let mut try_snapshot = || -> Option<RegionSnapshot<RocksSnapshot>> {
+            let leader = self.leader_of_region(region_id)?;
+            let store_id = leader.store_id;
+            let epoch = self.get_region_epoch(region_id);
+            let mut ctx = Context::default();
+            ctx.set_region_id(region_id);
+            ctx.set_peer(leader);
+            ctx.set_region_epoch(epoch);
+
+            let mut storage = self.sim.rl().storages.get(&store_id).unwrap().clone();
+            let snap_ctx = SnapContext {
+                pb_ctx: &ctx,
+                ..Default::default()
+            };
+            storage.snapshot(snap_ctx).ok()
+        };
+        for _ in 0..10 {
+            if let Some(snapshot) = try_snapshot() {
+                return snapshot;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        panic!("failed to get snapshot of region {}", region_id);
+    }
+}
+
+pub fn new_server_cluster(id: u64, count: usize) -> Cluster<ServerCluster> {
     let pd_client = Arc::new(TestPdClient::new(id, false));
     let sim = Arc::new(RwLock::new(ServerCluster::new(Arc::clone(&pd_client))));
-    ClusterV2::new(id, count, sim, pd_client, ApiVersion::V1)
+    Cluster::new(id, count, sim, pd_client, ApiVersion::V1)
+}
+
+pub fn new_incompatible_server_cluster(id: u64, count: usize) -> Cluster<ServerCluster> {
+    let pd_client = Arc::new(TestPdClient::new(id, true));
+    let sim = Arc::new(RwLock::new(ServerCluster::new(Arc::clone(&pd_client))));
+    Cluster::new(id, count, sim, pd_client, ApiVersion::V1)
+}
+
+pub fn new_server_cluster_with_api_ver(
+    id: u64,
+    count: usize,
+    api_ver: ApiVersion,
+) -> Cluster<ServerCluster> {
+    let pd_client = Arc::new(TestPdClient::new(id, false));
+    let sim = Arc::new(RwLock::new(ServerCluster::new(Arc::clone(&pd_client))));
+    Cluster::new(id, count, sim, pd_client, api_ver)
 }
