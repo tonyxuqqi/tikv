@@ -250,6 +250,7 @@ impl Simulator for NodeCluster {
             simulate_trans.clone(),
             &raft_router,
             snap_mgr.clone(),
+            cm,
             Arc::new(DummyLockManagerObserver {}),
         )?;
         assert!(

@@ -383,6 +383,7 @@ impl ServerCluster {
             simulate_trans.clone(),
             &raft_router,
             snap_mgr.clone(),
+            concurrency_manager.clone(),
             Arc::new(role_change_notifier),
         )?;
         assert!(node_id == 0 || node_id == node.id());
