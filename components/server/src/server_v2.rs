@@ -745,6 +745,7 @@ impl<ER: RaftEngine> TikvServer<ER> {
             server.transport(),
             &raft_router,
             snap_mgr,
+            self.concurrency_manager.clone(),
             Arc::new(role_change_notifier),
         )
         .unwrap_or_else(|e| fatal!("failed to start node: {}", e));
