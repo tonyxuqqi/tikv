@@ -226,7 +226,7 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
             PeerTick::CheckMerge => unimp!(tick),
             PeerTick::CheckPeerStaleState => unimp!(tick),
             PeerTick::CheckLeaderLease => unimp!(tick),
-            PeerTick::ReactivateMemoryLock => unimp!(tick),
+            PeerTick::ReactivateMemoryLock => self.on_reactivate_memory_lock_tick(),
             PeerTick::ReportBuckets => unimp!(tick),
             PeerTick::CheckLongUncommitted => unimp!(tick),
         }
@@ -323,7 +323,6 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
     }
 
     pub fn register_reactivate_memory_lock_tick(&mut self) {
-        self.fsm.reactivate_memory_lock_ticks = 0;
-        self.schedule_tick(PeerTick::ReactivateMemoryLock)
+        self.schedule_tick(PeerTick::ReactivateMemoryLock);
     }
 }
