@@ -102,7 +102,16 @@ impl<EK: KvEngine, ER: RaftEngine> RaftExtension for RouterWrap<EK, ER> {
     }
 
     #[inline]
-    fn report_snapshot_status(&self, _region_id: u64, _to_peer_id: u64, _status: SnapshotStatus) {
+    fn report_snapshot_status(&self, region_id: u64, to_peer_id: u64, status: SnapshotStatus) {
+        info!("snapshot report"; "region_id" =>region_id, "to_peer_id" => to_peer_id, "status" => ?status );
+        let msg = PeerMsg::SnapshotReportStatus {
+            region_id,
+            to_peer_id,
+            status,
+        };
+        if let Err(e) = self.router.send_peer_msg(region_id, msg) {
+            error!("failed to send peer message"; "region_id" => region_id, "err" => ?e);
+        }
         // TODO
     }
 

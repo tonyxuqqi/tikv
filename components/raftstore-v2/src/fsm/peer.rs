@@ -278,6 +278,12 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
                     Some(sr.ch),
                     &sr.source,
                 ),
+                PeerMsg::SnapshotReportStatus {
+                    to_peer_id, status, ..
+                } => self
+                    .fsm
+                    .peer_mut()
+                    .report_snapshot_status(to_peer_id, status),
                 #[cfg(feature = "testexport")]
                 PeerMsg::WaitFlush(ch) => self.fsm.peer_mut().on_wait_flush(ch),
             }

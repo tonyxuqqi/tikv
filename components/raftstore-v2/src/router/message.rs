@@ -5,7 +5,7 @@ use std::fmt;
 
 use engine_traits::Snapshot;
 use kvproto::{metapb::RegionEpoch, raft_cmdpb::RaftCmdRequest, raft_serverpb::RaftMessage};
-use raft::eraftpb::Snapshot as RaftSnapshot;
+use raft::{eraftpb::Snapshot as RaftSnapshot, SnapshotStatus};
 use raftstore::store::{metrics::RaftEventDurationType, FetchedLogs, GenSnapRes};
 use tikv_util::time::Instant;
 
@@ -144,6 +144,17 @@ pub enum PeerMsg {
     /// A message that used to check if a flush is happened.
     #[cfg(feature = "testexport")]
     WaitFlush(super::FlushChannel),
+
+    // A message that used to report status status after sending snapshot.
+    SnapshotReportStatus {
+        region_id: u64,
+        to_peer_id: u64,
+        status: SnapshotStatus,
+    },
+    // /// Message that can't be lost but rarely created. If they are lost, real
+    // /// bad things happen like some peers will be considered dead in the
+    // /// group.
+    // SignificantMsg(SignificantMsg<EK::Snapshot>),
 }
 
 impl PeerMsg {
@@ -206,6 +217,15 @@ impl fmt::Debug for PeerMsg {
             PeerMsg::SplitRegion(_) => write!(fmt, "SplitRegion"),
             #[cfg(feature = "testexport")]
             PeerMsg::WaitFlush(_) => write!(fmt, "FlushMessages"),
+            PeerMsg::SnapshotReportStatus {
+                region_id,
+                to_peer_id,
+                status,
+            } => write!(
+                fmt,
+                "snapshot report status, region_id {}, peer_id {}, status {:?}",
+                region_id, to_peer_id, status
+            ),
         }
     }
 }

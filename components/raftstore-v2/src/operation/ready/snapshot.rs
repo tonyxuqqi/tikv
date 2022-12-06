@@ -31,7 +31,7 @@ use std::{
 use engine_traits::{KvEngine, OpenOptions, RaftEngine, TabletFactory};
 use kvproto::raft_serverpb::{PeerState, RaftLocalState, RaftSnapshotData, RegionLocalState};
 use protobuf::Message;
-use raft::eraftpb::Snapshot;
+use raft::{eraftpb::Snapshot, SnapshotStatus};
 use raftstore::store::{
     metrics::STORE_SNAPSHOT_VALIDATION_FAILURE_COUNTER, GenSnapRes, ReadTask, TabletSnapKey,
     TabletSnapManager, Transport, WriteTask,
@@ -120,23 +120,26 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         }
     }
 
-    /// *
-    ///
-    /// //     let suffix = self.storage().raft_state().last_index;
-    ///     let region_id = self.storage().get_region_id();
-    ///     let tablet = ctx
-    ///         .tablet_factory
-    ///         .open_tablet(region_id, Some(suffix), OpenOptions::default())
-    ///         .unwrap();
-    ///     self.tablet_mut().set(tablet);
-    ///     {
-    ///         let mut meta = ctx.store_meta.lock().unwrap();
-    ///         meta.readers
-    ///             .insert(self.region_id(), self.generate_read_delegate());
-    ///         meta.tablet_caches
-    ///             .insert(self.region_id(), self.tablet().clone());
-    ///     }
-    ///     self.activate(ctx);
+    pub fn report_snapshot_status(&mut self, to_peer_id: u64, status: SnapshotStatus) {
+        let to_peer = match self.peer_from_cache(to_peer_id) {
+            Some(peer) => peer,
+            None => {
+                warn!( self.logger,
+                    "peer not found, ignore snapshot status";
+                    "to_peer_id" => to_peer_id,
+                    "status" => ?status
+                );
+                return;
+            }
+        };
+        info!(
+            self.logger,
+            "report snapshot status";
+            "to" => to_peer_id,
+            "status" => ?status,
+        );
+        self.raft_group_mut().report_snapshot(to_peer_id, status);
+    }
 
     pub fn on_applied_snapshot<T: Transport>(&mut self, ctx: &mut StoreContext<EK, ER, T>) {
         let persisted_index = self.raft_group().raft.raft_log.persisted;
