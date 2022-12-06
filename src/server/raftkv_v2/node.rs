@@ -87,6 +87,7 @@ where
         trans: T,
         router: &RaftRouter<EK, ER>,
         snap_mgr: TabletSnapManager,
+        concurrency_manager: ConcurrencyManager,
         lock_manager_observer: Arc<dyn LockManagerNotifier>,
     ) -> Result<()>
     where
@@ -120,7 +121,14 @@ where
         let status = self.pd_client.put_store(self.store.clone())?;
         self.load_all_stores(status);
 
-        self.start_store(raft_engine, trans, router, snap_mgr, lock_manager_observer)?;
+        self.start_store(
+            raft_engine,
+            trans,
+            router,
+            snap_mgr,
+            concurrency_manager,
+            lock_manager_observer,
+        )?;
 
         Ok(())
     }
@@ -164,6 +172,7 @@ where
         trans: T,
         router: &RaftRouter<EK, ER>,
         snap_mgr: TabletSnapManager,
+        concurrency_manager: ConcurrencyManager,
         lock_manager_observer: Arc<dyn LockManagerNotifier>,
     ) -> Result<()>
     where
@@ -177,11 +186,6 @@ where
         }
         self.has_started = true;
         let cfg = self.store_cfg.clone();
-
-        // Initialize concurrency manager
-        let latest_ts =
-            block_on(self.pd_client.get_tso()).expect("failed to get timestamp from PD");
-        let concurrency_manager = ConcurrencyManager::new(latest_ts);
 
         self.system.start(
             store_id,
