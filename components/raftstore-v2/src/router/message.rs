@@ -151,10 +151,6 @@ pub enum PeerMsg {
         to_peer_id: u64,
         status: SnapshotStatus,
     },
-    // /// Message that can't be lost but rarely created. If they are lost, real
-    // /// bad things happen like some peers will be considered dead in the
-    // /// group.
-    // SignificantMsg(SignificantMsg<EK::Snapshot>),
 }
 
 impl PeerMsg {

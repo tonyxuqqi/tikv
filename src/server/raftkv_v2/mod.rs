@@ -112,7 +112,6 @@ impl<EK: KvEngine, ER: RaftEngine> RaftExtension for RouterWrap<EK, ER> {
         if let Err(e) = self.router.send_peer_msg(region_id, msg) {
             error!("failed to send peer message"; "region_id" => region_id, "err" => ?e);
         }
-        // TODO
     }
 
     #[inline]
