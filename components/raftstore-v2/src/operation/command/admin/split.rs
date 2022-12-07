@@ -300,12 +300,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             "regions" => ?res.regions,
         );
 
-        println!(
-            "on_ready_split_region, peer {}, regions {:?}",
-            self.peer().store_id,
-            res.regions,
-        );
-
         let derived = &res.regions[res.derived_index];
         let derived_epoch = derived.get_region_epoch().clone();
         let region_id = derived.get_id();

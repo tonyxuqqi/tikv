@@ -11,3 +11,4 @@ extern crate test;
 extern crate tikv_util;
 
 mod raftstore_v2;
+mod server;

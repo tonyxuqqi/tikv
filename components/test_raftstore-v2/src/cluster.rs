@@ -14,7 +14,7 @@ use engine_rocks::{RocksDbVector, RocksEngine, RocksSnapshot};
 use engine_test::raft::RaftTestEngine;
 use engine_traits::{
     Iterable, KvEngine, MiscExt, OpenOptions, Peekable, RaftEngine, RaftEngineReadOnly,
-    RaftLogBatch, ReadOptions, TabletFactory, CF_DEFAULT,
+    RaftLogBatch, ReadOptions, SyncMutable, TabletFactory, CF_DEFAULT,
 };
 use file_system::IoRateLimiter;
 use futures::{compat::Future01CompatExt, executor::block_on, select, FutureExt};
@@ -834,6 +834,10 @@ impl<T: Simulator> Cluster<T> {
         self.get_region_with(key, |_| true)
     }
 
+    pub fn get_region_id(&self, key: &[u8]) -> u64 {
+        self.get_region(key).get_id()
+    }
+
     pub fn get_region_epoch(&self, region_id: u64) -> RegionEpoch {
         block_on(self.pd_client.get_region_by_id(region_id))
             .unwrap()
@@ -1038,6 +1042,13 @@ impl<T: Simulator> Cluster<T> {
             }
             self.transfer_leader(region_id, leader.clone());
         }
+    }
+
+    pub fn try_transfer_leader(&mut self, region_id: u64, leader: metapb::Peer) -> RaftCmdResponse {
+        let epoch = self.get_region_epoch(region_id);
+        let transfer_leader = new_admin_request(region_id, &epoch, new_transfer_leader_cmd(leader));
+        self.call_command_on_leader(transfer_leader, Duration::from_secs(5))
+            .unwrap()
     }
 
     // Get region ids of all opened tablets in a store
@@ -1247,6 +1258,27 @@ impl<T: Simulator> Cluster<T> {
     ) {
         unimplemented!()
     }
+
+    pub fn shutdown(&mut self) {
+        debug!("about to shutdown cluster");
+        let keys = match self.sim.read() {
+            Ok(s) => s.get_node_ids(),
+            Err(_) => {
+                safe_panic!("failed to acquire read lock");
+                // Leave the resource to avoid double panic.
+                return;
+            }
+        };
+        for id in keys {
+            self.stop_node(id);
+        }
+        self.leaders.clear();
+        self.store_metas.clear();
+        // for sst_worker in self.sst_workers.drain(..) {
+        //     sst_worker.stop_worker();
+        // }
+        debug!("all nodes are shut down.");
+    }
 }
 
 pub fn bootstrap_store<ER: RaftEngine>(
@@ -1335,6 +1367,49 @@ impl Peekable for WrapFactory {
         cf: &str,
         key: &[u8],
     ) -> engine_traits::Result<Option<M>> {
+        unimplemented!()
+    }
+}
+
+impl SyncMutable for WrapFactory {
+    fn put(&self, key: &[u8], value: &[u8]) -> engine_traits::Result<()> {
+        match self.get_tablet(key) {
+            Some(tablet) => tablet.put(key, value),
+            _ => unimplemented!(),
+        }
+    }
+
+    fn put_cf(&self, cf: &str, key: &[u8], value: &[u8]) -> engine_traits::Result<()> {
+        match self.get_tablet(key) {
+            Some(tablet) => tablet.put_cf(cf, key, value),
+            _ => unimplemented!(),
+        }
+    }
+
+    fn delete(&self, key: &[u8]) -> engine_traits::Result<()> {
+        match self.get_tablet(key) {
+            Some(tablet) => tablet.delete(key),
+            _ => unimplemented!(),
+        }
+    }
+
+    fn delete_cf(&self, cf: &str, key: &[u8]) -> engine_traits::Result<()> {
+        match self.get_tablet(key) {
+            Some(tablet) => tablet.delete_cf(cf, key),
+            _ => unimplemented!(),
+        }
+    }
+
+    fn delete_range(&self, begin_key: &[u8], end_key: &[u8]) -> engine_traits::Result<()> {
+        unimplemented!()
+    }
+
+    fn delete_range_cf(
+        &self,
+        cf: &str,
+        begin_key: &[u8],
+        end_key: &[u8],
+    ) -> engine_traits::Result<()> {
         unimplemented!()
     }
 }

@@ -21,9 +21,12 @@ use grpcio_health::HealthService;
 use keys::Prefix;
 use kvproto::{
     deadlock_grpc::create_deadlock,
+    debugpb_grpc::DebugClient,
     diagnosticspb_grpc::create_diagnostics,
     kvrpcpb::{ApiVersion, Context},
+    metapb,
     raft_cmdpb::RaftCmdResponse,
+    tikvpb_grpc::TikvClient,
 };
 use pd_client::PdClient;
 use raftstore::{
@@ -145,6 +148,10 @@ impl ServerCluster {
             txn_extra_schedulers: HashMap::default(),
             causal_ts_providers: HashMap::default(),
         }
+    }
+
+    pub fn get_addr(&self, node_id: u64) -> String {
+        self.addrs.get(node_id).unwrap()
     }
 
     pub fn run_node_impl<F: KvFormat>(
@@ -611,4 +618,72 @@ pub fn new_server_cluster_with_api_ver(
     let pd_client = Arc::new(TestPdClient::new(id, false));
     let sim = Arc::new(RwLock::new(ServerCluster::new(Arc::clone(&pd_client))));
     Cluster::new(id, count, sim, pd_client, api_ver)
+}
+
+pub fn must_new_cluster_and_kv_client() -> (Cluster<ServerCluster>, TikvClient, Context) {
+    must_new_cluster_and_kv_client_mul(1)
+}
+
+pub fn must_new_cluster_and_kv_client_mul(
+    count: usize,
+) -> (Cluster<ServerCluster>, TikvClient, Context) {
+    let (cluster, leader, ctx) = must_new_cluster_mul(count);
+
+    let env = Arc::new(Environment::new(1));
+    let channel =
+        ChannelBuilder::new(env).connect(&cluster.sim.rl().get_addr(leader.get_store_id()));
+    let client = TikvClient::new(channel);
+
+    (cluster, client, ctx)
+}
+pub fn must_new_cluster_mul(count: usize) -> (Cluster<ServerCluster>, metapb::Peer, Context) {
+    must_new_and_configure_cluster_mul(count, |_| ())
+}
+
+fn must_new_and_configure_cluster_mul(
+    count: usize,
+    mut configure: impl FnMut(&mut Cluster<ServerCluster>),
+) -> (Cluster<ServerCluster>, metapb::Peer, Context) {
+    let mut cluster = new_server_cluster(0, count);
+    configure(&mut cluster);
+    cluster.run();
+    let region_id = 1;
+    let leader = cluster.leader_of_region(region_id).unwrap();
+    let epoch = cluster.get_region_epoch(region_id);
+    let mut ctx = Context::default();
+    ctx.set_region_id(region_id);
+    ctx.set_peer(leader.clone());
+    ctx.set_region_epoch(epoch);
+
+    (cluster, leader, ctx)
+}
+
+pub fn must_new_and_configure_cluster_and_kv_client(
+    configure: impl FnMut(&mut Cluster<ServerCluster>),
+) -> (Cluster<ServerCluster>, TikvClient, Context) {
+    let (cluster, leader, ctx) = must_new_and_configure_cluster(configure);
+
+    let env = Arc::new(Environment::new(1));
+    let channel =
+        ChannelBuilder::new(env).connect(&cluster.sim.rl().get_addr(leader.get_store_id()));
+    let client = TikvClient::new(channel);
+
+    (cluster, client, ctx)
+}
+
+pub fn must_new_and_configure_cluster(
+    configure: impl FnMut(&mut Cluster<ServerCluster>),
+) -> (Cluster<ServerCluster>, metapb::Peer, Context) {
+    must_new_and_configure_cluster_mul(1, configure)
+}
+
+pub fn must_new_cluster_and_debug_client() -> (Cluster<ServerCluster>, DebugClient, u64) {
+    let (cluster, leader, _) = must_new_cluster_mul(1);
+
+    let env = Arc::new(Environment::new(1));
+    let channel =
+        ChannelBuilder::new(env).connect(&cluster.sim.rl().get_addr(leader.get_store_id()));
+    let client = DebugClient::new(channel);
+
+    (cluster, client, leader.get_store_id())
 }

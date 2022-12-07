@@ -1941,7 +1941,6 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> StoreFsmDelegate<'a, EK, ER
         });
 
         let region_id = msg.msg.get_region_id();
-        println!("on_raft_message {:?}", msg.msg);
         let msg = match self.ctx.router.send(region_id, PeerMsg::RaftMessage(msg)) {
             Ok(()) => {
                 forwarded.set(true);
