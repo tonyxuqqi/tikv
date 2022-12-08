@@ -7,6 +7,7 @@ use std::{
 
 use engine_traits::{self, IterOptions, Iterable, Peekable, ReadOptions, Result, Snapshot};
 use rocksdb::{rocksdb_options::UnsafeSnap, DBIterator, DB};
+use tikv_util::info;
 
 use crate::{
     db_vector::RocksDbVector, options::RocksReadOptions, r2e, util::get_cf_handle,
@@ -42,6 +43,12 @@ impl Debug for RocksSnapshot {
 
 impl Drop for RocksSnapshot {
     fn drop(&mut self) {
+        if Arc::strong_count(&self.db) <= 1 { 
+            info!("Snapshot drop";
+                "Path" => self.db.path(),
+                "ref_count" => Arc::strong_count(&self.db) -1,
+            );
+        }
         unsafe {
             self.db.release_snap(&self.snap);
         }

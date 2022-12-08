@@ -176,9 +176,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     .insert(self.region_id(), self.generate_read_delegate());
                 meta.tablet_caches
                     .insert(self.region_id(), self.tablet().clone());
+                meta.region_read_progress
+                    .insert(self.region_id(), self.read_progress().clone());
             }
             self.activate(ctx);
-            info!(self.logger, "apply tablet snapshot completely");
+            info!(self.logger, "apply tablet snapshot completely";
+                  "tablet_path" => self.tablet().cache().unwrap().path());
         }
     }
 }

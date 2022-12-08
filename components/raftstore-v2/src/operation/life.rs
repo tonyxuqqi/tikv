@@ -344,6 +344,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
 
         // for demo purpose only. It should be done in tablet GC
         ctx.tablet_factory.destroy_tablet(self.region_id(), 0);
+        let mut meta = ctx.store_meta.lock().unwrap();
+        meta.remove_region(self.region_id()); 
         // TODO: close apply mailbox.
     }
 }

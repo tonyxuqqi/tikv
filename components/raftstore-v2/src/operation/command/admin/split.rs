@@ -344,6 +344,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 RegionChangeReason::Split,
                 res.tablet_index,
             );
+            meta.tablet_caches
+                .insert(self.region_id(), self.tablet().clone());
         }
 
         self.post_split();

@@ -6,6 +6,7 @@ use engine_traits::{
     IterOptions, Iterable, KvEngine, Peekable, ReadOptions, Result, SyncMutable, TabletAccessor,
 };
 use rocksdb::{DBIterator, Writable, DB};
+use tikv_util::info;
 
 use crate::{
     db_vector::RocksDbVector,
@@ -27,6 +28,17 @@ pub struct RocksEngine {
     db: Arc<DB>,
     shared_block_cache: bool,
     support_multi_batch_write: bool,
+}
+
+impl Drop for RocksEngine {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.db) <= 1 {
+            info!(
+                "the db is going to be deleted.";
+                 "path" => self.db.path(),
+            );
+        }
+    }
 }
 
 impl RocksEngine {
