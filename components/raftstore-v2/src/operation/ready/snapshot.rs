@@ -385,16 +385,6 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
         true
     }
 
-    pub fn after_applied_snapshot(&mut self) {
-        let mut entry_storage = self.entry_storage_mut();
-        let term = entry_storage.get_truncate_term();
-        let index = entry_storage.get_truncate_index();
-        entry_storage.set_applied_term(term);
-        entry_storage.set_last_term(term);
-        entry_storage.apply_state_mut().set_applied_index(index);
-        self.region_state_mut().set_tablet_index(index);
-    }
-
     pub fn on_applied_snapshot(&mut self) {
         let mut entry = self.entry_storage_mut();
         let term = entry.truncated_term();

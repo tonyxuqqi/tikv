@@ -2019,11 +2019,6 @@ impl TabletSnapManager {
         self.path.join(suffix)
     }
 
-    pub fn get_recv_tablet_path(&self, key: &TabletSnapKey) -> PathBuf {
-        let prefix = format!("{}_{}", SNAP_REV_PREFIX, key);
-        self.path.join(prefix)
-    }
-
     pub fn final_recv_path(&self, key: &TabletSnapKey) -> PathBuf {
         let prefix = format!("{}_{}", SNAP_REV_PREFIX, key);
         self.path.join(prefix)
