@@ -260,13 +260,10 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
                 PeerMsg::Persisted {
                     peer_id,
                     ready_number,
-                    need_scheduled,
-                } => self.fsm.peer_mut().on_persisted(
-                    self.store_ctx,
-                    peer_id,
-                    ready_number,
-                    need_scheduled,
-                ),
+                } => self
+                    .fsm
+                    .peer_mut()
+                    .on_persisted(self.store_ctx, peer_id, ready_number),
                 PeerMsg::LogsFetched(fetched_logs) => {
                     self.fsm.peer_mut().on_logs_fetched(fetched_logs)
                 }
@@ -281,6 +278,12 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
                     Some(sr.ch),
                     &sr.source,
                 ),
+                PeerMsg::SnapshotReportStatus {
+                    to_peer_id, status, ..
+                } => self
+                    .fsm
+                    .peer_mut()
+                    .report_snapshot_status(to_peer_id, status),
                 #[cfg(feature = "testexport")]
                 PeerMsg::WaitFlush(ch) => self.fsm.peer_mut().on_wait_flush(ch),
             }
@@ -320,6 +323,6 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
     }
 
     pub fn register_reactivate_memory_lock_tick(&mut self) {
-        self.schedule_tick(PeerTick::ReactivateMemoryLock)
+        self.schedule_tick(PeerTick::ReactivateMemoryLock);
     }
 }

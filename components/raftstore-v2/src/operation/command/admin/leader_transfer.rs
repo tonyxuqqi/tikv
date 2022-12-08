@@ -268,6 +268,11 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
 
         for (id, pr) in progress.iter() {
             if pr.state == ProgressState::Snapshot {
+                info!(
+                    self.logger,
+                    "ready_to_transfer_leader failed due to pending snapshot";
+                    "peer_id" => id,
+                );
                 return Some("pending snapshot");
             }
             if *id == peer.id && index == 0 {

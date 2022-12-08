@@ -18,7 +18,7 @@ use raft::{eraftpb::Snapshot, GetEntriesContext};
 use tikv_util::{error, info, time::Instant, worker::Runnable};
 
 use crate::store::{
-    snap::TABLET_SNAPSHOT_VERSION,
+    snap::SNAPSHOT_VERSION_V2,
     util,
     worker::metrics::{SNAP_COUNTER, SNAP_HISTOGRAM},
     RaftlogFetchResult, TabletSnapKey, TabletSnapManager, MAX_INIT_ENTRY_COUNT,
@@ -120,7 +120,7 @@ impl<EK: KvEngine, ER: RaftEngine, N: AsyncReadNotifier> ReadRunner<EK, ER, N> {
     }
 
     fn generate_snap(&self, snap_key: &TabletSnapKey, tablet: EK) -> crate::Result<()> {
-        let checkpointer_path = self.snap_mgr().get_tablet_checkpointer_path(snap_key);
+        let checkpointer_path = self.snap_mgr().tablet_gen_path(snap_key);
         if checkpointer_path.as_path().exists() {
             // Remove the old checkpoint directly.
             std::fs::remove_dir_all(checkpointer_path.as_path())?;
@@ -216,7 +216,7 @@ where
                 // Set snapshot data.
                 let mut snap_data = RaftSnapshotData::default();
                 snap_data.set_region(region_state.get_region().clone());
-                snap_data.set_version(TABLET_SNAPSHOT_VERSION);
+                snap_data.set_version(SNAPSHOT_VERSION_V2);
                 snap_data.mut_meta().set_for_balance(for_balance);
                 snapshot.set_data(snap_data.write_to_bytes().unwrap().into());
 
@@ -228,6 +228,7 @@ where
                     println!("failed to create checkpointer, err:{:?}", e);
                     SNAP_COUNTER.generate.fail.inc();
                 } else {
+                    info!("generate_snap succeeded"; "region_id" => region_id);
                     SNAP_COUNTER.generate.success.inc();
                     SNAP_HISTOGRAM
                         .generate

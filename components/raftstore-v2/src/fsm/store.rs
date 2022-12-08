@@ -50,6 +50,12 @@ where
             region_read_progress: RegionReadProgressRegistry::new(),
         }
     }
+
+    pub fn remove_region(&mut self, region_id: u64) {
+        self.tablet_caches.remove(&region_id);
+        self.readers.remove(&region_id);
+        self.region_read_progress.remove(&region_id);
+    }
 }
 
 impl<E: KvEngine> Default for StoreMeta<E> {

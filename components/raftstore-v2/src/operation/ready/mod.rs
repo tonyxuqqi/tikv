@@ -355,6 +355,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         // Always sending snapshot task after apply task, so it gets latest
         // snapshot.
         if let Some(gen_task) = self.storage_mut().take_gen_snap_task() {
+            info!(self.logger, "sending ApplyTask::Snapshot");
             self.apply_scheduler().send(ApplyTask::Snapshot(gen_task));
         }
 
@@ -417,33 +418,31 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         ctx: &mut StoreContext<EK, ER, T>,
         peer_id: u64,
         ready_number: u64,
-        need_scheduled: bool,
     ) {
         if peer_id != self.peer_id() {
             error!(self.logger, "peer id not matched"; "persisted_peer_id" => peer_id, "persisted_number" => ready_number);
             return;
         }
-        if need_scheduled {
-            self.storage_mut().after_applied_snapshot();
-            let suffix = self.storage().raft_state().last_index;
-            let region_id = self.storage().get_region_id();
-            let tablet = ctx
-                .tablet_factory
-                .open_tablet(region_id, Some(suffix), OpenOptions::default())
-                .unwrap();
-            self.tablet_mut().set(tablet);
-            {
-                let mut meta = ctx.store_meta.lock().unwrap();
-                meta.readers
-                    .insert(self.region_id(), self.generate_read_delegate());
-                meta.tablet_caches
-                    .insert(self.region_id(), self.tablet().clone());
-            }
-            self.activate(ctx);
-        }
-        let persisted_message = self
-            .async_writer
-            .on_persisted(ctx, ready_number, &self.logger);
+        // if need_scheduled {
+        //     let suffix = self.storage().raft_state().last_index;
+        //     let region_id = self.storage().get_region_id();
+        //     let tablet = ctx
+        //         .tablet_factory
+        //         .open_tablet(region_id, Some(suffix), OpenOptions::default())
+        //         .unwrap();
+        //     self.tablet_mut().set(tablet);
+        //     {
+        //         let mut meta = ctx.store_meta.lock().unwrap();
+        //         meta.readers
+        //             .insert(self.region_id(), self.generate_read_delegate());
+        //         meta.tablet_caches
+        //             .insert(self.region_id(), self.tablet().clone());
+        //     }
+        //     self.activate(ctx);
+        // }
+        let (persisted_message, has_snapshot) =
+            self.async_writer
+                .on_persisted(ctx, ready_number, &self.logger);
         for msgs in persisted_message {
             for msg in msgs {
                 self.send_raft_message(ctx, msg);
@@ -451,14 +450,18 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         }
         let persisted_number = self.async_writer.persisted_number();
         self.raft_group_mut().on_persist_ready(persisted_number);
-        if need_scheduled {
-            let last_applied_index = self.entry_storage().truncated_index();
-            self.raft_group_mut().advance_apply_to(last_applied_index);
-        }
+        // if need_scheduled {
+        //     let last_applied_index = self.entry_storage().truncated_index();
+        //     self.raft_group_mut().advance_apply_to(last_applied_index);
+        // }
         let persisted_index = self.raft_group().raft.raft_log.persisted;
         self.storage_mut()
             .entry_storage_mut()
             .update_cache_persisted(persisted_index);
+        if has_snapshot {
+            self.on_applied_snapshot(ctx);
+        }
+
         if !self.destroy_progress().started() {
             // We may need to check if there is persisted committed logs.
             self.set_has_ready();

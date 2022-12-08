@@ -233,6 +233,11 @@ pub fn get_cf_pending_compaction_bytes(engine: &DB, handle: &CFHandle) -> Option
     engine.get_property_int_cf(handle, ROCKSDB_PENDING_COMPACTION_BYTES)
 }
 
+/// Destroy the engine
+pub fn destroy_engine(opts: RocksDbOptions, path: &str) -> Result<()> {
+    DB::destroy(&opts.into_raw(), path).map_err(r2e)
+}
+
 pub struct FixedSuffixSliceTransform {
     pub suffix_len: usize,
 }

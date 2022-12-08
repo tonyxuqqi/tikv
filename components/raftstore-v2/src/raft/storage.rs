@@ -553,11 +553,10 @@ mod tests {
         assert_ne!(1, s.entry_storage().last_term());
         assert_ne!(1, s.entry_storage().applied_term());
         assert_ne!(10, s.region_state().get_tablet_index());
-        assert!(task.after_write_hook.is_some());
+        // assert!(task.after_write_hook.is_some());
         // todo: load tablet should be failed because the snapshot is not correct.
-        task.after_write_hook.unwrap()(1).unwrap_err();
 
-        s.after_applied_snapshot();
+        s.on_applied_snapshot();
         assert_eq!(10, s.entry_storage().applied_index());
         assert_eq!(1, s.entry_storage().last_term());
         assert_eq!(1, s.entry_storage().applied_term());
@@ -629,7 +628,7 @@ mod tests {
         assert_eq!(snap.get_metadata().get_term(), 0);
         assert_eq!(snap.get_data().is_empty(), false);
         let snap_key = TabletSnapKey::from_region_snap(4, 7, &snap);
-        let checkpointer_path = mgr.get_tablet_checkpointer_path(&snap_key);
+        let checkpointer_path = mgr.tablet_gen_path(&snap_key);
         assert!(checkpointer_path.exists());
 
         // Test cancel snapshot

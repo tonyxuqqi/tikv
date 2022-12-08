@@ -202,7 +202,7 @@ impl RunningState {
         cfg: Arc<VersionTrack<Config>>,
         transport: TestTransport,
         logger: &Logger,
-    ) -> (TestRouter, Self) {
+    ) -> (TestRouter, TabletSnapManager, Self) {
         let cf_opts = ALL_CFS
             .iter()
             .copied()
@@ -254,7 +254,7 @@ impl RunningState {
                 pd_client.clone(),
                 router.store_router(),
                 store_meta.clone(),
-                snap_mgr,
+                snap_mgr.clone(),
                 ConcurrencyManager::new(TimeStamp::zero()), // todo
                 None,
                 Arc::new(DummyLockManagerObserver {}),
@@ -271,7 +271,7 @@ impl RunningState {
             store_meta,
             root_region_id: region_id,
         };
-        (TestRouter(router), state)
+        (TestRouter(router), snap_mgr, state)
     }
 
     pub fn peer_id(&self, region_id: u64) -> Option<u64> {
@@ -295,6 +295,7 @@ pub struct TestNode {
     path: TempDir,
     running_state: Option<RunningState>,
     logger: Logger,
+    snap_mgr: Option<TabletSnapManager>,
 }
 
 impl TestNode {
@@ -305,14 +306,16 @@ impl TestNode {
             pd_client,
             path,
             running_state: None,
+            snap_mgr: None,
             logger,
         }
     }
 
     fn start(&mut self, cfg: Arc<VersionTrack<Config>>, trans: TestTransport) -> TestRouter {
-        let (router, state) =
+        let (router, snap_mgr, state) =
             RunningState::new(&self.pd_client, self.path.path(), cfg, trans, &self.logger);
         self.running_state = Some(state);
+        self.snap_mgr = Some(snap_mgr);
         router
     }
 
@@ -341,6 +344,10 @@ impl TestNode {
 
     pub fn running_state(&self) -> Option<&RunningState> {
         self.running_state.as_ref()
+    }
+
+    pub fn snap_mgr(&self) -> Option<&TabletSnapManager> {
+        self.snap_mgr.as_ref()
     }
 
     pub fn id(&self) -> u64 {
@@ -547,31 +554,16 @@ impl Cluster {
                             continue;
                         }
                     };
-                    let from_path = self
-                        .node(from_offset)
-                        .tablet_factory()
-                        .tablets_path()
-                        .as_path()
-                        .parent()
-                        .unwrap()
-                        .join("tablets_snap");
-                    let to_path = self
-                        .node(offset)
-                        .tablet_factory()
-                        .tablets_path()
-                        .as_path()
-                        .parent()
-                        .unwrap()
-                        .join("tablets_snap");
                     let key = TabletSnapKey::new(
                         region_id,
                         msg.get_to_peer().get_id(),
                         msg.get_message().get_snapshot().get_metadata().get_term(),
                         msg.get_message().get_snapshot().get_metadata().get_index(),
                     );
-
-                    let gen_path = from_path.as_path().join(key.get_gen_suffix());
-                    let recv_path = to_path.as_path().join(key.get_recv_suffix());
+                    let from_snap_mgr = self.node(from_offset).snap_mgr().unwrap();
+                    let to_snap_mgr = self.node(offset).snap_mgr().unwrap();
+                    let gen_path = from_snap_mgr.tablet_gen_path(&key);
+                    let recv_path = to_snap_mgr.final_recv_path(&key);
                     assert!(gen_path.exists());
                     std::fs::rename(gen_path, recv_path.clone()).unwrap();
                     assert!(recv_path.exists());

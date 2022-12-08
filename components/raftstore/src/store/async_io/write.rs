@@ -8,7 +8,6 @@
 //! raft db and then invoking callback or sending msgs if any.
 
 use std::{
-    collections::HashSet,
     fmt, mem,
     sync::Arc,
     thread::{self, JoinHandle},
@@ -17,8 +16,7 @@ use std::{
 use collections::HashMap;
 use crossbeam::channel::{bounded, Receiver, Sender, TryRecvError};
 use engine_traits::{
-    KvEngine, PerfContext, PerfContextKind, RaftEngine, RaftLogBatch, Result as EResult,
-    WriteBatch, WriteOptions,
+    KvEngine, PerfContext, PerfContextKind, RaftEngine, RaftLogBatch, WriteBatch, WriteOptions,
 };
 use error_code::ErrorCodeExt;
 use fail::fail_point;
@@ -30,7 +28,7 @@ use raft::eraftpb::Entry;
 use tikv_util::{
     box_err,
     config::{Tracker, VersionTrack},
-    debug, error, info, slow_log,
+    debug, info, slow_log,
     sys::thread::StdThreadBuildWrapper,
     thd_name,
     time::{duration_to_sec, Instant},
@@ -59,7 +57,7 @@ const RAFT_WB_DEFAULT_SIZE: usize = 256 * 1024;
 
 /// Notify the event to the specified region.
 pub trait PersistedNotifier: Clone + Send + 'static {
-    fn notify(&self, region_id: u64, peer_id: u64, ready_number: u64, need_scheduled: bool);
+    fn notify(&self, region_id: u64, peer_id: u64, ready_number: u64);
 }
 
 impl<EK, ER> PersistedNotifier for RaftRouter<EK, ER>
@@ -67,7 +65,7 @@ where
     EK: KvEngine,
     ER: RaftEngine,
 {
-    fn notify(&self, region_id: u64, peer_id: u64, ready_number: u64, _: bool) {
+    fn notify(&self, region_id: u64, peer_id: u64, ready_number: u64) {
         if let Err(e) = self.force_send(
             region_id,
             PeerMsg::Persisted {
@@ -171,13 +169,14 @@ where
     ready_number: u64,
     pub send_time: Instant,
     pub raft_wb: Option<ER::LogBatch>,
-    pub after_write_hook: Option<Box<dyn FnOnce(u64) -> EResult<EK> + Send>>,
+    pub persisted_cb: Option<Box<dyn FnOnce() + Send>>,
     pub entries: Vec<Entry>,
     pub cut_logs: Option<(u64, u64)>,
     pub raft_state: Option<RaftLocalState>,
     pub extra_write: ExtraWrite<EK::WriteBatch>,
     pub messages: Vec<RaftMessage>,
     pub trackers: Vec<TimeTracker>,
+    pub has_snapshot: bool,
 }
 
 impl<EK, ER> WriteTask<EK, ER>
@@ -198,23 +197,9 @@ where
             extra_write: ExtraWrite::None,
             messages: vec![],
             trackers: vec![],
-            after_write_hook: None,
+            persisted_cb: None,
+            has_snapshot: false,
         }
-    }
-
-    pub fn on_after_write_to_kv_db(&mut self) -> bool {
-        if self.after_write_hook.is_some() {
-            let hook = std::mem::take(&mut self.after_write_hook).unwrap();
-            match hook(self.region_id) {
-                Ok(_) => return true,
-                Err(e) => {
-                    error!("load tablet failed";"error"=>?e,"region_id"=>self.region_id);
-                    println!("load tablet failed,err:{:?}", e);
-                    return false;
-                }
-            };
-        };
-        false
     }
 
     pub fn has_data(&self) -> bool {
@@ -242,13 +227,6 @@ where
         }
 
         Ok(())
-    }
-
-    pub fn add_after_write_hook(
-        &mut self,
-        hook: Option<Box<dyn FnOnce(u64) -> EResult<EK> + Send>>,
-    ) {
-        self.after_write_hook = hook;
     }
 }
 
@@ -387,6 +365,7 @@ where
     pub extra_batch_write: ExtraBatchWrite<EK::WriteBatch>,
     pub state_size: usize,
     pub tasks: Vec<WriteTask<EK, ER>>,
+    pub persisted_cbs: Vec<Box<dyn FnOnce() + Send>>,
     // region_id -> (peer_id, ready_number)
     pub readies: HashMap<u64, (u64, u64)>,
 }
@@ -404,6 +383,7 @@ where
             state_size: 0,
             tasks: vec![],
             readies: HashMap::default(),
+            persisted_cbs: vec![],
         }
     }
 
@@ -456,7 +436,9 @@ where
                 );
             }
         }
-
+        if let Some(v) = task.persisted_cb.take() {
+            self.persisted_cbs.push(v);
+        };
         self.tasks.push(task);
     }
 
@@ -524,14 +506,10 @@ where
         }
     }
 
-    fn after_write_to_kv_db(&mut self, metrics: &StoreWriteMetrics) -> Option<HashSet<u64>> {
-        let mut applied_regions = HashSet::new();
-        let now = std::time::Instant::now();
-        for task in &mut self.tasks {
-            if task.on_after_write_to_kv_db() {
-                applied_regions.insert(task.region_id);
-            }
-            if metrics.waterfall_metrics {
+    fn after_write_to_kv_db(&mut self, metrics: &StoreWriteMetrics) {
+        if metrics.waterfall_metrics {
+            let now = std::time::Instant::now();
+            for task in &self.tasks {
                 for tracker in &task.trackers {
                     tracker.observe(now, &metrics.wf_kvdb_end, |t| {
                         &mut t.metrics.wf_kvdb_end_nanos
@@ -539,7 +517,12 @@ where
                 }
             }
         }
-        Some(applied_regions)
+    }
+
+    fn after_write_all(&mut self) {
+        for hook in mem::take(&mut self.persisted_cbs) {
+            hook();
+        }
     }
 
     fn after_write_to_raft_db(&mut self, metrics: &StoreWriteMetrics) {
@@ -738,7 +721,7 @@ where
                 STORE_WRITE_KVDB_DURATION_HISTOGRAM.observe(write_kv_time);
             }
         }
-        let applied_regions = self.batch.after_write_to_kv_db(&self.metrics);
+        self.batch.after_write_to_kv_db(&self.metrics);
         fail_point!("raft_between_save");
 
         let mut write_raft_time = 0f64;
@@ -774,6 +757,7 @@ where
         fail_point!("raft_after_save");
 
         self.batch.after_write_to_raft_db(&self.metrics);
+        self.batch.after_write_all();
 
         fail_point!("raft_before_follower_send");
 
@@ -829,12 +813,11 @@ where
         let mut callback_time = 0f64;
         if notify {
             for (region_id, (peer_id, ready_number)) in &self.batch.readies {
-                let mut need_scheduled = false;
-                if let Some(regions) = &applied_regions {
-                    need_scheduled = regions.contains(region_id);
-                }
-                self.notifier
-                    .notify(*region_id, *peer_id, *ready_number, need_scheduled);
+                // let mut need_scheduled = false;
+                // if let Some(regions) = &applied_regions {
+                //     need_scheduled = regions.contains(region_id);
+                // }
+                self.notifier.notify(*region_id, *peer_id, *ready_number);
             }
             now = Instant::now();
             callback_time = duration_to_sec(now.saturating_duration_since(now2));
