@@ -492,7 +492,7 @@ pub fn copy_tablet_snapshot(
     sender_snap_mgr: &TabletSnapManager,
     recver_snap_mgr: &TabletSnapManager,
 ) -> Result<()> {
-    let sender_path = sender_snap_mgr.get_tablet_checkpointer_path(&key);
+    let sender_path = sender_snap_mgr.tablet_gen_path(&key);
     let files = fs::read_dir(&sender_path)?
         .map(|f| Ok(f?.path()))
         .filter(|f| f.is_ok() && f.as_ref().unwrap().is_file())
@@ -502,8 +502,8 @@ pub fn copy_tablet_snapshot(
     head.set_message(msg);
     head.set_data(usize::to_ne_bytes(SNAP_CHUNK_LEN).to_vec());
 
-    let recv_context = RecvTabletSnapContext::new(Some(head))?;
-    let recv_path = recver_snap_mgr.get_tmp_name_for_recv(&recv_context.key);
+    let recv_context = RecvTabletSnapContext::new(head)?;
+    let recv_path = recver_snap_mgr.tmp_recv_path(&recv_context.key);
     fs::create_dir_all(&recv_path)?;
 
     for path in files {
@@ -516,7 +516,7 @@ pub fn copy_tablet_snapshot(
         while io::copy(&mut sender_f, &mut recv_f)? != 0 {}
     }
 
-    let final_path = recver_snap_mgr.get_final_name_for_recv(&recv_context.key);
+    let final_path = recver_snap_mgr.final_recv_path(&recv_context.key);
     fs::rename(&recv_path, final_path)?;
     Ok(())
 }

@@ -4,7 +4,7 @@ use std::{
     collections::hash_map::Entry as MapEntry,
     result,
     sync::{Arc, Mutex, RwLock},
-    thread::{self, sleep},
+    thread::{self},
     time::Duration,
 };
 
@@ -18,7 +18,7 @@ use engine_traits::{
 };
 use file_system::IoRateLimiter;
 use futures::{compat::Future01CompatExt, executor::block_on, select, FutureExt};
-use keys::{data_key, Prefix, REGION_STATE_SUFFIX};
+use keys::{data_key, Prefix};
 use kvproto::{
     errorpb::Error as PbError,
     kvrpcpb::ApiVersion,
@@ -32,15 +32,15 @@ use kvproto::{
 use pd_client::PdClient;
 use raftstore::{
     store::{
-        cmd_resp, initial_region, region_meta::RegionMeta, util::check_key_in_region, Bucket,
-        BucketRange, Callback, RegionSnapshot, WriteResponse, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER,
+        cmd_resp, initial_region, util::check_key_in_region, Bucket, BucketRange, Callback,
+        RegionSnapshot, WriteResponse, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER,
     },
     Error, Result,
 };
 use raftstore_v2::{
     create_store_batch_system,
-    router::{DebugInfoChannel, PeerMsg, QueryResult, RaftRouter},
-    write_initial_states, SplitRegion, StoreMeta, StoreRouter, StoreSystem,
+    router::{PeerMsg, QueryResult},
+    write_initial_states, StoreMeta, StoreRouter, StoreSystem,
 };
 use slog::o;
 use tempfile::TempDir;
@@ -50,15 +50,15 @@ use test_raftstore::{
     new_peer, new_put_cf_cmd, new_region_detail_cmd, new_region_leader_cmd, new_request,
     new_snap_cmd, new_status_request, new_store, new_tikv_config_with_api_ver,
     new_transfer_leader_cmd, sleep_ms, Config, Filter, FilterFactory, PartitionFilterFactory,
-    RawEngine, TEST_CONFIG,
+    RawEngine,
 };
-use tikv::{config::TikvConfig, server::Result as ServerResult, storage::kv::ErrorInner};
+use tikv::server::Result as ServerResult;
 use tikv_util::{
     box_err, box_try, debug, error, safe_panic, thread_group::GroupProperties, time::Instant,
     timer::GLOBAL_TIMER_HANDLE, warn, HandyRwLock,
 };
 
-use crate::{node::NodeCluster, transport_simulate::RaftStoreRouter, util::create_test_engine};
+use crate::{transport_simulate::RaftStoreRouter, util::create_test_engine};
 
 // We simulate 3 or 5 nodes, each has a store.
 // Sometimes, we use fixed id to test, which means the id

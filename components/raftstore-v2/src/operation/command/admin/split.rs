@@ -266,18 +266,18 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
         // Remove the old write batch.
         self.write_batch_mut().take();
 
-        let (start_key, end_key) = (
-            enc_start_key(&regions[derived_index]),
-            enc_end_key(&regions[derived_index]),
-        );
-        let range1 = Range::new(&[], &start_key);
-        let range2 = Range::new(&end_key, &[0xFF, 0xFF]);
-        tablet
-            .delete_ranges_cfs(DeleteStrategy::DeleteFiles, &[range1, range2])
-            .unwrap();
-        tablet
-            .delete_ranges_cfs(DeleteStrategy::DeleteByRange, &[range1, range2])
-            .unwrap();
+        // let (start_key, end_key) = (
+        //     enc_start_key(&regions[derived_index]),
+        //     enc_end_key(&regions[derived_index]),
+        // );
+        // let range1 = Range::new(&[], &start_key);
+        // let range2 = Range::new(&end_key, &[0xFF, 0xFF]);
+        // tablet
+        //     .delete_ranges_cfs(DeleteStrategy::DeleteFiles, &[range1, range2])
+        //     .unwrap();
+        // tablet
+        //     .delete_ranges_cfs(DeleteStrategy::DeleteByRange, &[range1, range2])
+        //     .unwrap();
 
         self.publish_tablet(tablet);
 
@@ -438,18 +438,18 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 )
             });
 
-        let (start_key, end_key) = (
-            enc_start_key(&split_init.region),
-            enc_end_key(&split_init.region),
-        );
-        let range1 = Range::new(&[], &start_key);
-        let range2 = Range::new(&end_key, &[0xFF, 0xFF]);
-        tablet
-            .delete_ranges_cfs(DeleteStrategy::DeleteFiles, &[range1, range2])
-            .unwrap();
-        tablet
-            .delete_ranges_cfs(DeleteStrategy::DeleteByRange, &[range1, range2])
-            .unwrap();
+        // let (start_key, end_key) = (
+        //     enc_start_key(&split_init.region),
+        //     enc_end_key(&split_init.region),
+        // );
+        // let range1 = Range::new(&[], &start_key);
+        // let range2 = Range::new(&end_key, &[0xFF, 0xFF]);
+        // tablet
+        //     .delete_ranges_cfs(DeleteStrategy::DeleteFiles, &[range1, range2])
+        //     .unwrap();
+        // tablet
+        //     .delete_ranges_cfs(DeleteStrategy::DeleteByRange, &[range1, range2])
+        //     .unwrap();
 
         self.tablet_mut().set(tablet);
 

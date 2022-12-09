@@ -42,7 +42,7 @@ use test_raftstore::{
 use test_raftstore_v2::{
     must_new_and_configure_cluster, must_new_and_configure_cluster_and_kv_client,
     must_new_cluster_and_debug_client, must_new_cluster_and_kv_client, new_node_cluster,
-    new_server_cluster, ChannelTransport, Cluster, ServerCluster, SimulateTransport, Simulator,
+    new_server_cluster, ChannelTransport, Cluster, ServerCluster, SimulateTransport,
 };
 use tikv::{
     config::QuotaConfig,
@@ -55,11 +55,7 @@ use tikv::{
     },
     storage::txn::FLASHBACK_BATCH_SIZE,
 };
-use tikv_util::{
-    config::ReadableSize,
-    worker::{dummy_scheduler, LazyWorker},
-    HandyRwLock,
-};
+use tikv_util::{config::ReadableSize, HandyRwLock};
 use txn_types::{Key, Lock, LockType, TimeStamp};
 
 #[test]

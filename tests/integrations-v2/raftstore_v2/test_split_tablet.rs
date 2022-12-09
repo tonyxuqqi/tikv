@@ -65,6 +65,10 @@ where
     ];
 
     for (split_key, left_key, right_key) in tbls {
+        println!(
+            "split key {:?}, left key {:?}, right key {:?}",
+            split_key, left_key, right_key
+        );
         cluster.must_put(left_key, b"v1");
         cluster.must_put(right_key, b"v3");
 
