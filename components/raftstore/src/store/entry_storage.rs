@@ -1077,10 +1077,12 @@ impl<EK: KvEngine, ER: RaftEngine> EntryStorage<EK, ER> {
         if entries.is_empty() {
             return;
         }
-        debug!(
+        info!(
             "append entries";
             "region_id" => self.region_id,
             "peer_id" => self.peer_id,
+            "entries_first_index" => entries.first().unwrap().get_index(),
+            "entries_last_index" => entries.last().unwrap().get_index(),
             "count" => entries.len(),
         );
         let prev_last_index = self.raft_state.get_last_index();
