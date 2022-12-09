@@ -154,19 +154,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             self.schedule_apply_fsm(ctx);
             self.storage_mut().on_applied_snapshot();
 
-            // clean the raft engine (In V1 it's done in clear_meta);
-            let mut wb = self.entry_storage_mut().raft_engine().log_batch(10);
-            let region_id = self.region_id();
-            self.entry_storage_mut().raft_engine().clean(
-                region_id,
-                0,
-                &RaftLocalState::default(),
-                &mut wb,
-            );
-            self.entry_storage_mut()
-                .raft_engine()
-                .consume(&mut wb, false);
-
             self.raft_group_mut().advance_apply_to(persisted_index);
             self.read_progress_mut()
                 .update_applied_core(persisted_index);
@@ -432,6 +419,18 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
 
         self.entry_storage_mut().set_truncated_index(last_index);
         self.entry_storage_mut().set_truncated_term(last_term);
+
+        // clean the raft engine (In V1 it's done in clear_meta);
+        let mut wb = self.entry_storage_mut().raft_engine().log_batch(10);
+        self.entry_storage_mut().raft_engine().clean(
+            region_id,
+            0,
+            &RaftLocalState::default(),
+            &mut wb,
+        );
+        self.entry_storage_mut()
+            .raft_engine()
+            .consume(&mut wb, false);
 
         info!(self.logger(),
             "apply snapshot with state ok";

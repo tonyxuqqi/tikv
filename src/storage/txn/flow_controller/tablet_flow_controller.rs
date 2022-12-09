@@ -152,6 +152,9 @@ impl FlowInfoDispatcher {
                             }
                         };
                     let msg = flow_info_receiver.recv_deadline(deadline);
+                    if !enabled {
+                        continue;
+                    }
                     match msg.clone() {
                         Ok(FlowInfo::L0(_cf, _, region_id, suffix))
                         | Ok(FlowInfo::L0Intra(_cf, _, region_id, suffix))
