@@ -24,7 +24,7 @@ use raftstore::{
     },
     Error, Result,
 };
-use slog::{debug, Logger};
+use slog::{debug, Logger, warn};
 use tikv_util::{
     box_err,
     codec::number::decode_u64,
@@ -101,6 +101,8 @@ where
                 Err(e) => Err(e),
             }
         } else {
+            warn!(&self.logger, "pre_propose_raft_command failed";
+                  "region_id" => req.get_header().get_region_id());
             Err(Error::RegionNotFound(req.get_header().get_region_id()))
         }
     }
@@ -159,13 +161,13 @@ where
             Ok(None) => Ok(None),
             Err(e) => {
                 let mut response = cmd_resp::new_error(e);
-                if let Some(delegate) = self
-                    .local_reader
-                    .delegates
-                    .get(&req.get_header().get_region_id())
-                {
-                    cmd_resp::bind_term(&mut response, delegate.term);
-                }
+                // if let Some(delegate) = self
+                // .local_reader
+                // .delegates
+                // .get(&req.get_header().get_region_id())
+                // {
+                // cmd_resp::bind_term(&mut response, delegate.term);
+                // }
                 Err(response)
             }
         }

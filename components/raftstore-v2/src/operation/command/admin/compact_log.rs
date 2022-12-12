@@ -45,14 +45,6 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 "command format is outdated, please upgrade leader"
             ));
         }
-        info!(
-            self.logger,
-            "propose compact log";
-            "region_id" => self.region_id(),
-            "peer_id" => self.peer_id(),
-            "index" => compact_log.get_compact_index(),
-        );
-
         let data = req.write_to_bytes().unwrap();
         self.propose_with_ctx(store_ctx, data, vec![])
     }

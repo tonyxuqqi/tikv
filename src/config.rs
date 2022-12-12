@@ -3148,12 +3148,12 @@ impl TikvConfig {
         self.quota.validate()?;
         self.causal_ts.validate()?;
 
-        if self.storage.flow_control.enable {
+        //if self.storage.flow_control.enable {
             self.rocksdb.defaultcf.disable_write_stall = true;
             self.rocksdb.writecf.disable_write_stall = true;
             self.rocksdb.lockcf.disable_write_stall = true;
             self.rocksdb.raftcf.disable_write_stall = true;
-        }
+        //}
         // Fill in values for unspecified write stall configurations.
         macro_rules! fill_cf_opts {
             ($cf_opts:expr, $cfg:expr) => {

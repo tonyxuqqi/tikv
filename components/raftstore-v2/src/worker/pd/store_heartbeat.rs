@@ -194,19 +194,13 @@ where
         }
 
         stats = collect_report_read_peer_stats(HOTSPOT_REPORT_CAPACITY, report_peers, stats);
-        let (mut capacity, used_size, mut available) =
-            self.collect_engine_size().unwrap_or_default();
+        let (mut capacity, used_size, mut available) = self
+            .collect_engine_size(capacity_config)
+            .unwrap_or_default();
         if available == 0 {
             warn!(self.logger, "no available space");
         }
 
-        if capacity_config != 0 {
-            if capacity_config <= capacity {
-                available.checked_sub(capacity - capacity_config).unwrap_or_default();
-            }
-
-            capacity = capacity_config;
-        }
         stats.set_capacity(capacity);
         stats.set_used_size(used_size);
         stats.set_available(available);
@@ -268,7 +262,7 @@ where
     }
 
     /// Returns (capacity, used, available).
-    fn collect_engine_size(&mut self) -> Option<(u64, u64, u64)> {
+    fn collect_engine_size(&mut self, capacity_config: u64) -> Option<(u64, u64, u64)> {
         let disk_stats = match fs2::statvfs(self.tablet_factory.tablets_path()) {
             Err(e) => {
                 error!(
@@ -283,7 +277,7 @@ where
         };
         let disk_cap = disk_stats.total_space();
         // TODO: custom capacity.
-        let capacity = disk_cap;
+        let mut capacity = disk_cap;
         let mut snapshot_size_collector = DirSizeCalculator::new(self.snap_mgr.root_path());
         let snapshot_size = snapshot_size_collector.size().unwrap() as u64;
         let rocksdb_size = self.size_calculator.size().unwrap() as u64;
@@ -301,6 +295,10 @@ where
             "total_used_size" => used_size,
             "dik_available" => disk_available_size,
         );
+        if capacity_config != 0 {
+            capacity = cmp::min(capacity, capacity_config);
+        }
+
         let mut available = capacity.checked_sub(used_size).unwrap_or_default();
         // We only care about rocksdb SST file size, so we should check disk available
         // here.
