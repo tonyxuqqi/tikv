@@ -33,7 +33,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                     .unwrap()
                     .0
                     .saturating_elapsed(),
-            ) < 30.0)
+            ) < 90.0)
         {
             return;
         }

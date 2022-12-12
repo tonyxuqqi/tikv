@@ -115,7 +115,7 @@ impl<EK: KvEngine, ER: RaftEngine, T> StoreContext<EK, ER, T> {
         self.tick_batch[PeerTick::CheckLongUncommitted as usize].wait_duration =
             self.cfg.check_long_uncommitted_interval.0;
         self.tick_batch[PeerTick::TabletGc as usize].wait_duration =
-            self.cfg.raft_log_gc_tick_interval.0;
+            2 * self.cfg.raft_log_gc_tick_interval.0;
     }
 }
 
