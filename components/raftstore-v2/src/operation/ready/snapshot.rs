@@ -37,7 +37,7 @@ use raftstore::store::{
     TabletSnapManager, Transport, WriteTask,
 };
 use slog::{error, info, warn};
-use tikv_util::{box_err, box_try, worker::Scheduler};
+use tikv_util::{box_err, box_try, time::Instant as TiInstant, worker::Scheduler};
 
 use crate::{
     fsm::ApplyResReporter,
@@ -150,22 +150,17 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 .tablet_factory
                 .open_tablet(region_id, Some(persisted_index), OpenOptions::default())
                 .unwrap();
+            let mut existing_tablet_path = "".to_string();
+            if let Some(cache) = self.tablet().cache() {
+                existing_tablet_path = cache.path().to_string();
+            }
+            if !existing_tablet_path.is_empty() {
+                self.pending_gc_tablets_mut()
+                    .push_back((TiInstant::now(), existing_tablet_path));
+            }
             self.tablet_mut().set(tablet);
             self.schedule_apply_fsm(ctx);
             self.storage_mut().on_applied_snapshot();
-
-            // clean the raft engine (In V1 it's done in clear_meta);
-            let mut wb = self.entry_storage_mut().raft_engine().log_batch(10);
-            let region_id = self.region_id();
-            self.entry_storage_mut().raft_engine().clean(
-                region_id,
-                0,
-                &RaftLocalState::default(),
-                &mut wb,
-            );
-            self.entry_storage_mut()
-                .raft_engine()
-                .consume(&mut wb, false);
 
             self.raft_group_mut().advance_apply_to(persisted_index);
             self.read_progress_mut()
@@ -385,16 +380,6 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
         true
     }
 
-    pub fn after_applied_snapshot(&mut self) {
-        let mut entry_storage = self.entry_storage_mut();
-        let term = entry_storage.get_truncate_term();
-        let index = entry_storage.get_truncate_index();
-        entry_storage.set_applied_term(term);
-        entry_storage.set_last_term(term);
-        entry_storage.apply_state_mut().set_applied_index(index);
-        self.region_state_mut().set_tablet_index(index);
-    }
-
     pub fn on_applied_snapshot(&mut self) {
         let mut entry = self.entry_storage_mut();
         let term = entry.truncated_term();
@@ -442,6 +427,18 @@ impl<EK: KvEngine, ER: RaftEngine> Storage<EK, ER> {
 
         self.entry_storage_mut().set_truncated_index(last_index);
         self.entry_storage_mut().set_truncated_term(last_term);
+
+        // clean the raft engine (In V1 it's done in clear_meta);
+        let mut wb = self.entry_storage_mut().raft_engine().log_batch(10);
+        self.entry_storage_mut().raft_engine().clean(
+            region_id,
+            0,
+            &RaftLocalState::default(),
+            &mut wb,
+        );
+        self.entry_storage_mut()
+            .raft_engine()
+            .consume(&mut wb, false);
 
         info!(self.logger(),
             "apply snapshot with state ok";
