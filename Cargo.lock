@@ -5932,6 +5932,7 @@ dependencies = [
  "pd_client",
  "raftstore",
  "test_raftstore",
+ "test_raftstore-v2",
  "tikv",
  "tikv_util",
  "tracker",

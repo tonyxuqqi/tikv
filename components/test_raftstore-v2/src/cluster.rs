@@ -868,6 +868,10 @@ impl<T: Simulator> Cluster<T> {
         self.get_impl(cf, key, false)
     }
 
+    pub fn must_get(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+        self.get_impl(CF_DEFAULT, key, true)
+    }
+
     fn get_impl(&mut self, cf: &str, key: &[u8], read_quorum: bool) -> Option<Vec<u8>> {
         let mut resp = self.request(
             key,

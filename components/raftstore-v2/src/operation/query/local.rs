@@ -199,7 +199,6 @@ where
         async move {
             if err.get_message().is_empty() {
                 let res = sub.result().await;
-                println!("locate");
                 Ok(res)
             } else {
                 let mut resp = RaftCmdResponse::default();

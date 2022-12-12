@@ -10,5 +10,6 @@ extern crate test;
 #[macro_use]
 extern crate tikv_util;
 
+mod coprocessor;
 mod raftstore_v2;
 mod server;
