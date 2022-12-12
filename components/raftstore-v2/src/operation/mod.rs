@@ -6,6 +6,7 @@ mod pd;
 mod query;
 mod raft_log_gc;
 mod ready;
+mod tablet_gc;
 
 pub use command::{
     AdminCmdResult, CommittedEntries, ProposalControl, SimpleWriteDecoder, SimpleWriteEncoder,

@@ -37,7 +37,7 @@ use raftstore::store::{
     TabletSnapManager, Transport, WriteTask,
 };
 use slog::{error, info, warn};
-use tikv_util::{box_err, box_try, worker::Scheduler};
+use tikv_util::{box_err, box_try, time::Instant as TiInstant, worker::Scheduler};
 
 use crate::{
     fsm::ApplyResReporter,
@@ -150,6 +150,14 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 .tablet_factory
                 .open_tablet(region_id, Some(persisted_index), OpenOptions::default())
                 .unwrap();
+            let mut existing_tablet_path = "".to_string();
+            if let Some(cache) = self.tablet().cache() {
+                existing_tablet_path = cache.path().to_string();
+            }
+            if !existing_tablet_path.is_empty() {
+                self.pending_gc_tablets_mut()
+                    .push_back((TiInstant::now(), existing_tablet_path));
+            }
             self.tablet_mut().set(tablet);
             self.schedule_apply_fsm(ctx);
             self.storage_mut().on_applied_snapshot();

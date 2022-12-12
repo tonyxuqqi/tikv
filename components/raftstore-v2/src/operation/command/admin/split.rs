@@ -56,7 +56,7 @@ use raftstore::{
     Error, Result,
 };
 use slog::{error, info, warn, Logger};
-use tikv_util::{box_err, config::ReadableSize, worker::ScheduleError};
+use tikv_util::{box_err, config::ReadableSize, worker::ScheduleError, time::Instant as TiInstant};
 
 use crate::{
     batch::StoreContext,
@@ -344,6 +344,9 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 RegionChangeReason::Split,
                 res.tablet_index,
             );
+            let path = self.tablet().cache().unwrap().path().to_string();
+            self.pending_gc_tablets_mut().push_back((TiInstant::now(), path));
+            let _ = self.tablet_mut().latest();
             meta.tablet_caches
                 .insert(self.region_id(), self.tablet().clone());
         }

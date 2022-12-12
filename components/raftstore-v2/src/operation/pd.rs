@@ -54,7 +54,7 @@ impl Store {
 
         // stats.set_query_stats(query_stats);
 
-        let task = PdTask::StoreHeartbeat { stats };
+        let task = PdTask::StoreHeartbeat { stats, capacity_config: ctx.cfg.capacity.0 };
         if let Err(e) = ctx.pd_scheduler.schedule(task) {
             error!(self.logger(), "notify pd failed";
                 "store_id" => self.store_id(),
@@ -86,8 +86,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             written_bytes: self.self_stat().written_bytes,
             written_keys: self.self_stat().written_keys,
             approximate_size: self
-                .tablet()
-                .cache()
+                .tablet_mut()
+                .latest()
                 .map(|e| e.get_engine_used_size())
                 .expect("get engine used size")
                 .ok(),

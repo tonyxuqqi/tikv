@@ -2,6 +2,7 @@
 
 use std::{
     mem,
+    collections::VecDeque,
     sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
 };
@@ -102,6 +103,8 @@ pub struct Peer<EK: KvEngine, ER: RaftEngine> {
     proposal_control: ProposalControl,
     reactivate_memory_lock_ticks: usize,
     may_skip_split_check: bool,
+
+    pending_gc_tablets: VecDeque<(TiInstant, String)>,
 }
 
 impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
@@ -188,6 +191,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             reactivate_memory_lock_ticks: 0,
             lead_transferee: raft::INVALID_ID,
             may_skip_split_check: false,
+            pending_gc_tablets: VecDeque::new(),
         };
 
         // If this region has only one peer and I am the one, campaign directly.
@@ -736,5 +740,15 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         request.mut_header().set_region_id(self.region_id());
         request.mut_header().set_peer(self.peer().clone());
         request
+    }
+
+    #[inline]
+    pub fn pending_gc_tablets_mut(&mut self) -> &mut VecDeque<(TiInstant, String)> {
+        &mut self.pending_gc_tablets
+    }
+
+    #[inline]
+    pub fn pending_gc_tablets(&self) -> &VecDeque<(TiInstant, String)> {
+        &self.pending_gc_tablets
     }
 }

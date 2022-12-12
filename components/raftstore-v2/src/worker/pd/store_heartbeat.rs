@@ -166,7 +166,7 @@ where
     ER: RaftEngine,
     T: PdClient + 'static,
 {
-    pub fn handle_store_heartbeat(&mut self, mut stats: pdpb::StoreStats) {
+    pub fn handle_store_heartbeat(&mut self, mut stats: pdpb::StoreStats, capacity_config: u64) {
         let mut report_peers = HashMap::default();
         for (region_id, region_peer) in &mut self.region_peers {
             let read_bytes = region_peer.read_bytes - region_peer.last_store_report_read_bytes;
@@ -194,11 +194,19 @@ where
         }
 
         stats = collect_report_read_peer_stats(HOTSPOT_REPORT_CAPACITY, report_peers, stats);
-        let (capacity, used_size, available) = self.collect_engine_size().unwrap_or_default();
+        let (mut capacity, used_size, mut available) =
+            self.collect_engine_size().unwrap_or_default();
         if available == 0 {
             warn!(self.logger, "no available space");
         }
 
+        if capacity_config != 0 {
+            if capacity_config <= capacity {
+                available.checked_sub(capacity - capacity_config).unwrap_or_default();
+            }
+
+            capacity = capacity_config;
+        }
         stats.set_capacity(capacity);
         stats.set_used_size(used_size);
         stats.set_available(available);
