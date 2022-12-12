@@ -625,12 +625,14 @@ pub struct RemoteLease {
 impl RemoteLease {
     pub fn inspect(&self, ts: Option<Timespec>) -> LeaseState {
         let expired_time = self.expired_time.load(AtomicOrdering::Acquire);
-        LeaseState::Valid
-        // if ts.unwrap_or_else(monotonic_raw_now) < u64_to_timespec(expired_time) {
-        //     LeaseState::Valid
-        // } else {
-        //     LeaseState::Expired
-        // }
+        // LeaseState::Valid
+        if ts.unwrap_or_else(monotonic_raw_now) < u64_to_timespec(expired_time) {
+            println!("Lease valid");
+            LeaseState::Valid
+        } else {
+            println!("Lease expired");
+            LeaseState::Expired
+        }
     }
 
     fn renew(&self, bound: Timespec) {

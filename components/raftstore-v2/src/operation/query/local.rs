@@ -198,7 +198,9 @@ where
 
         async move {
             if err.get_message().is_empty() {
-                Ok(sub.result().await)
+                let res = sub.result().await;
+                println!("locate");
+                Ok(res)
             } else {
                 let mut resp = RaftCmdResponse::default();
                 resp.mut_header().set_error(err);

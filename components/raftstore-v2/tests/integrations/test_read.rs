@@ -48,11 +48,18 @@ fn test_read_index() {
 
     let (msg, sub) = PeerMsg::raft_command(req.clone());
     router.send(region_id, msg).unwrap();
+    println!("here");
     block_on(sub.result()).unwrap();
+    println!("here2");
 
     let res = router.query(region_id, read_req).unwrap();
+    println!("here3");
+
     let resp = res.read().unwrap();
+    println!("here4");
+
     assert_eq!(resp.read_index, 0);
+    println!("here5");
 }
 
 #[test]
