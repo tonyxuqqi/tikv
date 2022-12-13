@@ -1847,8 +1847,21 @@ fn future_copr<E: Engine>(
     peer: Option<String>,
     req: Request,
 ) -> impl Future<Output = ServerResult<MemoryTraceGuard<Response>>> {
-    let ret = copr.parse_and_handle_unary_request(req, peer);
-    async move { Ok(ret.await) }
+    info!(
+        "accept coprocessor request";
+        "region_id" => req.get_context().region_id,
+        "ranges" => ?req.get_ranges(),
+    );
+    let ret = copr.parse_and_handle_unary_request(req.clone(), peer);
+
+    async move {
+        let ret = ret.await;
+        info!(
+            "return coprocessor response";
+            "region_id" => req.get_context().region_id,
+        );
+        Ok(ret)
+    }
 }
 
 fn future_raw_coprocessor<E: Engine, L: LockManager, F: KvFormat>(
