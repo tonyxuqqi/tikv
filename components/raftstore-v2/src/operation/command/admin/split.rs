@@ -33,6 +33,7 @@ use engine_traits::{
     TabletFactory, CF_DEFAULT, SPLIT_PREFIX,
 };
 use fail::fail_point;
+use itertools::Itertools;
 use keys::{enc_end_key, enc_start_key};
 use kvproto::{
     metapb::{self, Region, RegionEpoch},
@@ -56,7 +57,7 @@ use raftstore::{
     Error, Result,
 };
 use slog::{error, info, warn, Logger};
-use tikv_util::{box_err, config::ReadableSize, worker::ScheduleError, time::Instant as TiInstant};
+use tikv_util::{box_err, config::ReadableSize, time::Instant as TiInstant, worker::ScheduleError};
 
 use crate::{
     batch::StoreContext,
@@ -104,12 +105,60 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
 }
 
 impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
+    fn pre_propose_split<T>(
+        &mut self,
+        store_ctx: &mut StoreContext<EK, ER, T>,
+        req: &mut AdminRequest,
+    ) -> Result<()> {
+        assert!(req.has_splits());
+        let region = self.region();
+        let mut requests: Vec<SplitRequest> = req.mut_splits().take_requests().into();
+        let ajusted_splits = std::mem::take(&mut requests)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, mut split)| {
+                let key = split.take_split_key();
+                let key = strip_timestamp_if_exists(key);
+                if is_valid_split_key(&key, i, region) {
+                    split.split_key = key;
+                    Some(split)
+                } else {
+                    None
+                }
+            })
+            .coalesce(|prev, curr| {
+                // Make sure that the split keys are sorted and unique.
+                if prev.split_key < curr.split_key {
+                    Err((prev, curr))
+                } else {
+                    warn!(
+                        self.logger,
+                        "skip invalid split key: key should not be larger than the previous.";
+                        "region_id" => region.id,
+                        "key" => log_wrappers::Value::key(&curr.split_key),
+                        "previous" => log_wrappers::Value::key(&prev.split_key),
+                    );
+                    Ok(prev)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if ajusted_splits.is_empty() {
+            Err(box_err!("no valid key found for split.".to_owned()))
+        } else {
+            // Rewrite the splits.
+            req.mut_splits().set_requests(ajusted_splits.into());
+            Ok(())
+        }
+    }
+
     pub fn propose_split<T>(
         &mut self,
         store_ctx: &mut StoreContext<EK, ER, T>,
-        req: RaftCmdRequest,
+        mut req: RaftCmdRequest,
     ) -> Result<u64> {
         validate_batch_split(req.get_admin_request(), self.region())?;
+        self.pre_propose_split(store_ctx, req.mut_admin_request())?;
         // We rely on ConflictChecker to detect conflicts, so no need to set proposal
         // context.
         let data = req.write_to_bytes().unwrap();
@@ -345,7 +394,8 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 res.tablet_index,
             );
             let path = self.tablet().cache().unwrap().path().to_string();
-            self.pending_gc_tablets_mut().push_back((TiInstant::now(), path));
+            self.pending_gc_tablets_mut()
+                .push_back((TiInstant::now(), path));
             let _ = self.tablet_mut().latest();
             meta.tablet_caches
                 .insert(self.region_id(), self.tablet().clone());
