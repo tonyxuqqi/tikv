@@ -92,17 +92,17 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
                 }
             }
         }
-        // info!(
-        //     self.logger,
-        //     "raft_log_gc_imp";
-        //     "region_id" => self.region_id(),
-        //     "first_idx" => first_idx,
-        //     "last_idx" => last_idx,
-        //     "applied_idx" => applied_idx,
-        //     "truncated_idx" => truncated_idx,
-        //     "alive_cache_idx" => alive_cache_idx,
-        //     "replicated_idx" => replicated_idx,
-        // );
+        info!(
+            self.logger,
+            "raft_log_gc_imp";
+            "region_id" => self.region_id(),
+            "first_idx" => first_idx,
+            "last_idx" => last_idx,
+            "applied_idx" => applied_idx,
+            "truncated_idx" => truncated_idx,
+            "alive_cache_idx" => alive_cache_idx,
+            "replicated_idx" => replicated_idx,
+        );
 
         // When an election happened or a new peer is added, replicated_idx can be 0.
         if replicated_idx > 0 {
