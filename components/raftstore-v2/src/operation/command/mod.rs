@@ -37,7 +37,7 @@ use raftstore::{
             Proposal,
         },
         local_metrics::RaftMetrics,
-        metrics::*,
+        metrics::{APPLY_TASK_WAIT_TIME_HISTOGRAM, *},
         msg::ErrorCallback,
         util::{self, admin_cmd_epoch_lookup},
         WriteCallback,
@@ -45,7 +45,10 @@ use raftstore::{
     Error, Result,
 };
 use slog::error;
-use tikv_util::{box_err, time::monotonic_raw_now};
+use tikv_util::{
+    box_err,
+    time::{duration_to_sec, monotonic_raw_now, Instant as TiInstant},
+};
 
 use crate::{
     batch::StoreContext,
@@ -83,7 +86,8 @@ fn parse_at<M: Message + Default>(logger: &slog::Logger, buf: &[u8], index: u64,
 pub struct CommittedEntries {
     /// Entries need to be applied. Note some entries may not be included for
     /// flow control.
-    entry_and_proposals: Vec<(Entry, Vec<CmdResChannel>)>,
+    pub entry_and_proposals: Vec<(Entry, Vec<CmdResChannel>)>,
+    pub committed_time: TiInstant,
 }
 
 fn new_response(header: &RaftRequestHeader) -> RaftCmdResponse {
@@ -284,6 +288,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         // memtables in kv engine is flushed.
         let apply = CommittedEntries {
             entry_and_proposals,
+            committed_time: TiInstant::now(),
         };
         self.apply_scheduler()
             .send(ApplyTask::CommittedEntries(apply));
@@ -342,6 +347,8 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
     #[inline]
     pub async fn apply_committed_entries(&mut self, ce: CommittedEntries) {
         fail::fail_point!("APPLY_COMMITTED_ENTRIES");
+        APPLY_TASK_WAIT_TIME_HISTOGRAM
+            .observe(duration_to_sec(ce.committed_time.saturating_elapsed()));
         for (e, ch) in ce.entry_and_proposals {
             if self.tombstone() {
                 apply::notify_req_region_removed(self.region_state().get_region().get_id(), ch);
