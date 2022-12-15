@@ -1859,7 +1859,6 @@ fn future_copr<E: Engine>(
         info!(
             "return coprocessor response";
             "region_id" => req.get_context().region_id,
-            "ret" => ?ret,
         );
         Ok(ret)
     }
