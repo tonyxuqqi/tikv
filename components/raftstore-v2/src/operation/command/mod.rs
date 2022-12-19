@@ -354,6 +354,7 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
                 apply::notify_req_region_removed(self.region_state().get_region().get_id(), ch);
                 continue;
             }
+            let t = TiInstant::now_coarse();
             if !e.get_data().is_empty() {
                 let mut set_save_point = false;
                 if let Some(wb) = self.write_batch_mut() {
@@ -379,6 +380,8 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
             }
             // Flush may be triggerred in the middle, so always update the index and term.
             self.set_apply_progress(e.index, e.term);
+            let elapsed = t.saturating_elapsed();
+            STORE_APPLY_LOG_HISTOGRAM.observe(duration_to_sec(elapsed));
         }
     }
 

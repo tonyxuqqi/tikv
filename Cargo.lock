@@ -2823,7 +2823,7 @@ dependencies = [
 [[package]]
 name = "librocksdb_sys"
 version = "0.1.0"
-source = "git+https://github.com/tabokie/rust-rocksdb.git?branch=schedule-memtable#43e7606047695ae51620a1e22c38dec1afdc2eaf"
+source = "git+https://github.com/tabokie/rust-rocksdb.git?branch=schedule-memtable#5f7afeeb14767d7dad9753ede9114d5b0164e189"
 dependencies = [
  "bindgen 0.57.0",
  "bzip2-sys",
@@ -2842,7 +2842,7 @@ dependencies = [
 [[package]]
 name = "libtitan_sys"
 version = "0.0.1"
-source = "git+https://github.com/tabokie/rust-rocksdb.git?branch=schedule-memtable#43e7606047695ae51620a1e22c38dec1afdc2eaf"
+source = "git+https://github.com/tabokie/rust-rocksdb.git?branch=schedule-memtable#5f7afeeb14767d7dad9753ede9114d5b0164e189"
 dependencies = [
  "bzip2-sys",
  "cc",
@@ -4701,7 +4701,7 @@ dependencies = [
 [[package]]
 name = "rocksdb"
 version = "0.3.0"
-source = "git+https://github.com/tabokie/rust-rocksdb.git?branch=schedule-memtable#43e7606047695ae51620a1e22c38dec1afdc2eaf"
+source = "git+https://github.com/tabokie/rust-rocksdb.git?branch=schedule-memtable#5f7afeeb14767d7dad9753ede9114d5b0164e189"
 dependencies = [
  "libc 0.2.132",
  "librocksdb_sys",

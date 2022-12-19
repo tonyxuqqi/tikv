@@ -42,6 +42,7 @@ fail = "0.5"
 file_system = { workspace = true }
 fs2 = "0.4"
 futures = { version = "0.3", features = ["compat"] }
+itertools = "0.10"
 keys = { workspace = true }
 kvproto = { git = "https://github.com/pingcap/kvproto.git" }
 log_wrappers = { workspace = true }
@@ -63,7 +64,6 @@ time = "0.1"
 tracker = { workspace = true }
 txn_types = { workspace = true }
 yatp = { git = "https://github.com/tikv/yatp.git", branch = "master" }
-itertools = "0.10"
 
 [dev-dependencies]
 engine_test = { workspace = true }

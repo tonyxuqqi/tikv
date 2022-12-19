@@ -54,7 +54,10 @@ impl Store {
 
         // stats.set_query_stats(query_stats);
 
-        let task = PdTask::StoreHeartbeat { stats, capacity_config: ctx.cfg.capacity.0 };
+        let task = PdTask::StoreHeartbeat {
+            stats,
+            capacity_config: ctx.cfg.capacity.0,
+        };
         if let Err(e) = ctx.pd_scheduler.schedule(task) {
             error!(self.logger(), "notify pd failed";
                 "store_id" => self.store_id(),

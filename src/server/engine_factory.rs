@@ -6,7 +6,7 @@ use std::{
 };
 
 use engine_rocks::{
-    raw::{Cache, Env, Statistics, WriteBufferManager},
+    raw::{Cache, ConcurrentTaskLimiter, Env, Statistics, WriteBufferManager},
     CompactedEventSender, CompactionListener, FlowListener, RocksCompactionJobInfo, RocksEngine,
     RocksEventListener,
 };
@@ -25,6 +25,7 @@ struct FactoryInner {
     env: Arc<Env>,
     statistics: Statistics,
     wbm: Option<WriteBufferManager>,
+    compaction_limiter: Option<ConcurrentTaskLimiter>,
     region_info_accessor: Option<RegionInfoAccessor>,
     block_cache: Option<Cache>,
     rocksdb_config: Arc<DbConfig>,
@@ -45,11 +46,15 @@ impl KvEngineFactoryBuilder {
         let wbm = config
             .write_buffer_limit
             .map(|l| WriteBufferManager::new(l.0 as usize, 0.0, config.write_buffer_flush_oldest));
+        let compaction_limiter = config
+            .compaction_task_limit
+            .map(|l| ConcurrentTaskLimiter::new("tikv", l as u32));
         Self {
             inner: FactoryInner {
                 env,
                 statistics: Statistics::new_titan(),
                 wbm,
+                compaction_limiter,
                 region_info_accessor: None,
                 block_cache: None,
                 rocksdb_config: Arc::new(config.rocksdb.clone()),
@@ -159,11 +164,16 @@ impl KvEngineFactory {
         if let Some(listener) = &self.inner.flow_listener {
             kv_db_opts.add_event_listener(listener.clone_with(region_id, suffix));
         }
-        let kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
+        let mut kv_cfs_opts = self.inner.rocksdb_config.build_cf_opts(
             &self.inner.block_cache,
             self.inner.region_info_accessor.as_ref(),
             self.inner.api_version,
         );
+        if let Some(limiter) = self.inner.compaction_limiter.as_ref() {
+            for (_, cf_opts) in &mut kv_cfs_opts {
+                cf_opts.set_compaction_thread_limiter(limiter);
+            }
+        }
         let kv_engine = engine_rocks::util::new_engine_opt(
             tablet_path.to_str().unwrap(),
             kv_db_opts,
