@@ -2888,6 +2888,8 @@ pub struct TikvConfig {
     #[online_config(skip)]
     pub write_buffer_flush_oldest: bool,
 
+    pub compaction_task_limit: Option<u32>,
+
     #[online_config(submodule)]
     pub log: LogConfig,
 
@@ -2983,6 +2985,7 @@ impl Default for TikvConfig {
             memory_usage_high_water: 0.9,
             write_buffer_limit: None,
             write_buffer_flush_oldest: false,
+            compaction_task_limit: None,
             log: LogConfig::default(),
             quota: QuotaConfig::default(),
             readpool: ReadPoolConfig::default(),
@@ -3148,11 +3151,11 @@ impl TikvConfig {
         self.quota.validate()?;
         self.causal_ts.validate()?;
 
-        //if self.storage.flow_control.enable {
-            self.rocksdb.defaultcf.disable_write_stall = true;
-            self.rocksdb.writecf.disable_write_stall = true;
-            self.rocksdb.lockcf.disable_write_stall = true;
-            self.rocksdb.raftcf.disable_write_stall = true;
+        // if self.storage.flow_control.enable {
+        self.rocksdb.defaultcf.disable_write_stall = true;
+        self.rocksdb.writecf.disable_write_stall = true;
+        self.rocksdb.lockcf.disable_write_stall = true;
+        self.rocksdb.raftcf.disable_write_stall = true;
         //}
         // Fill in values for unspecified write stall configurations.
         macro_rules! fill_cf_opts {

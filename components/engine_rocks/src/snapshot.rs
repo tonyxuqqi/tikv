@@ -43,7 +43,7 @@ impl Debug for RocksSnapshot {
 
 impl Drop for RocksSnapshot {
     fn drop(&mut self) {
-        if Arc::strong_count(&self.db) <= 1 { 
+        if Arc::strong_count(&self.db) <= 1 {
             info!("Snapshot drop";
                 "Path" => self.db.path(),
                 "ref_count" => Arc::strong_count(&self.db) -1,
