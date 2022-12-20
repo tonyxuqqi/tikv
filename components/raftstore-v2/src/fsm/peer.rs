@@ -2,7 +2,7 @@
 
 //! This module contains the peer implementation for batch system.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, time::Duration};
 
 use batch_system::{BasicMailbox, Fsm};
 use crossbeam::channel::TryRecvError;
@@ -290,8 +290,14 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
                 PeerMsg::WaitFlush(ch) => self.fsm.peer_mut().on_wait_flush(ch),
             }
         }
-        // TODO: instead of propose pending commands immediately, we should use timeout.
-        self.fsm.peer.propose_pending_writes(self.store_ctx);
+        let now = Instant::now();
+        if now.saturating_duration_since(self.fsm.peer.last_propose_time)
+            >= Duration::from_millis(1)
+        {
+            // TODO: instead of propose pending commands immediately, we should use timeout.
+            self.fsm.peer.last_propose_time = now;
+            self.fsm.peer.propose_pending_writes(self.store_ctx);
+        }
     }
 }
 
