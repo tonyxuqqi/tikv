@@ -194,7 +194,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             lead_transferee: raft::INVALID_ID,
             may_skip_split_check: false,
             pending_gc_tablets: VecDeque::new(),
-            last_propose_time: TiInstant::now(),
+            last_propose_time: TiInstant::now() - Duration::from_millis(1),
         };
 
         // If this region has only one peer and I am the one, campaign directly.
