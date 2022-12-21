@@ -262,7 +262,6 @@ where
                 return Ok(snap);
             }
             let mut reader = reader.unwrap();
-
             if let Some(query_res) = reader.try_to_renew_lease(region_id, &req).await? {
                 // If query successful, try again.
                 if query_res.read().is_some() {

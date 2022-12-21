@@ -1,5 +1,7 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
+use std::time::Duration;
+
 use engine_traits::{KvEngine, Mutable, RaftEngine, CF_DEFAULT};
 use kvproto::raft_cmdpb::{CmdType, RaftCmdRequest, Request};
 use raftstore::{
@@ -12,6 +14,7 @@ use raftstore::{
     },
     Error, Result,
 };
+use tikv_util::time::{duration_to_sec, Instant as TiInstant};
 
 use crate::{
     batch::StoreContext,
