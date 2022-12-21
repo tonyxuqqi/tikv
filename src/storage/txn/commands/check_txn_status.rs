@@ -97,7 +97,7 @@ impl<S: Snapshot, L: LockManager> WriteCommand<S, L> for CheckTxnStatus {
             .into()
         ));
 
-        let (txn_status, released) = match reader.load_lock(&self.primary_key)? {
+        let (txn_status, released) = match reader.load_lock2(&self.primary_key)? {
             Some(lock) if lock.ts == self.lock_ts => check_txn_status_lock_exists(
                 &mut txn,
                 &mut reader,

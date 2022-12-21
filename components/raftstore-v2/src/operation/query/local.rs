@@ -269,8 +269,6 @@ where
                     if let Some(snap) = reader.try_get_snapshot(req)? {
                         return Ok(snap);
                     }
-                } else {
-                    info!(logger, "try renew fails -- read none"; "region_id" => region_id);
                 }
             }
 
