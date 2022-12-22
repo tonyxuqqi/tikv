@@ -290,14 +290,8 @@ impl<'a, EK: KvEngine, ER: RaftEngine, T: Transport> PeerFsmDelegate<'a, EK, ER,
                 PeerMsg::WaitFlush(ch) => self.fsm.peer_mut().on_wait_flush(ch),
             }
         }
-        let now = Instant::now();
-        if now.saturating_duration_since(self.fsm.peer.last_propose_time)
-            >= Duration::from_millis(1)
-        {
-            // TODO: instead of propose pending commands immediately, we should use timeout.
-            self.fsm.peer.last_propose_time = now;
-            self.fsm.peer.propose_pending_writes(self.store_ctx);
-        }
+        // TODO: instead of propose pending commands immediately, we should use timeout.
+        self.fsm.peer.propose_pending_writes(self.store_ctx);
     }
 }
 
