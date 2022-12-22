@@ -61,6 +61,11 @@ impl<S: EngineSnapshot> SnapshotReader<S> {
     }
 
     #[inline(always)]
+    pub fn load_lock2(&mut self, key: &Key) -> Result<Option<Lock>> {
+        self.reader.load_lock2(key)
+    }
+
+    #[inline(always)]
     pub fn key_exist(&mut self, key: &Key, ts: TimeStamp) -> Result<bool> {
         Ok(self
             .reader
@@ -210,6 +215,35 @@ impl<S: EngineSnapshot> MvccReader<S> {
 
     pub fn load_lock(&mut self, key: &Key) -> Result<Option<Lock>> {
         if let Some(pessimistic_lock) = self.load_in_memory_pessimistic_lock(key)? {
+            return Ok(Some(pessimistic_lock));
+        }
+
+        if self.scan_mode.is_some() {
+            self.create_lock_cursor()?;
+        }
+
+        let res = if let Some(ref mut cursor) = self.lock_cursor {
+            match cursor.get(key, &mut self.statistics.lock)? {
+                Some(v) => Some(Lock::parse(v)?),
+                None => None,
+            }
+        } else {
+            self.statistics.lock.get += 1;
+            match self.snapshot.get_cf(CF_LOCK, key)? {
+                Some(v) => Some(Lock::parse(&v)?),
+                None => None,
+            }
+        };
+
+        Ok(res)
+    }
+
+    pub fn load_lock2(&mut self, key: &Key) -> Result<Option<Lock>> {
+        if let Some(pessimistic_lock) = self.load_in_memory_pessimistic_lock(key)? {
+            info!(
+                "read lock from in memory lock table";
+                "key" => ?key,
+            );
             return Ok(Some(pessimistic_lock));
         }
 
