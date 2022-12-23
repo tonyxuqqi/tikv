@@ -40,7 +40,7 @@ use kvproto::{
 use protobuf::Message;
 use raft::{prelude::Snapshot, INVALID_ID};
 use raftstore::{
-    coprocessor::RegionChangeReason,
+    coprocessor::{split_observer::strip_timestamp_if_exists, RegionChangeReason},
     store::{
         cmd_resp,
         fsm::{apply::validate_batch_split, ApplyMetrics},
@@ -51,7 +51,9 @@ use raftstore::{
     },
     Result,
 };
-use slog::info;
+use slog::{info, warn};
+use tikv_util::box_err;
+use itertools::Itertools;
 
 use crate::{
     batch::StoreContext,
@@ -200,12 +202,55 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         self.ask_batch_split_pd(ctx, rs.split_keys, ch);
     }
 
+    fn pre_propose_split(
+        &mut self,
+        req: &mut AdminRequest,
+    ) -> Result<()> {
+        assert!(req.has_splits());
+        let region = self.region();
+        let mut requests: Vec<SplitRequest> = req.mut_splits().take_requests().into();
+        let ajusted_splits = std::mem::take(&mut requests)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(_i, mut split)| {
+                let key = split.take_split_key();
+                let key = strip_timestamp_if_exists(key);
+                split.split_key = key;
+                Some(split)
+            })
+            .coalesce(|prev, curr| {
+                // Make sure that the split keys are sorted and unique.
+                if prev.split_key < curr.split_key {
+                    Err((prev, curr))
+                } else {
+                    warn!(
+                        self.logger,
+                        "skip invalid split key: key should not be larger than the previous.";
+                        "region_id" => region.id,
+                        "key" => log_wrappers::Value::key(&curr.split_key),
+                        "previous" => log_wrappers::Value::key(&prev.split_key),
+                    );
+                    Ok(prev)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if ajusted_splits.is_empty() {
+            Err(box_err!("no valid key found for split.".to_owned()))
+        } else {
+            // Rewrite the splits.
+            req.mut_splits().set_requests(ajusted_splits.into());
+            Ok(())
+        }
+    }
+
     pub fn propose_split<T>(
         &mut self,
         store_ctx: &mut StoreContext<EK, ER, T>,
-        req: RaftCmdRequest,
+        mut req: RaftCmdRequest,
     ) -> Result<u64> {
         validate_batch_split(req.get_admin_request(), self.region())?;
+        self.pre_propose_split(req.mut_admin_request())?;
         // We rely on ConflictChecker to detect conflicts, so no need to set proposal
         // context.
         let data = req.write_to_bytes().unwrap();
