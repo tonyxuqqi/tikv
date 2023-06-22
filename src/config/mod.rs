@@ -324,13 +324,13 @@ macro_rules! cf_config {
             #[serde(with = "rocks_config::compression_type_level_serde")]
             #[online_config(skip)]
             pub compression_per_level: [DBCompressionType; 7],
-            pub write_buffer_size: ReadableSize,
+            pub write_buffer_size: Option<ReadableSize>,
             pub max_write_buffer_number: i32,
             #[online_config(skip)]
             pub min_write_buffer_number_to_merge: i32,
             pub max_bytes_for_level_base: ReadableSize,
             pub target_file_size_base: Option<ReadableSize>,
-            pub level0_file_num_compaction_trigger: i32,
+            pub level0_file_num_compaction_trigger: Option<i32>,
             pub level0_slowdown_writes_trigger: Option<i32>,
             pub level0_stop_writes_trigger: Option<i32>,
             pub max_compaction_bytes: ReadableSize,
@@ -396,6 +396,24 @@ macro_rules! cf_config {
             #[inline]
             fn target_file_size_base(&self) -> u64 {
                 self.target_file_size_base.unwrap_or(ReadableSize::mb(8)).0
+            }
+
+            pub fn level0_file_num_compaction_trigger(&self) -> i32 {
+                if let Some(level0_file_num_compaction_trigger) =
+                    self.level0_file_num_compaction_trigger
+                {
+                    level0_file_num_compaction_trigger
+                } else {
+                    4 // default value
+                }
+            }
+
+            pub fn write_buffer_size(&self) -> ReadableSize {
+                if let Some(write_buffer_size) = self.write_buffer_size {
+                    write_buffer_size
+                } else {
+                    ReadableSize::mb(128)
+                }
             }
 
             fn validate(&self) -> Result<(), Box<dyn Error>> {
@@ -467,7 +485,7 @@ macro_rules! write_into_metrics {
             .set($cf.read_amp_bytes_per_bit.into());
         $metrics
             .with_label_values(&[$tag, "write_buffer_size"])
-            .set($cf.write_buffer_size.0 as f64);
+            .set($cf.write_buffer_size().0 as f64);
         $metrics
             .with_label_values(&[$tag, "max_write_buffer_number"])
             .set($cf.max_write_buffer_number.into());
@@ -482,7 +500,7 @@ macro_rules! write_into_metrics {
             .set($cf.target_file_size_base() as f64);
         $metrics
             .with_label_values(&[$tag, "level0_file_num_compaction_trigger"])
-            .set($cf.level0_file_num_compaction_trigger.into());
+            .set($cf.level0_file_num_compaction_trigger().into());
         $metrics
             .with_label_values(&[$tag, "level0_slowdown_writes_trigger"])
             .set(
@@ -605,12 +623,13 @@ macro_rules! build_cf_opt {
             $opt.bottommost_zstd_compression_sample_size,
             1, // parallel_threads
         );
-        cf_opts.set_write_buffer_size($opt.write_buffer_size.0);
+        cf_opts.set_write_buffer_size($opt.write_buffer_size().0);
         cf_opts.set_max_write_buffer_number($opt.max_write_buffer_number);
         cf_opts.set_min_write_buffer_number_to_merge($opt.min_write_buffer_number_to_merge);
         cf_opts.set_max_bytes_for_level_base($opt.max_bytes_for_level_base.0);
         cf_opts.set_target_file_size_base($opt.target_file_size_base());
-        cf_opts.set_level_zero_file_num_compaction_trigger($opt.level0_file_num_compaction_trigger);
+        cf_opts
+            .set_level_zero_file_num_compaction_trigger($opt.level0_file_num_compaction_trigger());
         cf_opts.set_level_zero_slowdown_writes_trigger(
             $opt.level0_slowdown_writes_trigger.unwrap_or_default(),
         );
@@ -700,12 +719,12 @@ impl Default for DefaultCfConfig {
                 DBCompressionType::Zstd,
                 DBCompressionType::Zstd,
             ],
-            write_buffer_size: ReadableSize::mb(128),
+            write_buffer_size: None,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(512),
             target_file_size_base: None,
-            level0_file_num_compaction_trigger: 4,
+            level0_file_num_compaction_trigger: None,
             level0_slowdown_writes_trigger: None,
             level0_stop_writes_trigger: None,
             max_compaction_bytes: ReadableSize::gb(2),
@@ -868,12 +887,12 @@ impl Default for WriteCfConfig {
                 DBCompressionType::Zstd,
                 DBCompressionType::Zstd,
             ],
-            write_buffer_size: ReadableSize::mb(128),
+            write_buffer_size: None,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(512),
             target_file_size_base: None,
-            level0_file_num_compaction_trigger: 4,
+            level0_file_num_compaction_trigger: None,
             level0_slowdown_writes_trigger: None,
             level0_stop_writes_trigger: None,
             max_compaction_bytes: ReadableSize::gb(2),
@@ -990,12 +1009,12 @@ impl Default for LockCfConfig {
             ribbon_filter_above_level: None,
             read_amp_bytes_per_bit: 0,
             compression_per_level: [DBCompressionType::No; 7],
-            write_buffer_size: ReadableSize::mb(32),
+            write_buffer_size: None,
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(128),
             target_file_size_base: None,
-            level0_file_num_compaction_trigger: 1,
+            level0_file_num_compaction_trigger: Some(1),
             level0_slowdown_writes_trigger: None,
             level0_stop_writes_trigger: None,
             max_compaction_bytes: ReadableSize::gb(2),
@@ -1087,12 +1106,12 @@ impl Default for RaftCfConfig {
             ribbon_filter_above_level: None,
             read_amp_bytes_per_bit: 0,
             compression_per_level: [DBCompressionType::No; 7],
-            write_buffer_size: ReadableSize::mb(128),
+            write_buffer_size: Some(ReadableSize::mb(128)),
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(128),
             target_file_size_base: None,
-            level0_file_num_compaction_trigger: 1,
+            level0_file_num_compaction_trigger: Some(1),
             level0_slowdown_writes_trigger: None,
             level0_stop_writes_trigger: None,
             max_compaction_bytes: ReadableSize::gb(2),
@@ -1344,6 +1363,9 @@ impl DbConfig {
                 self.allow_concurrent_memtable_write.get_or_insert(true);
                 self.defaultcf.enable_compaction_guard.get_or_insert(true);
                 self.writecf.enable_compaction_guard.get_or_insert(true);
+                self.lockcf
+                    .write_buffer_size
+                    .get_or_insert(ReadableSize::mb(32));
             }
             EngineType::RaftKv2 => {
                 self.enable_multi_batch_write.get_or_insert(false);
@@ -1367,6 +1389,21 @@ impl DbConfig {
                 self.writecf.disable_write_stall = true;
                 self.lockcf.disable_write_stall = true;
                 self.raftcf.disable_write_stall = true;
+                self.writecf
+                    .level0_file_num_compaction_trigger
+                    .get_or_insert(2);
+                self.defaultcf
+                    .level0_file_num_compaction_trigger
+                    .get_or_insert(2);
+                self.writecf
+                    .write_buffer_size
+                    .get_or_insert(ReadableSize::mb(64));
+                self.defaultcf
+                    .write_buffer_size
+                    .get_or_insert(ReadableSize::mb(64));
+                self.lockcf
+                    .write_buffer_size
+                    .get_or_insert(ReadableSize::mb(8));
             }
         }
     }
@@ -1611,12 +1648,12 @@ impl Default for RaftDefaultCfConfig {
                 DBCompressionType::Zstd,
                 DBCompressionType::Zstd,
             ],
-            write_buffer_size: ReadableSize::mb(128),
+            write_buffer_size: Some(ReadableSize::mb(128)),
             max_write_buffer_number: 5,
             min_write_buffer_number_to_merge: 1,
             max_bytes_for_level_base: ReadableSize::mb(512),
             target_file_size_base: None,
-            level0_file_num_compaction_trigger: 4,
+            level0_file_num_compaction_trigger: Some(4),
             level0_slowdown_writes_trigger: None,
             level0_stop_writes_trigger: None,
             max_compaction_bytes: ReadableSize::gb(2),
@@ -3401,6 +3438,8 @@ impl TikvConfig {
             .optimize_for(self.coprocessor.region_split_size());
         self.raft_store
             .optimize_for(self.storage.engine == EngineType::RaftKv2);
+        self.server
+            .optimize_for(self.coprocessor.region_split_size());
         if self.storage.engine == EngineType::RaftKv2 {
             self.raft_store.store_io_pool_size = cmp::max(self.raft_store.store_io_pool_size, 1);
         }
@@ -5980,6 +6019,153 @@ mod tests {
             ReadableSize::mb(500)
         );
         assert!(default_cfg.coprocessor.enable_region_bucket());
+    }
+
+    #[test]
+    fn test_rocksdb_config() {
+        let mut default_cfg = TikvConfig::default();
+        default_cfg.storage.engine = EngineType::RaftKv;
+        default_cfg.validate().unwrap();
+        assert_eq!(
+            default_cfg
+                .rocksdb
+                .writecf
+                .level0_file_num_compaction_trigger(),
+            4
+        );
+        assert_eq!(
+            default_cfg
+                .rocksdb
+                .defaultcf
+                .level0_file_num_compaction_trigger(),
+            4
+        );
+        assert_eq!(
+            default_cfg
+                .rocksdb
+                .lockcf
+                .level0_file_num_compaction_trigger(),
+            1
+        );
+        assert_eq!(
+            default_cfg.rocksdb.lockcf.write_buffer_size(),
+            ReadableSize::mb(32)
+        );
+        assert_eq!(
+            default_cfg.rocksdb.writecf.write_buffer_size(),
+            ReadableSize::mb(128)
+        );
+        assert_eq!(
+            default_cfg.rocksdb.defaultcf.write_buffer_size(),
+            ReadableSize::mb(128)
+        );
+
+        let mut default_cfg = TikvConfig::default();
+        default_cfg.storage.engine = EngineType::RaftKv2;
+        default_cfg.validate().unwrap();
+        assert_eq!(
+            default_cfg
+                .rocksdb
+                .writecf
+                .level0_file_num_compaction_trigger(),
+            2
+        );
+        assert_eq!(
+            default_cfg
+                .rocksdb
+                .defaultcf
+                .level0_file_num_compaction_trigger(),
+            2
+        );
+        assert_eq!(
+            default_cfg
+                .rocksdb
+                .lockcf
+                .level0_file_num_compaction_trigger(),
+            1
+        );
+        assert_eq!(
+            default_cfg.rocksdb.lockcf.write_buffer_size(),
+            ReadableSize::mb(8)
+        );
+        assert_eq!(
+            default_cfg.rocksdb.writecf.write_buffer_size(),
+            ReadableSize::mb(64)
+        );
+        assert_eq!(
+            default_cfg.rocksdb.defaultcf.write_buffer_size(),
+            ReadableSize::mb(64)
+        );
+
+        let mut default_cfg = TikvConfig::default();
+        default_cfg.storage.engine = EngineType::RaftKv2;
+        default_cfg
+            .rocksdb
+            .writecf
+            .level0_file_num_compaction_trigger = Some(3);
+        default_cfg
+            .rocksdb
+            .defaultcf
+            .level0_file_num_compaction_trigger = Some(3);
+        default_cfg.rocksdb.lockcf.write_buffer_size = Some(ReadableSize::mb(10));
+        default_cfg.rocksdb.writecf.write_buffer_size = Some(ReadableSize::mb(20));
+        default_cfg.rocksdb.defaultcf.write_buffer_size = Some(ReadableSize::mb(30));
+        default_cfg.validate().unwrap();
+        assert_eq!(
+            default_cfg
+                .rocksdb
+                .defaultcf
+                .level0_file_num_compaction_trigger(),
+            3
+        );
+        assert_eq!(
+            default_cfg
+                .rocksdb
+                .writecf
+                .level0_file_num_compaction_trigger(),
+            3
+        );
+        assert_eq!(
+            default_cfg.rocksdb.lockcf.write_buffer_size(),
+            ReadableSize::mb(10)
+        );
+        assert_eq!(
+            default_cfg.rocksdb.writecf.write_buffer_size(),
+            ReadableSize::mb(20)
+        );
+        assert_eq!(
+            default_cfg.rocksdb.defaultcf.write_buffer_size(),
+            ReadableSize::mb(30)
+        );
+    }
+
+    #[test]
+    fn test_endpoint_config() {
+        let mut default_cfg = TikvConfig::default();
+        default_cfg.storage.engine = EngineType::RaftKv;
+        default_cfg.validate().unwrap();
+        assert_eq!(
+            default_cfg.server.end_point_request_max_handle_duration(),
+            ReadableDuration::secs(60)
+        );
+
+        let mut default_cfg = TikvConfig::default();
+        default_cfg.storage.engine = EngineType::RaftKv2;
+        default_cfg.validate().unwrap();
+        assert_eq!(
+            default_cfg.server.end_point_request_max_handle_duration(),
+            ReadableDuration::secs(1800)
+        );
+
+        let mut default_cfg = TikvConfig::default();
+        default_cfg.storage.engine = EngineType::RaftKv2;
+        default_cfg.server.end_point_request_max_handle_duration =
+            Some(ReadableDuration::secs(900));
+        default_cfg.validate().unwrap();
+        assert_eq!(
+            default_cfg.server.end_point_request_max_handle_duration(),
+            ReadableDuration::secs(900)
+        );
     }
 
     #[test]
