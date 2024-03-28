@@ -56,6 +56,7 @@ impl Filter for CommitToFilter {
 
 #[test_case(test_raftstore::new_node_cluster)]
 #[test_case(test_raftstore_v2::new_node_cluster)]
+#[test_case(test_raftstore::new_node_cluster_with_hybrid_engine)]
 fn test_replica_read_not_applied() {
     let mut cluster = new_cluster(0, 3);
 

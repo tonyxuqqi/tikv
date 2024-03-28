@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+use hybrid_engine::HybridEngine;
 use ::server::common::KvEngineBuilder;
 use collections::{HashMap, HashSet};
 use crossbeam::channel::TrySendError;
@@ -19,8 +20,7 @@ use encryption_export::DataKeyManager;
 use engine_rocks::{RocksCompactedEvent, RocksEngine, RocksStatistics};
 use engine_test::raft::RaftTestEngine;
 use engine_traits::{
-    Engines, Iterable, KvEngine, ManualCompactionOptions, Mutable, Peekable, RaftEngineReadOnly,
-    SnapshotContext, SyncMutable, WriteBatch, CF_DEFAULT, CF_RAFT,
+    Engines, Iterable, KvEngine, ManualCompactionOptions, Mutable, Peekable, RaftEngineReadOnly, SnapshotContext, SyncMutable, WriteBatch, CF_DEFAULT, CF_RAFT
 };
 use file_system::IoRateLimiter;
 use futures::{self, channel::oneshot, executor::block_on, future::BoxFuture, StreamExt};
@@ -2042,6 +2042,23 @@ pub trait RawEngine<EK: engine_traits::KvEngine>:
 }
 
 impl RawEngine<RocksEngine> for RocksEngine {
+    fn region_local_state(
+        &self,
+        region_id: u64,
+    ) -> engine_traits::Result<Option<RegionLocalState>> {
+        self.get_msg_cf(CF_RAFT, &keys::region_state_key(region_id))
+    }
+
+    fn raft_apply_state(&self, region_id: u64) -> engine_traits::Result<Option<RaftApplyState>> {
+        self.get_msg_cf(CF_RAFT, &keys::apply_state_key(region_id))
+    }
+
+    fn raft_local_state(&self, region_id: u64) -> engine_traits::Result<Option<RaftLocalState>> {
+        self.get_msg_cf(CF_RAFT, &keys::raft_state_key(region_id))
+    }
+}
+
+impl RawEngine<RocksEngine> for HybridEngine<RocksEngine, RangeCacheMemoryEngine> {
     fn region_local_state(
         &self,
         region_id: u64,
